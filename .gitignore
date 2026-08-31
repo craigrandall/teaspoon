@@ -2,9 +2,6 @@
 /target/
 **/*.rs.bk
 
-*.json
-!schema-example.json
-
 # Cargo lockfile is checked in for binaries (see Cargo.toml workspace members).
 # We do check it in here because the workspace produces shipping binaries.
 
