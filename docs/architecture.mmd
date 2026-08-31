@@ -1,0 +1,32 @@
+flowchart TB
+    CLI["CLI"]
+    SELECT["Input / traversal selection"]
+
+    PST["PST adapter"]
+    MSG["MSG adapter"]
+
+    MODEL["Normalized Outlook item"]
+
+    RENDER["Markdown renderer"]
+    META["Metadata writer"]
+    ATTACH["Attachment writer"]
+    DIAG["Extraction diagnostics"]
+
+    ARCHIVE["Output archive"]
+
+    CLI --> SELECT
+    SELECT --> PST
+    SELECT --> MSG
+
+    PST --> MODEL
+    MSG --> MODEL
+
+    MODEL --> RENDER
+    MODEL --> META
+    MODEL --> ATTACH
+    MODEL --> DIAG
+
+    RENDER --> ARCHIVE
+    META --> ARCHIVE
+    ATTACH --> ARCHIVE
+    DIAG --> ARCHIVE

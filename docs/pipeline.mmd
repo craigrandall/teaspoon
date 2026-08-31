@@ -1,0 +1,15 @@
+flowchart LR
+    INPUT[".pst / .msg"] --> ADAPTER["Format adapter"]
+    ADAPTER --> PROPS["Properties"]
+    ADAPTER --> RECIP["Recipients"]
+    ADAPTER --> BODY["Bodies"]
+    ADAPTER --> ATT["Attachments"]
+    PROPS --> NORMALIZE["Normalize"]
+    RECIP --> NORMALIZE
+    BODY --> NORMALIZE
+    ATT --> NORMALIZE
+    NORMALIZE --> ARCHIVE["Archive writer"]
+    ARCHIVE --> MD["message.md"]
+    ARCHIVE --> JSON["metadata.json"]
+    ARCHIVE --> BIN["attachments/*"]
+    NORMALIZE --> LOSS["Diagnostics / loss accounting"]

@@ -1,0 +1,33 @@
+{
+  "artifact": "teaspoon-m0-m1",
+  "date": "2026-08-29",
+  "milestones": [
+    "M0",
+    "M1"
+  ],
+  "m0": [
+    "architecture",
+    "domain-boundary decisions",
+    "verification strategy",
+    "format coverage matrix",
+    "Mermaid views",
+    "six proposed ADRs"
+  ],
+  "m1": [
+    "Rust PST dependency spike",
+    "PST open/store/IPM traversal",
+    "folder hierarchy traversal",
+    "message inventory",
+    "message property inspection",
+    "privacy-safe structural diagnostics"
+  ],
+  "not_claimed": [
+    "complete PST fidelity",
+    "attachment extraction",
+    "body extraction",
+    "Markdown export",
+    "MSG implementation",
+    "independent differential verification",
+    "behavioral execution against tsp-tester.pst"
+  ]
+}
