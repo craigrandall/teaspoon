@@ -1,6 +1,6 @@
 # ADR-0004: Loss-aware normalized representation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 
 ## Decision

@@ -1,6 +1,6 @@
 # ADR-0003: Standalone Rust execution
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 
 ## Decision
