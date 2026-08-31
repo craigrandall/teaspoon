@@ -6,11 +6,14 @@ Shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of 
 
 ## Current status
 
-**M0 — architecture/research baseline:** established.
+**M0 — architecture/research baseline:** established. Five of six ADRs are Accepted; ADR-0006 (independent differential verification) remains Proposed until that verification work actually happens.
 
-**M1 — PST feasibility spike:** a small read-only CLI is provided to exercise the Microsoft Rust PST implementation: open a PST, reach the message store/IPM subtree, traverse folders, enumerate messages, and inspect raw message properties.
+**M1 — PST feasibility spike:** a small read-only CLI (`tsp`) exercises the Microsoft Rust PST implementation (`outlook-pst` v1.2.0): open a PST, reach the message store/IPM subtree, traverse folders, enumerate messages, and inspect raw message properties, plus aggregate message-class, body-availability, recipient-count, and attachment-count diagnostics — all without emitting any message content.
 
-This is deliberately **not** the production miner and does not yet emit Markdown.
+- P1 (naming), P2 (privacy-safe diagnostics), and P3 (behavioral run against a real PST fixture) are complete; see `docs/verification/m1-results.md`.
+- P4a (the extended aggregate diagnostics above) is implemented but not yet compiled/run — see the "unverified pending Windows run" note in `docs/verification/m1-results.md`.
+
+This is deliberately **not** the production miner and does not yet emit Markdown, extract body/attachment content, or classify recipients as To/CC/BCC.
 
 ## Design principles
 

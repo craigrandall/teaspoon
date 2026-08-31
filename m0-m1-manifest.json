@@ -1,6 +1,6 @@
 {
   "artifact": "teaspoon-m0-m1",
-  "date": "2026-08-29",
+  "date": "2026-08-31",
   "milestones": [
     "M0",
     "M1"
@@ -11,23 +11,27 @@
     "verification strategy",
     "format coverage matrix",
     "Mermaid views",
-    "six proposed ADRs"
+    "six accepted ADRs"
   ],
   "m1": [
-    "Rust PST dependency spike",
+    "Rust PST dependency spike (outlook-pst v1.2.0)",
     "PST open/store/IPM traversal",
     "folder hierarchy traversal",
     "message inventory",
     "message property inspection",
-    "privacy-safe structural diagnostics"
+    "privacy-safe structural diagnostics (P2)",
+    "behavioral execution against tsp-tester.pst (P3): folders=9, messages=49, message_open_errors=0, folder_open_errors=0, property_values=3674",
+    "extended aggregate diagnostics: message class, body-type availability, recipient counts, attachment counts (P4a, implemented, pending Windows quality-gate verification)"
   ],
   "not_claimed": [
     "complete PST fidelity",
-    "attachment extraction",
-    "body extraction",
+    "attachment extraction (byte content)",
+    "body extraction (content, as opposed to availability)",
+    "recipient type (To/CC/BCC) classification",
+    "attachment classification (zero-byte / embedded-message / inline)",
     "Markdown export",
     "MSG implementation",
     "independent differential verification",
-    "behavioral execution against tsp-tester.pst"
+    "P4a Windows quality-gate and fixture-run confirmation"
   ]
 }

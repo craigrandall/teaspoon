@@ -1,6 +1,6 @@
 # ADR-0002: Microsoft specifications as normative format authority
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 
 ## Decision
