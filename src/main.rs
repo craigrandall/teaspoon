@@ -115,14 +115,8 @@ fn main() -> Result<()> {
     println!("recipients_to={}", totals.recipients_to);
     println!("recipients_cc={}", totals.recipients_cc);
     println!("recipients_bcc={}", totals.recipients_bcc);
-    println!(
-        "recipients_type_other={}",
-        totals.recipients_type_other
-    );
-    println!(
-        "recipients_type_unknown={}",
-        totals.recipients_type_unknown
-    );
+    println!("recipients_type_other={}", totals.recipients_type_other);
+    println!("recipients_type_unknown={}", totals.recipients_type_unknown);
 
     // --- P4b: attachment classification -------------------------------------
     println!(
@@ -134,10 +128,7 @@ fn main() -> Result<()> {
         "attachments_with_content_id={}",
         totals.attachments_with_content_id
     );
-    println!(
-        "attachments_method_none={}",
-        totals.attachments_method_none
-    );
+    println!("attachments_method_none={}", totals.attachments_method_none);
     println!(
         "attachments_method_by_value={}",
         totals.attachments_method_by_value
@@ -349,9 +340,7 @@ fn record_attachment_method(totals: &mut Totals, method: Option<i32>) {
         Some(ATTACH_METHOD_BY_REFERENCE_RESOLVE) => {
             totals.attachments_method_by_reference_resolve += 1
         }
-        Some(ATTACH_METHOD_BY_REFERENCE_ONLY) => {
-            totals.attachments_method_by_reference_only += 1
-        }
+        Some(ATTACH_METHOD_BY_REFERENCE_ONLY) => totals.attachments_method_by_reference_only += 1,
         Some(ATTACH_METHOD_EMBEDDED_MESSAGE) => totals.attachments_method_embedded_message += 1,
         Some(ATTACH_METHOD_OLE) => totals.attachments_method_ole += 1,
         Some(_) => totals.attachments_method_other += 1,
@@ -380,7 +369,10 @@ fn record_attachment_content_id_presence(totals: &mut Totals, has_content_id: bo
 /// descriptors, so its value can be looked up per row via [`read_i32_at`] or
 /// a presence check.
 fn column_index(context: &TableContextInfo, prop_id: u16) -> Option<usize> {
-    context.columns().iter().position(|c| c.prop_id() == prop_id)
+    context
+        .columns()
+        .iter()
+        .position(|c| c.prop_id() == prop_id)
 }
 
 /// Reads a single row's value at `column_idx` as a 32-bit integer, or `None`
@@ -426,8 +418,7 @@ fn inspect_recipients(message: &dyn PstMessage, totals: &mut Totals) {
             continue;
         };
 
-        let recipient_type =
-            type_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
+        let recipient_type = type_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
         record_recipient_type(totals, recipient_type);
     }
 
