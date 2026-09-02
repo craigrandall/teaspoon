@@ -8,12 +8,12 @@ Shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of 
 
 **M0 — architecture/research baseline:** established. Five of six ADRs are Accepted; ADR-0006 (independent differential verification) remains Proposed until that verification work actually happens.
 
-**M1 — PST feasibility spike:** a small read-only CLI (`tsp`) exercises the Microsoft Rust PST implementation (`outlook-pst` v1.2.0): open a PST, reach the message store/IPM subtree, traverse folders, enumerate messages, and inspect raw message properties, plus aggregate message-class, body-availability, recipient-count, and attachment-count diagnostics — all without emitting any message content.
+**M1 — PST feasibility spike:** a small read-only CLI (`tsp`) exercises the Microsoft Rust PST implementation (`outlook-pst` v1.2.0): open a PST, reach the message store/IPM subtree, traverse folders, enumerate messages, and inspect raw message properties, plus aggregate message-class, body-availability, recipient-count/type, and attachment-count/classification diagnostics — all without emitting any message content.
 
-- P1 (naming), P2 (privacy-safe diagnostics), and P3 (behavioral run against a real PST fixture) are complete; see `docs/verification/m1-results.md`.
-- P4a (the extended aggregate diagnostics above) is implemented but not yet compiled/run — see the "unverified pending Windows run" note in `docs/verification/m1-results.md`.
+- P1 (naming), P2 (privacy-safe diagnostics), P3 (behavioral run against a real PST fixture), and P4a (extended aggregate diagnostics) are complete and verified on Windows; see `docs/verification/m1-results.md`.
+- P4b (recipient-type and attachment classification) is implemented against the confirmed `outlook-pst` v1.2.0 column-read API, but not yet compiled/run — see the "unverified pending Windows run" note in `docs/verification/m1-results.md`.
 
-This is deliberately **not** the production miner and does not yet emit Markdown, extract body/attachment content, or classify recipients as To/CC/BCC.
+This is deliberately **not** the production miner and does not yet emit Markdown or extract body/attachment content.
 
 ## Design principles
 

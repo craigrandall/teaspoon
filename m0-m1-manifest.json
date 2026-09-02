@@ -11,7 +11,7 @@
     "verification strategy",
     "format coverage matrix",
     "Mermaid views",
-    "six accepted ADRs"
+    "six accepted ADRs (relocated to /ADRs, MADR template)"
   ],
   "m1": [
     "Rust PST dependency spike (outlook-pst v1.2.0)",
@@ -21,17 +21,18 @@
     "message property inspection",
     "privacy-safe structural diagnostics (P2)",
     "behavioral execution against tsp-tester.pst (P3): folders=9, messages=49, message_open_errors=0, folder_open_errors=0, property_values=3674",
-    "extended aggregate diagnostics: message class, body-type availability, recipient counts, attachment counts (P4a, implemented, pending Windows quality-gate verification)"
+    "extended aggregate diagnostics: message class, body-type availability, recipient counts, attachment counts (P4a): message_class IPM.Note=49, bodies_html=49/49 (bodies_plain=0, bodies_rtf=0 -- fixture gap), messages_with_attachments=22/49, total_attachments=76, max_attachments=16",
+    "recipient-type and attachment classification (P4b, implemented against confirmed outlook-pst v1.2.0 column-read API, pending Windows quality-gate verification)"
   ],
   "not_claimed": [
     "complete PST fidelity",
     "attachment extraction (byte content)",
     "body extraction (content, as opposed to availability)",
-    "recipient type (To/CC/BCC) classification",
-    "attachment classification (zero-byte / embedded-message / inline)",
+    "opening/traversing embedded messages (counted via attachment method, not yet opened)",
+    "reliable inline-image detection (content-ID presence is a heuristic)",
     "Markdown export",
     "MSG implementation",
     "independent differential verification",
-    "P4a Windows quality-gate and fixture-run confirmation"
+    "P4b Windows quality-gate and fixture-run confirmation"
   ]
 }
