@@ -10,10 +10,10 @@ Shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of 
 
 **M1 — PST feasibility spike:** a small read-only CLI (`tsp`) exercises the Microsoft Rust PST implementation (`outlook-pst` v1.2.0): open a PST, reach the message store/IPM subtree, traverse folders, enumerate messages, and inspect raw message properties, plus aggregate message-class, body-availability, recipient-count/type, and attachment-count/classification diagnostics — all without emitting any message content.
 
-- P1 (naming), P2 (privacy-safe diagnostics), P3 (behavioral run against a real PST fixture), P4a (extended aggregate diagnostics), and P4b (recipient-type and attachment classification) are all complete and verified on Windows; see `docs/verification/m1-results.md`.
-- `tsp-tester.pst` has now proven every currently-implemented read path runs cleanly end-to-end, but doesn't exercise several dimensions (plain/RTF bodies, BCC recipients, non-by-value attachment storage) — see the representativeness assessment in `docs/verification/m1-results.md`.
+- P1 through P4b are complete and verified on Windows against a real PST fixture that was deliberately enhanced (v0.1.4.3) to cover plain/RTF bodies, a BCC recipient, an embedded-message attachment, and an OLE attachment — see `docs/verification/m1-results.md`.
+- Two minor gaps remain unverified against real data (zero-byte attachments, by-reference attachments); the code exists for both but has never matched a real row.
 
-This is deliberately **not** the production miner and does not yet emit Markdown or extract body/attachment content.
+This is deliberately **not** the production miner and does not yet emit Markdown, extract body/attachment content, or open embedded messages (though one now exists in the fixture to test against).
 
 ## Design principles
 
