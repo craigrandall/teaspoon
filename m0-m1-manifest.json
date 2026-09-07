@@ -13,6 +13,7 @@
     "Mermaid views",
     "six accepted ADRs (relocated to /ADRs, MADR template)"
   ],
+  "status": "M1 complete, within the limits of outlook-pst v1.2.0's public API (confirmed 2026-09-07)",
   "m1": [
     "Rust PST dependency spike (outlook-pst v1.2.0)",
     "PST open/store/IPM traversal",
@@ -22,13 +23,14 @@
     "privacy-safe structural diagnostics (P2)",
     "extended aggregate diagnostics (P4a)",
     "recipient-type and attachment classification (P4b)",
-    "enhanced tsp-tester.pst fixture (v0.1.4.3), same code, closing 5 of 7 representativeness gaps: bodies_plain=1/57, bodies_rtf=1/57, recipients_bcc=1, attachments_method_embedded_message=1, attachments_method_ole=1 (folders=10, messages=57, 0 errors, property_values=4096)"
+    "enhanced tsp-tester.pst fixture (v0.1.4.3), same code, closing 5 of 7 representativeness gaps: bodies_plain=1/57, bodies_rtf=1/57, recipients_bcc=1, attachments_method_embedded_message=1, attachments_method_ole=1 (folders=10, messages=57, 0 errors, property_values=4096)",
+    "P4c investigated: opening/traversing embedded-message or OLE attachment content found not achievable via outlook-pst v1.2.0's public API (Store::open_message always returns dyn Message; Attachment::read requires the concrete Unicode/AnsiMessage type, which the public API never exposes) -- accepted as the practical ceiling of M1, not a defect"
   ],
   "not_claimed": [
     "complete PST fidelity",
     "attachment extraction (byte content)",
     "body extraction (content, as opposed to availability)",
-    "opening/traversing the embedded message now known to exist in the fixture (classification counts it; nothing opens it yet)",
+    "opening/traversing the embedded message now known to exist in the fixture -- investigated and found not achievable via the dependency's public API, not merely unattempted",
     "reading OLE attachment content (classification counts it; nothing reads it yet)",
     "zero-byte attachment handling against a real row (code exists; fixture-construction goal deliberately dropped 2026-09-07 as empirically impractical to compose via Gmail/Outlook -- see docs/verification/m1-results.md)",
     "by-reference attachment handling, any sub-method, against a real row (code exists; fixture-construction goal deliberately dropped 2026-09-07 as obsolete in modern composition -- see docs/verification/m1-results.md)",
