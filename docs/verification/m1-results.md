@@ -86,12 +86,58 @@ hold exactly.
 | BCC recipient | 0 | 1 | **Closed** |
 | Embedded-message attachment | 0 | 1 | **Closed** |
 | OLE attachment | 0 | 1 | **Closed** |
-| Zero-byte attachment | 0 | 0 | Still open |
-| By-reference attachment (any of the 3 sub-methods) | 0 | 0 | Still open |
+| Zero-byte attachment | 0 | 0 | **Deliberately excluded from fixture goals — see rationale below** |
+| By-reference attachment (any of the 3 sub-methods) | 0 | 0 | **Deliberately excluded from fixture goals — see rationale below** |
 
 5 of the 7 gaps identified after P4b are now closed with real evidence,
 using the same code — no code changes were made between v0.1.4.2 and
-v0.1.4.3, only the fixture changed.
+v0.1.4.3, only the fixture changed. The remaining 2 are excluded outright
+(see below), so this fixture is now considered adequate against every
+dimension this project set out to cover.
+
+## Why zero-byte and by-reference attachments were dropped as fixture goals (2026-09-07)
+
+Both were deliberately removed from the fixture-construction goal, not
+merely left unattempted. This is a project decision, documented here so it
+isn't mistaken for an oversight later.
+
+**Zero-byte attachment.** Empirically demonstrated, with primary evidence,
+that a literal 0-byte file cannot be turned into a genuine 0-byte
+attachment through either of the two mail clients available for
+constructing this fixture:
+
+- Gmail refuses outright: attaching a confirmed 0-byte file produces the
+  error "This file is 0 bytes, so it will not be attached."
+- Classic Outlook accepts it but silently pads it: the same 0-byte source
+  file appears as a 117-byte attachment once sent, because Outlook wraps
+  every attachment in a MAPI/TNEF container (attachment method marker,
+  filename, internal property headers) that has a non-zero minimum size
+  even when the payload is empty — the same mechanism behind `winmail.dat`
+  bloat.
+
+This does not prove `PidTagAttachSize == 0` is impossible in every PST ever
+produced (by-reference attachments, which store no byte content, or a
+malformed/non-Outlook-authored PST, could still produce one). It does
+establish that constructing this case through normal composition is
+impractical, and that it is not representative of realistic
+Outlook-authored content, which is what `tsp-tester.pst` is for. The
+`attachments_zero_byte` classification code in `tsp` is retained (see
+`record_attachment_size` in `src/main.rs`) as inexpensive, spec-correct
+protection against any PST that does contain one — only the goal of
+constructing an example for the fixture was dropped.
+
+**By-reference attachment (any of `ATTACH_BY_REFERENCE`,
+`ATTACH_BY_REFERENCE_RESOLVE`, `ATTACH_BY_REFERENCE_ONLY`).** This MAPI
+attachment method was never exposed through standard compose UI in Outlook
+or any modern webmail client; it required programmatic MAPI-level tooling
+even when it was in active use. Modern "cloud attachment" functionality
+(e.g. OneDrive links in Outlook) is implemented as a hyperlink/body-content
+mechanism, not as a classic MAPI by-reference attachment, so it doesn't
+produce this case either. Constructing a genuine example would require
+MAPI-level tooling disproportionate to its relevance in realistic modern
+data. The `attachments_method_by_reference*` classification code in `tsp`
+is retained for the same reason as above — only the fixture-construction
+goal was dropped.
 
 ## New opportunity this unlocks
 
@@ -114,10 +160,11 @@ No claim is made that teaspoon has proven:
   fixture (classification counts it; nothing opens it yet);
 - reading OLE attachment content (classification counts it; nothing reads
   it yet);
-- zero-byte attachment handling against a real row (code exists, fixture
-  still has none);
-- by-reference attachment handling (any of the 3 sub-methods) against a
-  real row (code exists, fixture still has none);
+- zero-byte attachment handling against a real row (code exists; fixture
+  construction goal deliberately dropped — see rationale above);
+- by-reference attachment handling, any of the 3 sub-methods, against a
+  real row (code exists; fixture construction goal deliberately dropped —
+  see rationale above);
 - reliable inline-image detection (content-ID presence is a heuristic,
   weakly exercised: 2/79 attachments);
 - named-property semantic normalization;
