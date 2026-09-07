@@ -406,7 +406,7 @@ fn inspect_recipients(message: &dyn PstMessage, totals: &mut Totals) {
         record_recipients(totals, 0);
         return;
     };
-    let table: &dyn TableContext = table_rc;
+    let table: &dyn TableContext = table_rc.as_ref();
     let context = table.context();
     let type_idx = column_index(context, PROP_RECIPIENT_TYPE);
 
@@ -430,7 +430,7 @@ fn inspect_attachments(message: &dyn PstMessage, totals: &mut Totals) {
         record_attachments(totals, 0);
         return;
     };
-    let table: &dyn TableContext = table_rc;
+    let table: &dyn TableContext = table_rc.as_ref();
     let context = table.context();
     let size_idx = column_index(context, PROP_ATTACH_SIZE);
     let method_idx = column_index(context, PROP_ATTACH_METHOD);
