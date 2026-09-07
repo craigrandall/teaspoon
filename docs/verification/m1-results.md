@@ -2,11 +2,16 @@
 
 ## Status
 
-**P1 through P4b are complete and verified on Windows against a real PST
-fixture that was deliberately enhanced (v0.1.4.3) to close most of the
-representativeness gaps identified in the original `tsp-tester.pst`.** Two
-minor gaps remain (see below). No code changes were required to observe
-this new evidence — the enhancement was to the fixture, not the code.
+**Complete, within the limits of `outlook-pst` v1.2.0's public API.** P1
+through P4b are done and verified on Windows against a real PST fixture
+deliberately enhanced to close 5 of 7 identified representativeness gaps.
+The remaining 2 (zero-byte and by-reference attachments) were explicitly
+excluded as non-goals (see below). Opening/traversing embedded-message or
+OLE attachment content was investigated for P4c and found to be beyond
+what the dependency's public API supports (see "P4c" section below). This
+is accepted as the practical ceiling of M1's PST read capability for now,
+confirmed 2026-09-07. M1 is not blocked or failing — it has reached the
+limit of what this specific dependency, used as intended, can prove.
 
 ## What M1 establishes
 
@@ -139,14 +144,44 @@ data. The `attachments_method_by_reference*` classification code in `tsp`
 is retained for the same reason as above — only the fixture-construction
 goal was dropped.
 
-## New opportunity this unlocks
+## P4c: investigated and found not achievable via the public API (2026-09-07)
 
-With a real `attachments_method_embedded_message=1` now in the fixture,
-**opening and traversing that embedded message as a nested message is now
-a testable capability**, whereas before it was explicitly "unreachable with
-current fixture." This was not previously buildable against real data; it
-is now. See "Next best action" framing in project correspondence for
-whether/when to pursue this (P4c candidate) — not decided here.
+With a real `attachments_method_embedded_message=1` in the enhanced fixture,
+opening and traversing that embedded message as a nested message became
+testable for the first time, so it was investigated. The finding, traced
+directly from `outlook-pst` v1.2.0's own `cargo doc` output:
+
+- The `Attachment` trait exists (`ltp`-adjacent `messaging::attachment`
+  module) with a `message(&self) -> Rc<dyn Message>` accessor — this is the
+  intended embedded-message mechanism.
+- The only way to construct an `Attachment` is
+  `UnicodeAttachment::read(message: Rc<UnicodeMessage>, sub_node: NodeId,
+  prop_ids) -> Result<Rc<Self>>` (and the `AnsiAttachment` equivalent for
+  legacy PSTs) — both require the **concrete** `Rc<UnicodeMessage>` /
+  `Rc<AnsiMessage>` type.
+- `Store::open_message()` — the only way to obtain a message at all — is
+  declared in the `Store` trait itself as returning `Result<Rc<dyn
+  Message>>`. This holds regardless of whether it's called through a
+  concrete `UnicodeStore`/`AnsiStore` or the type-erased `dyn Store`
+  `outlook_pst::open_store()` returns; the trait method's signature fixes
+  the return type.
+- `Message`/`Store` have no `Any` supertrait or `as_any()` method, so
+  there is no supported way to downcast `Rc<dyn Message>` back to a
+  concrete type.
+
+**Conclusion: `outlook-pst` v1.2.0's public API has no supported path from
+"a message and its attachment table" to "an `Attachment` object with a
+usable `.message()` accessor."** The `Attachment` trait and its concrete
+implementations exist in the crate but aren't reachable through the
+`Store`/`Folder`/`Message` workflow the rest of `tsp` uses. This is
+accepted as a hard ceiling of the dependency's current public API, not
+pursued further via unsafe workarounds or a lower-level (`ndb`/`ltp`)
+reimplementation, both of which were considered and rejected as
+disproportionate to what P4c set out to prove. `tsp` can *detect and
+count* embedded-message and OLE attachments (P4b); it cannot open them.
+
+This may be worth raising with the `outlook-pst-rs` maintainers as a
+possible gap in a future crate version; not pursued as of this writing.
 
 ## What remains unproven
 
@@ -156,10 +191,10 @@ No claim is made that teaspoon has proven:
 - body *extraction* (only body-type *availability* is established);
 - attachment *extraction* (only attachment *counts and classification
   counts* are established — never attachment bytes);
-- opening/traversing the embedded message now known to exist in the
-  fixture (classification counts it; nothing opens it yet);
-- reading OLE attachment content (classification counts it; nothing reads
-  it yet);
+- opening/traversing the embedded message known to exist in the fixture —
+  investigated for P4c and found not achievable via `outlook-pst` v1.2.0's
+  public API (see "P4c" above); classification still counts it correctly;
+- reading OLE attachment content — same constraint as embedded messages;
 - zero-byte attachment handling against a real row (code exists; fixture
   construction goal deliberately dropped — see rationale above);
 - by-reference attachment handling, any of the 3 sub-methods, against a
