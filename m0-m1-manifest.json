@@ -1,6 +1,6 @@
 {
   "artifact": "teaspoon-m0-m1",
-  "date": "2026-08-31",
+  "date": "2026-09-06",
   "milestones": [
     "M0",
     "M1"
@@ -20,20 +20,19 @@
     "message inventory",
     "message property inspection",
     "privacy-safe structural diagnostics (P2)",
-    "behavioral execution against tsp-tester.pst (P3): folders=9, messages=49, message_open_errors=0, folder_open_errors=0, property_values=3674",
-    "extended aggregate diagnostics (P4a): message_class IPM.Note=49, bodies_html=49/49 (bodies_plain=0, bodies_rtf=0 -- fixture gap), messages_with_attachments=22/49, total_attachments=76, max_attachments=16",
-    "recipient-type and attachment classification (P4b), verified on Windows against tsp-tester.pst: recipients_to=49, recipients_cc=10, recipients_bcc=0 (fixture gap), attachments_method_by_value=76/76 (by-reference/embedded-message/OLE all 0 -- fixture gap), attachments_zero_byte=0 (fixture gap), attachments_with_content_id=2/76"
+    "extended aggregate diagnostics (P4a)",
+    "recipient-type and attachment classification (P4b)",
+    "enhanced tsp-tester.pst fixture (v0.1.4.3), same code, closing 5 of 7 representativeness gaps: bodies_plain=1/57, bodies_rtf=1/57, recipients_bcc=1, attachments_method_embedded_message=1, attachments_method_ole=1 (folders=10, messages=57, 0 errors, property_values=4096)"
   ],
   "not_claimed": [
     "complete PST fidelity",
     "attachment extraction (byte content)",
     "body extraction (content, as opposed to availability)",
-    "plain-text or RTF body handling against a real message (code exists, fixture has none)",
-    "BCC recipient handling against a real row (code exists, fixture has none)",
-    "by-reference / embedded-message / OLE attachment handling against a real row (code exists, fixture has none)",
-    "zero-byte attachment handling against a real row (code exists, fixture has none)",
-    "opening/traversing embedded messages (unreachable with current fixture: 0 embedded-message attachments exist in it)",
-    "reliable inline-image detection (content-ID presence is a heuristic, weakly exercised: 2/76)",
+    "opening/traversing the embedded message now known to exist in the fixture (classification counts it; nothing opens it yet)",
+    "reading OLE attachment content (classification counts it; nothing reads it yet)",
+    "zero-byte attachment handling against a real row (code exists, fixture still has none)",
+    "by-reference attachment handling, any sub-method, against a real row (code exists, fixture still has none)",
+    "reliable inline-image detection (content-ID presence is a heuristic, weakly exercised: 2/79)",
     "Markdown export",
     "MSG implementation",
     "independent differential verification"
