@@ -18,8 +18,8 @@
 | Attachments (by-value) | Yes | Per-row classification | N/A | Planned | Yes (P4b: 77/79) |
 | Attachments (embedded-message) | Yes | Per-row classification | N/A | Planned | Yes, classification only (P4b: 1, v0.1.4.3) |
 | Attachments (OLE) | Yes | Per-row classification | N/A | Planned | Yes, classification only (P4b: 1, v0.1.4.3) |
-| Attachments (by-reference, any sub-method) | Yes | Per-row classification | N/A | Planned | Code path exists; never matched a real row (0 in fixture) |
-| Attachments (zero-byte) | Yes | Per-row classification | N/A | Planned | Code path exists; never matched a real row (0 in fixture) |
+| Attachments (by-reference, any sub-method) | Yes | Per-row classification | N/A | Planned | Code exists; fixture-construction goal deliberately dropped (obsolete in modern composition — see docs/verification/m1-results.md) |
+| Attachments (zero-byte) | Yes | Per-row classification | N/A | Planned | Code exists; fixture-construction goal deliberately dropped (empirically impractical to compose — see docs/verification/m1-results.md) |
 | Attachments (inline heuristic) | Yes | Content-ID presence only | N/A | Planned | Weakly exercised (2/79 attachments) |
 | Attachment content (bytes) | Yes | Not yet surfaced | N/A | Planned | Pending |
 | Embedded messages (opened/traversed as nested message) | Yes | Not yet surfaced | N/A | Planned | Pending — now reachable: fixture has 1 real embedded-message attachment as of v0.1.4.3 |
