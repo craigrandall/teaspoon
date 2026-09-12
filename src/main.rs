@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use msg_parser::Outlook;
 use outlook_pst::{
     ltp::{
         prop_context::PropertyValue,
@@ -11,6 +12,72 @@ use outlook_pst::{
     messaging::{folder::Folder as PstFolder, message::Message as PstMessage, store::Store},
     ndb::node_id::NodeId,
 };
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "tsp",
+    about = "Privacy-safe inventory for the teaspoon Outlook message miner (PST or MSG)"
+)]
+struct Args {
+    /// A .pst file, a single .msg file, or a directory of .msg files to inspect.
+    input: PathBuf,
+}
+
+enum InputKind {
+    Pst,
+    Msg(Vec<PathBuf>),
+}
+
+/// Classifies the input by extension (or, for a directory, by scanning for
+/// `.msg` files directly inside it -- not recursive). Never includes the
+/// input path itself in any error message, consistent with the rest of
+/// this tool's privacy-safe diagnostic output.
+fn classify_input(path: &Path) -> Result<InputKind> {
+    if path.is_dir() {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(path)
+            .context("failed to read input directory")?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("msg"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            anyhow::bail!("input directory contains no .msg files");
+        }
+        return Ok(InputKind::Msg(files));
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+
+    match ext.as_deref() {
+        Some("pst") => Ok(InputKind::Pst),
+        Some("msg") => Ok(InputKind::Msg(vec![path.to_path_buf()])),
+        _ => anyhow::bail!(
+            "unsupported input: expected a .pst file, a .msg file, or a directory of .msg files"
+        ),
+    }
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    match classify_input(&args.input)? {
+        InputKind::Pst => run_pst_diagnostic(&args.input),
+        InputKind::Msg(files) => run_msg_diagnostic(&files),
+    }
+}
+
+// =============================================================================
+// PST diagnostic (M1, unchanged in behavior from v0.1.4.3)
+// =============================================================================
 
 /// MS-OXPROPS property identifiers used only to check *presence* or read a
 /// small, bounded integer/enum value -- never to read or print free-form
@@ -38,20 +105,8 @@ const ATTACH_METHOD_BY_REFERENCE_ONLY: i32 = 4;
 const ATTACH_METHOD_EMBEDDED_MESSAGE: i32 = 5;
 const ATTACH_METHOD_OLE: i32 = 6;
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "tsp",
-    about = "Privacy-safe PST inventory for the teaspoon Outlook message miner"
-)]
-struct Args {
-    /// PST file to inspect.
-    pst: PathBuf,
-}
-
-fn main() -> Result<()> {
-    let args = Args::parse();
-
-    let store = outlook_pst::open_store(&args.pst).context("failed to open PST")?;
+fn run_pst_diagnostic(path: &Path) -> Result<()> {
+    let store = outlook_pst::open_store(path).context("failed to open PST")?;
 
     // Deliberately do not print the input path or PST display name. Both can
     // disclose information about the user or their mailbox.
@@ -67,10 +122,11 @@ fn main() -> Result<()> {
 
     println!("ipm_subtree=ok");
 
-    let mut totals = Totals::default();
+    let mut totals = PstTotals::default();
     walk_folder(store.as_ref(), ipm.as_ref(), &mut totals)?;
 
     println!("inventory=privacy_safe");
+    println!("input_kind=pst");
     println!("ipm_subtree=opened");
     println!("folders={}", totals.folders);
     println!("messages={}", totals.messages);
@@ -163,7 +219,7 @@ fn main() -> Result<()> {
 }
 
 #[derive(Default)]
-struct Totals {
+struct PstTotals {
     folders: u64,
     messages: u64,
     message_open_errors: u64,
@@ -210,7 +266,7 @@ struct Totals {
     attachments_method_unknown: u64,
 }
 
-fn walk_folder(store: &dyn Store, folder: &dyn PstFolder, totals: &mut Totals) -> Result<()> {
+fn walk_folder(store: &dyn Store, folder: &dyn PstFolder, totals: &mut PstTotals) -> Result<()> {
     totals.folders += 1;
 
     if let Some(contents) = folder.contents_table() {
@@ -259,7 +315,7 @@ fn walk_folder(store: &dyn Store, folder: &dyn PstFolder, totals: &mut Totals) -
     Ok(())
 }
 
-fn inspect_message(message: &dyn PstMessage, totals: &mut Totals) {
+fn inspect_message(message: &dyn PstMessage, totals: &mut PstTotals) {
     let properties = message.properties();
     totals.property_values += properties.iter().count() as u64;
 
@@ -280,7 +336,7 @@ fn inspect_message(message: &dyn PstMessage, totals: &mut Totals) {
 /// has no readable `PidTagMessageClass` property; that is counted separately
 /// rather than silently dropped, consistent with the project's no-silent-loss
 /// principle (ADR: loss-aware-normalized-representation).
-fn record_message_class(totals: &mut Totals, class: std::io::Result<String>) {
+fn record_message_class(totals: &mut PstTotals, class: std::io::Result<String>) {
     match class {
         Ok(class) => *totals.message_classes.entry(class).or_insert(0) += 1,
         Err(_) => totals.message_class_read_errors += 1,
@@ -289,7 +345,7 @@ fn record_message_class(totals: &mut Totals, class: std::io::Result<String>) {
 
 /// Records body-*availability* only. Never receives or touches actual body
 /// content -- callers must pass presence booleans, not the property values.
-fn record_body_flags(totals: &mut Totals, has_plain: bool, has_html: bool, has_rtf: bool) {
+fn record_body_flags(totals: &mut PstTotals, has_plain: bool, has_html: bool, has_rtf: bool) {
     if has_plain {
         totals.bodies_plain += 1;
     }
@@ -301,7 +357,7 @@ fn record_body_flags(totals: &mut Totals, has_plain: bool, has_html: bool, has_r
     }
 }
 
-fn record_recipients(totals: &mut Totals, count: u64) {
+fn record_recipients(totals: &mut PstTotals, count: u64) {
     if count > 0 {
         totals.messages_with_recipients += 1;
     }
@@ -309,7 +365,7 @@ fn record_recipients(totals: &mut Totals, count: u64) {
     totals.max_recipients = totals.max_recipients.max(count);
 }
 
-fn record_attachments(totals: &mut Totals, count: u64) {
+fn record_attachments(totals: &mut PstTotals, count: u64) {
     if count > 0 {
         totals.messages_with_attachments += 1;
     }
@@ -319,7 +375,7 @@ fn record_attachments(totals: &mut Totals, count: u64) {
 
 /// Buckets a single recipient row by its `PidTagRecipientType` value.
 /// `None` means the property was missing or not a 32-bit integer on that row.
-fn record_recipient_type(totals: &mut Totals, recipient_type: Option<i32>) {
+fn record_recipient_type(totals: &mut PstTotals, recipient_type: Option<i32>) {
     match recipient_type {
         Some(RECIPIENT_TYPE_ORIG) => totals.recipients_orig += 1,
         Some(RECIPIENT_TYPE_TO) => totals.recipients_to += 1,
@@ -332,7 +388,7 @@ fn record_recipient_type(totals: &mut Totals, recipient_type: Option<i32>) {
 
 /// Buckets a single attachment row by its `PidTagAttachMethod` value.
 /// `None` means the property was missing or not a 32-bit integer on that row.
-fn record_attachment_method(totals: &mut Totals, method: Option<i32>) {
+fn record_attachment_method(totals: &mut PstTotals, method: Option<i32>) {
     match method {
         Some(ATTACH_METHOD_NONE) => totals.attachments_method_none += 1,
         Some(ATTACH_METHOD_BY_VALUE) => totals.attachments_method_by_value += 1,
@@ -350,7 +406,7 @@ fn record_attachment_method(totals: &mut Totals, method: Option<i32>) {
 
 /// Records whether an attachment row's `PidTagAttachSize` was exactly zero.
 /// `None` (property missing/unreadable) is not counted as zero-byte.
-fn record_attachment_size(totals: &mut Totals, size: Option<i32>) {
+fn record_attachment_size(totals: &mut PstTotals, size: Option<i32>) {
     if size == Some(0) {
         totals.attachments_zero_byte += 1;
     }
@@ -359,7 +415,7 @@ fn record_attachment_size(totals: &mut Totals, size: Option<i32>) {
 /// Records presence (not content) of `PidTagAttachContentId`, a common but
 /// not definitive signal that an attachment is referenced inline (e.g. an
 /// inline image) rather than a standalone file attachment.
-fn record_attachment_content_id_presence(totals: &mut Totals, has_content_id: bool) {
+fn record_attachment_content_id_presence(totals: &mut PstTotals, has_content_id: bool) {
     if has_content_id {
         totals.attachments_with_content_id += 1;
     }
@@ -401,7 +457,7 @@ fn column_has_value(row_values: &[Option<TableRowColumnValue>], column_idx: usiz
         .unwrap_or(false)
 }
 
-fn inspect_recipients(message: &dyn PstMessage, totals: &mut Totals) {
+fn inspect_recipients(message: &dyn PstMessage, totals: &mut PstTotals) {
     let Some(table_rc) = message.recipient_table() else {
         record_recipients(totals, 0);
         return;
@@ -425,7 +481,7 @@ fn inspect_recipients(message: &dyn PstMessage, totals: &mut Totals) {
     record_recipients(totals, count);
 }
 
-fn inspect_attachments(message: &dyn PstMessage, totals: &mut Totals) {
+fn inspect_attachments(message: &dyn PstMessage, totals: &mut PstTotals) {
     let Some(table_rc) = message.attachment_table() else {
         record_attachments(totals, 0);
         return;
@@ -459,13 +515,242 @@ fn inspect_attachments(message: &dyn PstMessage, totals: &mut Totals) {
     record_attachments(totals, count);
 }
 
+// =============================================================================
+// MSG diagnostic (M2-P1/P2 equivalent, new)
+// =============================================================================
+
+/// PidTagAttachMethod values as exposed by `msg_parser`'s `attach_method`
+/// field. Same MAPI vocabulary as the PST side (MS-OXCMSG), but msg_parser
+/// does not currently expose the by-reference variants (2/3/4) separately,
+/// so they fall into `attachments_method_other` here if ever encountered.
+const MSG_ATTACH_METHOD_BY_VALUE: u32 = 1;
+const MSG_ATTACH_METHOD_EMBEDDED_MESSAGE: u32 = 5;
+const MSG_ATTACH_METHOD_OLE: u32 = 6;
+
+fn run_msg_diagnostic(files: &[PathBuf]) -> Result<()> {
+    println!("inventory=privacy_safe");
+    println!("input_kind=msg");
+    println!("files_scanned={}", files.len());
+
+    let mut totals = MsgTotals::default();
+
+    for file in files {
+        match Outlook::from_path(file) {
+            Ok(outlook) => inspect_msg(&outlook, &mut totals),
+            Err(_) => totals.open_errors += 1,
+        }
+    }
+
+    println!("open_errors={}", totals.open_errors);
+
+    println!("message_class_missing={}", totals.message_class_missing);
+    for (class, count) in &totals.message_classes {
+        println!("message_class class={class} count={count}");
+    }
+
+    println!("bodies_plain={}", totals.bodies_plain);
+    println!("bodies_html={}", totals.bodies_html);
+    println!("bodies_rtf={}", totals.bodies_rtf);
+
+    println!(
+        "messages_with_recipients={}",
+        totals.messages_with_recipients
+    );
+    println!("recipients_to={}", totals.recipients_to);
+    println!("recipients_cc={}", totals.recipients_cc);
+    println!("recipients_bcc={}", totals.recipients_bcc);
+    println!("max_recipients_on_a_message={}", totals.max_recipients);
+
+    println!(
+        "messages_with_attachments={}",
+        totals.messages_with_attachments
+    );
+    println!("total_attachments={}", totals.total_attachments);
+    println!("max_attachments_on_a_message={}", totals.max_attachments);
+    println!("attachments_zero_byte={}", totals.attachments_zero_byte);
+    println!(
+        "attachments_with_content_id={}",
+        totals.attachments_with_content_id
+    );
+    println!(
+        "attachments_method_by_value={}",
+        totals.attachments_method_by_value
+    );
+    println!(
+        "attachments_method_embedded_message={}",
+        totals.attachments_method_embedded_message
+    );
+    println!("attachments_method_ole={}", totals.attachments_method_ole);
+    println!(
+        "attachments_method_other={}",
+        totals.attachments_method_other
+    );
+
+    // The actual test of msg_parser's headline capability: does opening an
+    // embedded-message attachment as a nested message really work against a
+    // real file, not just per the crate's documentation. One level deep only
+    // -- deeper recursion is explicitly deferred, not attempted here.
+    println!(
+        "embedded_messages_opened={}",
+        totals.embedded_messages_opened
+    );
+    println!(
+        "embedded_message_open_errors={}",
+        totals.embedded_message_open_errors
+    );
+    for (class, count) in &totals.embedded_message_classes {
+        println!("embedded_message_class class={class} count={count}");
+    }
+
+    Ok(())
+}
+
+#[derive(Default)]
+struct MsgTotals {
+    open_errors: u64,
+
+    message_classes: BTreeMap<String, u64>,
+    message_class_missing: u64,
+
+    bodies_plain: u64,
+    bodies_html: u64,
+    bodies_rtf: u64,
+
+    messages_with_recipients: u64,
+    recipients_to: u64,
+    recipients_cc: u64,
+    recipients_bcc: u64,
+    max_recipients: u64,
+
+    messages_with_attachments: u64,
+    total_attachments: u64,
+    max_attachments: u64,
+    attachments_zero_byte: u64,
+    attachments_with_content_id: u64,
+    attachments_method_by_value: u64,
+    attachments_method_embedded_message: u64,
+    attachments_method_ole: u64,
+    attachments_method_other: u64,
+
+    embedded_messages_opened: u64,
+    embedded_message_open_errors: u64,
+    embedded_message_classes: BTreeMap<String, u64>,
+}
+
+fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
+    record_msg_class(totals, &outlook.message_class);
+
+    record_msg_body_flags(
+        totals,
+        !outlook.body.is_empty(),
+        !outlook.html.is_empty(),
+        !outlook.rtf_compressed.is_empty(),
+    );
+
+    record_msg_recipients(
+        totals,
+        outlook.to.len() as u64,
+        outlook.cc.len() as u64,
+        outlook.bcc.len() as u64,
+    );
+
+    let mut attachment_count = 0u64;
+    for attach in &outlook.attachments {
+        attachment_count += 1;
+
+        record_msg_attachment_size(totals, attach.payload_bytes.len());
+        record_msg_attachment_method(totals, attach.attach_method);
+        record_msg_attachment_content_id(totals, !attach.content_id.is_empty());
+
+        match attach.as_message() {
+            Some(Ok(nested)) => {
+                totals.embedded_messages_opened += 1;
+                record_embedded_message_class(totals, &nested.message_class);
+            }
+            Some(Err(_)) => totals.embedded_message_open_errors += 1,
+            None => {}
+        }
+    }
+    record_msg_attachments(totals, attachment_count);
+}
+
+fn record_msg_class(totals: &mut MsgTotals, class: &str) {
+    if class.is_empty() {
+        totals.message_class_missing += 1;
+    } else {
+        *totals.message_classes.entry(class.to_string()).or_insert(0) += 1;
+    }
+}
+
+fn record_msg_body_flags(totals: &mut MsgTotals, has_plain: bool, has_html: bool, has_rtf: bool) {
+    if has_plain {
+        totals.bodies_plain += 1;
+    }
+    if has_html {
+        totals.bodies_html += 1;
+    }
+    if has_rtf {
+        totals.bodies_rtf += 1;
+    }
+}
+
+fn record_msg_recipients(totals: &mut MsgTotals, to: u64, cc: u64, bcc: u64) {
+    if to + cc + bcc > 0 {
+        totals.messages_with_recipients += 1;
+    }
+    totals.recipients_to += to;
+    totals.recipients_cc += cc;
+    totals.recipients_bcc += bcc;
+    totals.max_recipients = totals.max_recipients.max(to + cc + bcc);
+}
+
+fn record_msg_attachments(totals: &mut MsgTotals, count: u64) {
+    if count > 0 {
+        totals.messages_with_attachments += 1;
+    }
+    totals.total_attachments += count;
+    totals.max_attachments = totals.max_attachments.max(count);
+}
+
+fn record_msg_attachment_size(totals: &mut MsgTotals, size: usize) {
+    if size == 0 {
+        totals.attachments_zero_byte += 1;
+    }
+}
+
+fn record_msg_attachment_method(totals: &mut MsgTotals, method: u32) {
+    match method {
+        MSG_ATTACH_METHOD_BY_VALUE => totals.attachments_method_by_value += 1,
+        MSG_ATTACH_METHOD_EMBEDDED_MESSAGE => totals.attachments_method_embedded_message += 1,
+        MSG_ATTACH_METHOD_OLE => totals.attachments_method_ole += 1,
+        _ => totals.attachments_method_other += 1,
+    }
+}
+
+fn record_msg_attachment_content_id(totals: &mut MsgTotals, has_content_id: bool) {
+    if has_content_id {
+        totals.attachments_with_content_id += 1;
+    }
+}
+
+fn record_embedded_message_class(totals: &mut MsgTotals, class: &str) {
+    if !class.is_empty() {
+        *totals
+            .embedded_message_classes
+            .entry(class.to_string())
+            .or_insert(0) += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // --- PST-side tests (unchanged from v0.1.4.3, PstTotals renamed) -------
+
     #[test]
     fn message_class_is_aggregated_by_name() {
-        let mut totals = Totals::default();
+        let mut totals = PstTotals::default();
         record_message_class(&mut totals, Ok("IPM.Note".to_string()));
         record_message_class(&mut totals, Ok("IPM.Note".to_string()));
         record_message_class(&mut totals, Ok("IPM.Note.SMIME".to_string()));
@@ -477,7 +762,7 @@ mod tests {
 
     #[test]
     fn unreadable_message_class_is_counted_not_dropped() {
-        let mut totals = Totals::default();
+        let mut totals = PstTotals::default();
         record_message_class(
             &mut totals,
             Err(std::io::Error::other("missing PidTagMessageClass")),
@@ -489,7 +774,7 @@ mod tests {
 
     #[test]
     fn body_flags_are_presence_only() {
-        let mut totals = Totals::default();
+        let mut totals = PstTotals::default();
         record_body_flags(&mut totals, true, true, false);
         record_body_flags(&mut totals, true, false, false);
 
@@ -500,7 +785,7 @@ mod tests {
 
     #[test]
     fn recipient_counts_track_presence_total_and_max() {
-        let mut totals = Totals::default();
+        let mut totals = PstTotals::default();
         record_recipients(&mut totals, 0);
         record_recipients(&mut totals, 3);
         record_recipients(&mut totals, 1);
@@ -512,7 +797,7 @@ mod tests {
 
     #[test]
     fn attachment_counts_track_presence_total_and_max() {
-        let mut totals = Totals::default();
+        let mut totals = PstTotals::default();
         record_attachments(&mut totals, 0);
         record_attachments(&mut totals, 2);
         record_attachments(&mut totals, 5);
@@ -524,7 +809,7 @@ mod tests {
 
     #[test]
     fn recipient_types_are_bucketed_correctly() {
-        let mut totals = Totals::default();
+        let mut totals = PstTotals::default();
         record_recipient_type(&mut totals, Some(RECIPIENT_TYPE_ORIG));
         record_recipient_type(&mut totals, Some(RECIPIENT_TYPE_TO));
         record_recipient_type(&mut totals, Some(RECIPIENT_TYPE_TO));
@@ -543,7 +828,7 @@ mod tests {
 
     #[test]
     fn attachment_methods_are_bucketed_correctly() {
-        let mut totals = Totals::default();
+        let mut totals = PstTotals::default();
         record_attachment_method(&mut totals, Some(ATTACH_METHOD_NONE));
         record_attachment_method(&mut totals, Some(ATTACH_METHOD_BY_VALUE));
         record_attachment_method(&mut totals, Some(ATTACH_METHOD_BY_REFERENCE));
@@ -567,7 +852,7 @@ mod tests {
 
     #[test]
     fn zero_byte_attachments_are_counted_and_missing_size_is_not() {
-        let mut totals = Totals::default();
+        let mut totals = PstTotals::default();
         record_attachment_size(&mut totals, Some(0));
         record_attachment_size(&mut totals, Some(1024));
         record_attachment_size(&mut totals, None);
@@ -577,11 +862,82 @@ mod tests {
 
     #[test]
     fn content_id_presence_is_counted_as_a_boolean_not_a_value() {
-        let mut totals = Totals::default();
+        let mut totals = PstTotals::default();
         record_attachment_content_id_presence(&mut totals, true);
         record_attachment_content_id_presence(&mut totals, false);
         record_attachment_content_id_presence(&mut totals, true);
 
         assert_eq!(totals.attachments_with_content_id, 2);
+    }
+
+    // --- MSG-side tests (new) -----------------------------------------------
+
+    #[test]
+    fn msg_class_is_aggregated_by_name_and_empty_is_counted_separately() {
+        let mut totals = MsgTotals::default();
+        record_msg_class(&mut totals, "IPM.Note");
+        record_msg_class(&mut totals, "IPM.Note");
+        record_msg_class(&mut totals, "");
+
+        assert_eq!(totals.message_classes.get("IPM.Note"), Some(&2));
+        assert_eq!(totals.message_class_missing, 1);
+    }
+
+    #[test]
+    fn msg_body_flags_are_presence_only() {
+        let mut totals = MsgTotals::default();
+        record_msg_body_flags(&mut totals, true, false, true);
+        record_msg_body_flags(&mut totals, false, true, false);
+
+        assert_eq!(totals.bodies_plain, 1);
+        assert_eq!(totals.bodies_html, 1);
+        assert_eq!(totals.bodies_rtf, 1);
+    }
+
+    #[test]
+    fn msg_recipients_are_split_by_type_with_presence_and_max() {
+        let mut totals = MsgTotals::default();
+        record_msg_recipients(&mut totals, 0, 0, 0);
+        record_msg_recipients(&mut totals, 1, 2, 1);
+        record_msg_recipients(&mut totals, 1, 0, 0);
+
+        assert_eq!(totals.messages_with_recipients, 2);
+        assert_eq!(totals.recipients_to, 2);
+        assert_eq!(totals.recipients_cc, 2);
+        assert_eq!(totals.recipients_bcc, 1);
+        assert_eq!(totals.max_recipients, 4);
+    }
+
+    #[test]
+    fn msg_attachment_methods_are_bucketed_correctly() {
+        let mut totals = MsgTotals::default();
+        record_msg_attachment_method(&mut totals, MSG_ATTACH_METHOD_BY_VALUE);
+        record_msg_attachment_method(&mut totals, MSG_ATTACH_METHOD_EMBEDDED_MESSAGE);
+        record_msg_attachment_method(&mut totals, MSG_ATTACH_METHOD_OLE);
+        record_msg_attachment_method(&mut totals, 99);
+
+        assert_eq!(totals.attachments_method_by_value, 1);
+        assert_eq!(totals.attachments_method_embedded_message, 1);
+        assert_eq!(totals.attachments_method_ole, 1);
+        assert_eq!(totals.attachments_method_other, 1);
+    }
+
+    #[test]
+    fn msg_zero_byte_attachment_is_counted() {
+        let mut totals = MsgTotals::default();
+        record_msg_attachment_size(&mut totals, 0);
+        record_msg_attachment_size(&mut totals, 117);
+
+        assert_eq!(totals.attachments_zero_byte, 1);
+    }
+
+    #[test]
+    fn msg_embedded_message_class_ignores_empty() {
+        let mut totals = MsgTotals::default();
+        record_embedded_message_class(&mut totals, "IPM.Note");
+        record_embedded_message_class(&mut totals, "");
+
+        assert_eq!(totals.embedded_message_classes.get("IPM.Note"), Some(&1));
+        assert_eq!(totals.embedded_message_classes.len(), 1);
     }
 }

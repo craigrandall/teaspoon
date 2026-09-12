@@ -16,6 +16,8 @@ Shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of 
 
 This is deliberately **not** the production miner and does not yet emit Markdown or extract body/attachment content.
 
+**M2 — MSG ingestion spike: started, unverified.** `tsp` now dispatches on its input: a `.pst` file uses the unchanged M1 path; a single `.msg` file or a directory of `.msg` files (scanned non-recursively) uses a new diagnostic built on the `msg_parser` crate, mirroring M1's structure (message class, body-type availability, recipient-type and attachment classification) plus a genuinely new check — an actual attempt to open each embedded-message attachment as a nested message, one level deep, which is the capability P4c found unreachable on the PST side. See `docs/verification/m2-results.md` for what's implemented, what's still unproven, and the specific `.msg` fixture set needed to close the gap. `msg_parser` is a provisional choice for this spike, not a final production commitment.
+
 ## Design principles
 
 1. `.pst` and `.msg` are input formats, not the domain model.
