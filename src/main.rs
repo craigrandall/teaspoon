@@ -25,7 +25,16 @@ struct Args {
 
 enum InputKind {
     Pst,
-    Msg(Vec<PathBuf>),
+    Msg {
+        files: Vec<PathBuf>,
+        /// Subdirectories found directly inside the scanned directory but
+        /// not descended into (the scan is deliberately non-recursive).
+        /// Surfaced in diagnostic output so this scoping choice is visible
+        /// to whoever reads the output, not just to whoever reads the
+        /// source -- a silent gap here would be the same kind of loss of
+        /// transparency the zero-byte/HTML fixes exist to avoid.
+        subdirectories_skipped: u64,
+    },
 }
 
 /// Classifies the input by extension (or, for a directory, by scanning for
@@ -34,22 +43,35 @@ enum InputKind {
 /// this tool's privacy-safe diagnostic output.
 fn classify_input(path: &Path) -> Result<InputKind> {
     if path.is_dir() {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(path)
+        let mut files = Vec::new();
+        let mut subdirectories_skipped = 0u64;
+
+        for entry in std::fs::read_dir(path)
             .context("failed to read input directory")?
             .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("msg"))
-                    .unwrap_or(false)
-            })
-            .collect();
+        {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                subdirectories_skipped += 1;
+                continue;
+            }
+            let is_msg = entry_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("msg"))
+                .unwrap_or(false);
+            if is_msg {
+                files.push(entry_path);
+            }
+        }
         files.sort();
         if files.is_empty() {
             anyhow::bail!("input directory contains no .msg files");
         }
-        return Ok(InputKind::Msg(files));
+        return Ok(InputKind::Msg {
+            files,
+            subdirectories_skipped,
+        });
     }
 
     let ext = path
@@ -59,7 +81,10 @@ fn classify_input(path: &Path) -> Result<InputKind> {
 
     match ext.as_deref() {
         Some("pst") => Ok(InputKind::Pst),
-        Some("msg") => Ok(InputKind::Msg(vec![path.to_path_buf()])),
+        Some("msg") => Ok(InputKind::Msg {
+            files: vec![path.to_path_buf()],
+            subdirectories_skipped: 0,
+        }),
         _ => anyhow::bail!(
             "unsupported input: expected a .pst file, a .msg file, or a directory of .msg files"
         ),
@@ -71,7 +96,10 @@ fn main() -> Result<()> {
 
     match classify_input(&args.input)? {
         InputKind::Pst => run_pst_diagnostic(&args.input),
-        InputKind::Msg(files) => run_msg_diagnostic(&files),
+        InputKind::Msg {
+            files,
+            subdirectories_skipped,
+        } => run_msg_diagnostic(&files, subdirectories_skipped),
     }
 }
 
@@ -181,6 +209,10 @@ fn run_pst_diagnostic(path: &Path) -> Result<()> {
     );
     println!("attachments_zero_byte={}", totals.attachments_zero_byte);
     println!(
+        "attachments_zero_size_other_method={}",
+        totals.attachments_zero_size_other_method
+    );
+    println!(
         "attachments_with_content_id={}",
         totals.attachments_with_content_id
     );
@@ -254,6 +286,7 @@ struct PstTotals {
     // P4b: attachment classification.
     attachment_row_read_errors: u64,
     attachments_zero_byte: u64,
+    attachments_zero_size_other_method: u64,
     attachments_with_content_id: u64,
     attachments_method_none: u64,
     attachments_method_by_value: u64,
@@ -345,6 +378,19 @@ fn record_message_class(totals: &mut PstTotals, class: std::io::Result<String>) 
 
 /// Records body-*availability* only. Never receives or touches actual body
 /// content -- callers must pass presence booleans, not the property values.
+///
+/// Interpretation caveat: `has_plain` reflects only that `PidTagBody`
+/// exists, not that the message was *authored* in plain text. Outlook
+/// commonly populates a plain-text compatibility mirror alongside an
+/// HTML- or RTF-authored body regardless of how the message was actually
+/// composed, so `bodies_plain` is expected to run high even on a mailbox
+/// with little genuinely plain-text-only content. This has not been
+/// independently confirmed against the PST-side dependency's own
+/// behavior; it is an inference from the parallel MSG-side finding
+/// (2026-09-07) that HTML content is frequently stored without a native
+/// `PidTagBodyHtml` property at all -- the same messages likely also
+/// carry a synthesized plain-text mirror for the same compatibility
+/// reasons.
 fn record_body_flags(totals: &mut PstTotals, has_plain: bool, has_html: bool, has_rtf: bool) {
     if has_plain {
         totals.bodies_plain += 1;
@@ -404,11 +450,23 @@ fn record_attachment_method(totals: &mut PstTotals, method: Option<i32>) {
     }
 }
 
-/// Records whether an attachment row's `PidTagAttachSize` was exactly zero.
-/// `None` (property missing/unreadable) is not counted as zero-byte.
-fn record_attachment_size(totals: &mut PstTotals, size: Option<i32>) {
-    if size == Some(0) {
-        totals.attachments_zero_byte += 1;
+/// Records whether an attachment row's `PidTagAttachSize` was exactly zero
+/// -- but only as a meaningful "empty file" signal when the attachment's
+/// method is `by_value`. For every other method (embedded message, OLE,
+/// by-reference), the attachment's real content lives outside this
+/// property entirely, so a zero reading there is expected and structural,
+/// not evidence of an empty file. These are tracked as a separate counter
+/// rather than silently merged into `attachments_zero_byte`, which would
+/// have repeated the same silent-conflation mistake the HTML detection fix
+/// (2026-09-07) corrected on the MSG side. `None` (property missing or
+/// unreadable) is not counted as zero-byte either way.
+fn record_attachment_size(totals: &mut PstTotals, size: Option<i32>, method: Option<i32>) {
+    if size != Some(0) {
+        return;
+    }
+    match method {
+        Some(ATTACH_METHOD_BY_VALUE) => totals.attachments_zero_byte += 1,
+        _ => totals.attachments_zero_size_other_method += 1,
     }
 }
 
@@ -434,6 +492,16 @@ fn column_index(context: &TableContextInfo, prop_id: u16) -> Option<usize> {
 /// Reads a single row's value at `column_idx` as a 32-bit integer, or `None`
 /// if the property is absent on this row, the column doesn't exist, or the
 /// value isn't a 32-bit integer. Never returns string/binary content.
+///
+/// Untested assumption: this always matches `PropertyValue::Integer32` for
+/// `PidTagRecipientType`, `PidTagAttachMethod`, and `PidTagAttachSize` on
+/// every PST this code has been run against so far -- every fixture
+/// message happened to store these as that type. A PST that stored one of
+/// these differently would fail the match arm below and silently fall
+/// through to `None` (bucketed as "unknown" by callers), rather than
+/// panicking or miscounting into the wrong bucket, so the failure mode is
+/// safe. But the assumption itself has never been falsified because it
+/// has never been tested against data that would break it.
 fn read_i32_at(
     table: &dyn TableContext,
     context: &TableContextInfo,
@@ -500,10 +568,11 @@ fn inspect_attachments(message: &dyn PstMessage, totals: &mut PstTotals) {
             continue;
         };
 
-        let size = size_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
-        record_attachment_size(totals, size);
-
         let method = method_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
+
+        let size = size_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
+        record_attachment_size(totals, size, method);
+
         record_attachment_method(totals, method);
 
         let has_content_id = content_id_idx
@@ -527,10 +596,11 @@ const MSG_ATTACH_METHOD_BY_VALUE: u32 = 1;
 const MSG_ATTACH_METHOD_EMBEDDED_MESSAGE: u32 = 5;
 const MSG_ATTACH_METHOD_OLE: u32 = 6;
 
-fn run_msg_diagnostic(files: &[PathBuf]) -> Result<()> {
+fn run_msg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
     println!("inventory=privacy_safe");
     println!("input_kind=msg");
     println!("files_scanned={}", files.len());
+    println!("subdirectories_skipped={subdirectories_skipped}");
 
     let mut totals = MsgTotals::default();
 
@@ -570,6 +640,10 @@ fn run_msg_diagnostic(files: &[PathBuf]) -> Result<()> {
     println!("total_attachments={}", totals.total_attachments);
     println!("max_attachments_on_a_message={}", totals.max_attachments);
     println!("attachments_zero_byte={}", totals.attachments_zero_byte);
+    println!(
+        "attachments_zero_size_other_method={}",
+        totals.attachments_zero_size_other_method
+    );
     println!(
         "attachments_with_content_id={}",
         totals.attachments_with_content_id
@@ -630,6 +704,7 @@ struct MsgTotals {
     total_attachments: u64,
     max_attachments: u64,
     attachments_zero_byte: u64,
+    attachments_zero_size_other_method: u64,
     attachments_with_content_id: u64,
     attachments_method_by_value: u64,
     attachments_method_embedded_message: u64,
@@ -681,7 +756,7 @@ fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
     for attach in &outlook.attachments {
         attachment_count += 1;
 
-        record_msg_attachment_size(totals, attach.payload_bytes.len());
+        record_msg_attachment_size(totals, attach.payload_bytes.len(), attach.attach_method);
         record_msg_attachment_method(totals, attach.attach_method);
         record_msg_attachment_content_id(totals, !attach.content_id.is_empty());
 
@@ -710,6 +785,12 @@ fn record_msg_class(totals: &mut MsgTotals, class: &str) {
 /// RTF body -- these are different levels of confidence in the result and
 /// are never merged into a single ambiguous signal. `bodies_html` is a
 /// convenience "was HTML detected via either path" total.
+///
+/// Interpretation caveat: `has_plain` reflects only that `outlook.body` is
+/// non-empty, not that the message was *authored* in plain text -- see the
+/// identical caveat on the PST-side `record_body_flags`, which this
+/// mirrors. Every fixture message observed so far has `bodies_plain` set
+/// regardless of its real authored format.
 fn record_msg_body_flags(
     totals: &mut MsgTotals,
     has_plain: bool,
@@ -734,6 +815,16 @@ fn record_msg_body_flags(
     }
 }
 
+/// Records recipient counts by type. Structural gap, not a bug: `msg_parser`
+/// exposes only `to`/`cc`/`bcc` on `Outlook`, with no equivalent of the
+/// PST side's `PidTagRecipientType` "ORIG" bucket (a recipient recorded as
+/// the sender, MS-OXOMSG value 0). If a `.msg` file ever had an
+/// ORIG-classified recipient, there is currently no way to detect it
+/// through this crate's public API -- it would simply not be counted
+/// anywhere. This asymmetry with the PST-side diagnostic (which does track
+/// ORIG, currently always at zero) is accepted as a known limitation, not
+/// scheduled for a fix, since ORIG recipients are a rare edge case and no
+/// fixture evidence has shown one to even test against.
 fn record_msg_recipients(totals: &mut MsgTotals, to: u64, cc: u64, bcc: u64) {
     if to + cc + bcc > 0 {
         totals.messages_with_recipients += 1;
@@ -752,9 +843,21 @@ fn record_msg_attachments(totals: &mut MsgTotals, count: u64) {
     totals.max_attachments = totals.max_attachments.max(count);
 }
 
-fn record_msg_attachment_size(totals: &mut MsgTotals, size: usize) {
-    if size == 0 {
+/// Records whether an attachment's byte payload was exactly zero -- but
+/// only as a meaningful "empty file" signal when the attachment's method
+/// is `by_value`. For every other method (embedded message, OLE), the
+/// attachment's real content lives outside `payload_bytes` entirely, so a
+/// zero reading there is expected and structural, not evidence of an empty
+/// file. Tracked as a separate counter, mirroring the same fix applied to
+/// the PST side.
+fn record_msg_attachment_size(totals: &mut MsgTotals, size: usize, method: u32) {
+    if size != 0 {
+        return;
+    }
+    if method == MSG_ATTACH_METHOD_BY_VALUE {
         totals.attachments_zero_byte += 1;
+    } else {
+        totals.attachments_zero_size_other_method += 1;
     }
 }
 
@@ -893,11 +996,23 @@ mod tests {
     #[test]
     fn zero_byte_attachments_are_counted_and_missing_size_is_not() {
         let mut totals = PstTotals::default();
-        record_attachment_size(&mut totals, Some(0));
-        record_attachment_size(&mut totals, Some(1024));
-        record_attachment_size(&mut totals, None);
+        record_attachment_size(&mut totals, Some(0), Some(ATTACH_METHOD_BY_VALUE));
+        record_attachment_size(&mut totals, Some(1024), Some(ATTACH_METHOD_BY_VALUE));
+        record_attachment_size(&mut totals, None, Some(ATTACH_METHOD_BY_VALUE));
 
         assert_eq!(totals.attachments_zero_byte, 1);
+        assert_eq!(totals.attachments_zero_size_other_method, 0);
+    }
+
+    #[test]
+    fn zero_size_on_a_non_by_value_attachment_is_not_counted_as_zero_byte() {
+        let mut totals = PstTotals::default();
+        record_attachment_size(&mut totals, Some(0), Some(ATTACH_METHOD_EMBEDDED_MESSAGE));
+        record_attachment_size(&mut totals, Some(0), Some(ATTACH_METHOD_OLE));
+        record_attachment_size(&mut totals, Some(0), None);
+
+        assert_eq!(totals.attachments_zero_byte, 0);
+        assert_eq!(totals.attachments_zero_size_other_method, 3);
     }
 
     #[test]
@@ -979,10 +1094,21 @@ mod tests {
     #[test]
     fn msg_zero_byte_attachment_is_counted() {
         let mut totals = MsgTotals::default();
-        record_msg_attachment_size(&mut totals, 0);
-        record_msg_attachment_size(&mut totals, 117);
+        record_msg_attachment_size(&mut totals, 0, MSG_ATTACH_METHOD_BY_VALUE);
+        record_msg_attachment_size(&mut totals, 117, MSG_ATTACH_METHOD_BY_VALUE);
 
         assert_eq!(totals.attachments_zero_byte, 1);
+        assert_eq!(totals.attachments_zero_size_other_method, 0);
+    }
+
+    #[test]
+    fn msg_zero_size_on_a_non_by_value_attachment_is_not_counted_as_zero_byte() {
+        let mut totals = MsgTotals::default();
+        record_msg_attachment_size(&mut totals, 0, MSG_ATTACH_METHOD_EMBEDDED_MESSAGE);
+        record_msg_attachment_size(&mut totals, 0, MSG_ATTACH_METHOD_OLE);
+
+        assert_eq!(totals.attachments_zero_byte, 0);
+        assert_eq!(totals.attachments_zero_size_other_method, 2);
     }
 
     #[test]

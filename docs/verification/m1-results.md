@@ -183,6 +183,52 @@ count* embedded-message and OLE attachments (P4b); it cannot open them.
 This may be worth raising with the `outlook-pst-rs` maintainers as a
 possible gap in a future crate version; not pursued as of this writing.
 
+## Critical review and fixes (2026-09-13)
+
+Following the HTML-detection fix, the codebase was reviewed specifically
+for other instances of the same failure pattern: a single-field check
+whose absence was silently treated as ground truth, when the underlying
+spec or dependency has another storage path or edge case for the same
+concept. Two real issues were found and fixed on the PST side (the same
+fixes were applied symmetrically on the MSG side; see `m2-results.md`):
+
+- **`attachments_zero_byte` was conflating two different things.**
+  `PidTagAttachSize == 0` was counted as "empty attachment" regardless of
+  the attachment's method. But for embedded-message and OLE attachments,
+  the real content lives outside this property entirely, so a zero
+  reading there is structurally expected, not evidence of a genuinely
+  empty file — the exact case Craig's own empirical research (Gmail/Outlook
+  zero-byte experiments) was about. Fixed: zero-size readings are now only
+  counted in `attachments_zero_byte` when the attachment's method is
+  `by_value`; every other method's zero-size reading goes into a new,
+  separately-tracked `attachments_zero_size_other_method` counter.
+- **The non-recursive `.msg` directory scan produced no visible signal
+  that it was non-recursive.** If a fixture folder had `.msg` files
+  nested in subfolders, `tsp` would silently undercount with nothing in
+  the printed output indicating anything was skipped. Fixed: `tsp` now
+  reports `subdirectories_skipped=N` in its MSG diagnostic output.
+
+Two further items were identified as interpretation caveats rather than
+code defects, and are now documented in code comments rather than fixed,
+since there is nothing to fix — the data is accurate, only its
+interpretation was previously assumed rather than stated:
+
+- **`bodies_plain` reflects property presence, not authored format.**
+  Outlook commonly populates a plain-text compatibility mirror alongside
+  an HTML- or RTF-authored body regardless of composition intent. High
+  `bodies_plain` counts should not be read as "many messages were
+  plain-text-authored."
+- **`read_i32_at`'s `PropertyValue::Integer32` type assumption has never
+  been falsified** for `PidTagRecipientType`/`PidTagAttachMethod`/
+  `PidTagAttachSize`, because every fixture message so far has happened to
+  store these as that type. The failure mode if this assumption is ever
+  wrong is safe (falls to an explicit "unknown" bucket), but the
+  assumption itself remains untested against data that would break it.
+
+One item was identified as a known, accepted structural limitation on the
+MSG side specifically (no PST-side equivalent needed since `outlook-pst`
+already supports it) — see `m2-results.md`.
+
 ## What remains unproven
 
 No claim is made that teaspoon has proven:
@@ -197,6 +243,11 @@ No claim is made that teaspoon has proven:
 - reading OLE attachment content — same constraint as embedded messages;
 - zero-byte attachment handling against a real row (code exists; fixture
   construction goal deliberately dropped — see rationale above);
+- the 2026-09-13 zero-byte/attachment-method fix (`attachments_zero_byte`
+  now conditioned on `by_value`, plus the new
+  `attachments_zero_size_other_method` counter) — implemented, not yet
+  compiled or run on Windows;
+- `subdirectories_skipped` reporting — implemented, not yet run;
 - by-reference attachment handling, any of the 3 sub-methods, against a
   real row (code exists; fixture construction goal deliberately dropped —
   see rationale above);

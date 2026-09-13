@@ -130,6 +130,37 @@ Three findings need investigation before this data can be trusted:
 
 
 
+## Critical review and fixes (2026-09-13)
+
+Same review pass as the PST side (see `m1-results.md` for the full
+writeup); findings specific to or mirrored on the MSG side:
+
+- **`attachments_zero_byte` conflation, fixed identically to the PST
+  side.** `payload_bytes.len() == 0` was counted regardless of
+  `attach_method`. Embedded-message and OLE attachments don't populate
+  `payload_bytes` the way by-value attachments do, so a zero reading there
+  doesn't mean "empty file." Fixed: only `by_value` attachments with a
+  zero-length payload count toward `attachments_zero_byte`; everything
+  else goes into `attachments_zero_size_other_method`. This directly
+  affects the still-open "mystery zero-byte attachment" investigation from
+  2026-09-07 — re-running against the fixture folder should now show
+  whether the one unexplained zero-byte hit among the `by_value`
+  attachments is still there once the embedded-message and OLE
+  attachments are correctly excluded from that counter.
+- **Non-recursive directory scan now reports what it skips.** `tsp`
+  prints `subdirectories_skipped=N` so the scope of a directory scan is
+  visible in the output itself, not just in source comments.
+- **New, MSG-specific structural limitation identified (not a bug, not
+  fixed): no ORIG-recipient equivalent.** The PST side explicitly detects
+  and buckets `PidTagRecipientType`'s rare "ORIG" value (0). `msg_parser`'s
+  `Outlook` struct exposes only `to`/`cc`/`bcc` — there is no way to detect
+  an ORIG-classified recipient on the MSG side through this crate's public
+  API. Accepted as a known asymmetry between the two format adapters;
+  not scheduled for a fix given how rare this recipient type is and the
+  absence of any fixture evidence of one to test against.
+- **`bodies_plain` interpretation caveat** — identical to the PST side,
+  see `m1-results.md`.
+
 ## What remains unproven
 
 The build and test suite passing, and this first run completing without a
@@ -146,9 +177,12 @@ do not establish that:
   the uniform plain+RTF/zero-HTML result across all 9 files (finding 1);
 - the zero-byte attachment count reflects genuine zero-byte files rather
   than an artifact of which field is being checked for which attachment
-  type (finding 2);
+  type — the 2026-09-13 fix (see above) should resolve this, but has not
+  yet been compiled or run;
 - any of these counts are correct in the sense of matching the fixture's
   actual intended composition.
 
 See project correspondence for the specific follow-up needed to resolve
-the three open findings above.
+the remaining open findings above (embedded-message opening still
+returning `None`, and body-type detection's interpretation, both largely
+addressed but pending final confirmation).
