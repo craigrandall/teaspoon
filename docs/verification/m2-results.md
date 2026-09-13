@@ -88,14 +88,26 @@ consistent with two separate 2-recipient messages. No arithmetic anomalies.
 
 Three findings need investigation before this data can be trusted:
 
-1. **`bodies_html=0` and `bodies_rtf=9` universally, across all 9 files.**
-   Expected a mix reflecting deliberately distinct plain/HTML/RTF fixture
-   messages; got uniform plain+RTF, zero HTML, on every file. Leading
-   hypothesis: all 9 messages may have been composed/saved in Outlook's
-   Rich Text format rather than a deliberate mix, which would produce
-   exactly this pattern (Rich Text messages carry a synchronized
-   plain-text mirror alongside the RTF; no HTML is stored). Not confirmed
-   — needs Craig to check how each message was actually composed.
+1. **RESOLVED (2026-09-07).** `bodies_html=0` universally was not a
+   fixture problem or an environment default — it was a real gap in this
+   diagnostic's detection logic. Direct byte-level inspection of a
+   deliberately-HTML fixture file (`This is an example HTML message.msg`,
+   confirmed genuine HTML via its view-source: real `<html>`/`<body>`
+   markup, Word-generated) proved the file has **no native
+   `PidTagBodyHtml` (0x1013) property stream at all** — only `PidTagBody`
+   (0x1000, plain) and `PidTagRtfCompressed` (0x1009, RTF) exist. Outlook
+   had encapsulated the HTML inside the RTF body instead (MS-OXRTFEX), a
+   legitimate and common MAPI storage strategy. This diagnostic originally
+   checked only the native `.html` field and never used `msg_parser`'s own
+   documented fallback for this exact case, `Outlook::html_from_rtf()`.
+   Fixed: HTML detection now checks native `.html` first, then falls back
+   to `html_from_rtf()`, and the two paths are tracked as distinct counters
+   (`bodies_html_native`, `bodies_html_via_rtf`) rather than silently
+   merged, consistent with this project's loss-transparency principle —
+   `bodies_html` remains as an "either path" convenience total. This
+   strongly suggests, though does not independently confirm for each file,
+   that all prior 28 fixture messages share this same RTF-encapsulated-HTML
+   storage pattern rather than being genuinely RTF-only as first assumed.
 2. **`attachments_zero_byte=3` of 4 total attachments.** Two of these are
    plausibly explained by `payload_bytes` not being the right field to
    check for embedded-message/OLE attachment types (methods `5` and `6`),

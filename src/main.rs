@@ -550,6 +550,8 @@ fn run_msg_diagnostic(files: &[PathBuf]) -> Result<()> {
 
     println!("bodies_plain={}", totals.bodies_plain);
     println!("bodies_html={}", totals.bodies_html);
+    println!("bodies_html_native={}", totals.bodies_html_native);
+    println!("bodies_html_via_rtf={}", totals.bodies_html_via_rtf);
     println!("bodies_rtf={}", totals.bodies_rtf);
 
     println!(
@@ -614,6 +616,8 @@ struct MsgTotals {
 
     bodies_plain: u64,
     bodies_html: u64,
+    bodies_html_native: u64,
+    bodies_html_via_rtf: u64,
     bodies_rtf: u64,
 
     messages_with_recipients: u64,
@@ -640,10 +644,29 @@ struct MsgTotals {
 fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
     record_msg_class(totals, &outlook.message_class);
 
+    // HTML detection has two layers, and they are tracked separately rather
+    // than silently merged, consistent with this project's loss-transparency
+    // principle: many real messages (confirmed by direct inspection of a
+    // fixture file's raw OLE property streams) have no native PidTagBodyHtml
+    // property at all -- Outlook instead encapsulates the HTML inside the
+    // RTF body (MS-OXRTFEX), which msg_parser can recover via
+    // `html_from_rtf()`. Checking only the native `.html` field, as this
+    // code originally did, silently misses that entire common case.
+    let has_html_native = !outlook.html.is_empty();
+    let has_html_via_rtf = if has_html_native {
+        false
+    } else {
+        outlook
+            .html_from_rtf()
+            .map(|html| !html.is_empty())
+            .unwrap_or(false)
+    };
+
     record_msg_body_flags(
         totals,
         !outlook.body.is_empty(),
-        !outlook.html.is_empty(),
+        has_html_native,
+        has_html_via_rtf,
         !outlook.rtf_compressed.is_empty(),
     );
 
@@ -682,11 +705,28 @@ fn record_msg_class(totals: &mut MsgTotals, class: &str) {
     }
 }
 
-fn record_msg_body_flags(totals: &mut MsgTotals, has_plain: bool, has_html: bool, has_rtf: bool) {
+/// Records body-*availability* only, distinguishing native HTML (a real
+/// `PidTagBodyHtml` property) from HTML recovered by decoding it out of the
+/// RTF body -- these are different levels of confidence in the result and
+/// are never merged into a single ambiguous signal. `bodies_html` is a
+/// convenience "was HTML detected via either path" total.
+fn record_msg_body_flags(
+    totals: &mut MsgTotals,
+    has_plain: bool,
+    has_html_native: bool,
+    has_html_via_rtf: bool,
+    has_rtf: bool,
+) {
     if has_plain {
         totals.bodies_plain += 1;
     }
-    if has_html {
+    if has_html_native {
+        totals.bodies_html_native += 1;
+    }
+    if has_html_via_rtf {
+        totals.bodies_html_via_rtf += 1;
+    }
+    if has_html_native || has_html_via_rtf {
         totals.bodies_html += 1;
     }
     if has_rtf {
@@ -886,12 +926,26 @@ mod tests {
     #[test]
     fn msg_body_flags_are_presence_only() {
         let mut totals = MsgTotals::default();
-        record_msg_body_flags(&mut totals, true, false, true);
-        record_msg_body_flags(&mut totals, false, true, false);
+        record_msg_body_flags(&mut totals, true, false, false, true);
+        record_msg_body_flags(&mut totals, false, true, false, false);
 
         assert_eq!(totals.bodies_plain, 1);
         assert_eq!(totals.bodies_html, 1);
         assert_eq!(totals.bodies_rtf, 1);
+    }
+
+    #[test]
+    fn msg_html_native_and_via_rtf_are_tracked_separately_but_both_count_as_html() {
+        let mut totals = MsgTotals::default();
+        // Native HTML property present.
+        record_msg_body_flags(&mut totals, false, true, false, false);
+        // No native property, but HTML recovered from RTF encapsulation
+        // (MS-OXRTFEX) -- the case this fix exists for.
+        record_msg_body_flags(&mut totals, false, false, true, true);
+
+        assert_eq!(totals.bodies_html_native, 1);
+        assert_eq!(totals.bodies_html_via_rtf, 1);
+        assert_eq!(totals.bodies_html, 2);
     }
 
     #[test]
