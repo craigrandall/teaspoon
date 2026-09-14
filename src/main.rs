@@ -1064,9 +1064,8 @@ mod tests {
         // compressed_rtf::decompress_rtf reads unconditionally as its own
         // header -- must be caught before ever calling that function, or
         // it panics rather than returning an error.
-        let too_short = PropertyValue::Binary(outlook_pst::ltp::prop_context::BinaryValue::new(
-            vec![0; 8],
-        ));
+        let too_short =
+            PropertyValue::Binary(outlook_pst::ltp::prop_context::BinaryValue::new(vec![0; 8]));
         assert!(matches!(
             check_rtf_for_encapsulated_html(Some(&too_short)),
             RtfHtmlCheck::DecompressionFailed
@@ -1075,9 +1074,10 @@ mod tests {
         // Present, binary, long enough, but not valid compressed RTF (a
         // bogus size header) -- a genuine anomaly, tracked separately from
         // "no encapsulated HTML found".
-        let garbage = PropertyValue::Binary(outlook_pst::ltp::prop_context::BinaryValue::new(
-            vec![0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        ));
+        let garbage =
+            PropertyValue::Binary(outlook_pst::ltp::prop_context::BinaryValue::new(vec![
+                0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]));
         assert!(matches!(
             check_rtf_for_encapsulated_html(Some(&garbage)),
             RtfHtmlCheck::DecompressionFailed
