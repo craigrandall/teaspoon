@@ -13,6 +13,7 @@ Shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of 
 - P1 through P4b are done and verified on Windows against a real PST fixture deliberately enhanced to cover plain/RTF bodies, a BCC recipient, an embedded-message attachment, and an OLE attachment — see `docs/verification/m1-results.md`.
 - Zero-byte and by-reference attachments were explicitly excluded as fixture goals (empirically impractical to compose / obsolete in modern email) — see `docs/verification/m1-results.md` for the documented rationale. The classification code for both remains.
 - Opening/traversing embedded-message or OLE attachment *content* was investigated (P4c) and found not achievable through `outlook-pst` v1.2.0's public API — accepted as M1's practical ceiling, not a defect. `tsp` correctly detects and counts these attachments; it can't open them.
+- **2026-09-13:** the original `bodies_html` count was confirmed to be an undercount — `outlook-pst`'s diagnostic only checked the native `PidTagBodyHtml` property, missing HTML encapsulated inside RTF per MS-OXRTFEX (the same blind spot fixed on the MSG side on 2026-09-07). Fixed: `tsp` now decompresses `PidTagRtfCompressed` (via `compressed-rtf`) and checks for the specification-defined `\fromhtml1` marker when native HTML is absent. Implemented, pending a Windows compile and re-run — see `docs/verification/m1-results.md`.
 
 This is deliberately **not** the production miner and does not yet emit Markdown or extract body/attachment content.
 

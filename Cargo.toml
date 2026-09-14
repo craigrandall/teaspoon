@@ -15,3 +15,4 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 outlook-pst = "1.2.0"
 msg_parser = "0.3"
+compressed-rtf = "1.0"

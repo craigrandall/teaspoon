@@ -2,9 +2,11 @@
 
 ## Status
 
-**Complete, within the limits of `outlook-pst` v1.2.0's public API.** P1
-through P4b are done and verified on Windows against a real PST fixture
-deliberately enhanced to close 5 of 7 identified representativeness gaps.
+**Complete, within the limits of `outlook-pst` v1.2.0's public API — with
+one confirmed correction to that completeness claim, dated 2026-09-13: see
+"CONFIRMED: PST-side HTML-in-RTF blind spot" below.** P1 through P4b are
+done and verified on Windows against a real PST fixture deliberately
+enhanced to close 5 of 7 identified representativeness gaps.
 The remaining 2 (zero-byte and by-reference attachments) were explicitly
 excluded as non-goals (see below). Opening/traversing embedded-message or
 OLE attachment content was investigated for P4c and found to be beyond
@@ -99,6 +101,111 @@ using the same code — no code changes were made between v0.1.4.2 and
 v0.1.4.3, only the fixture changed. The remaining 2 are excluded outright
 (see below), so this fixture is now considered adequate against every
 dimension this project set out to cover.
+
+## CONFIRMED: PST-side HTML-in-RTF blind spot (2026-09-13)
+
+The hypothesis raised on 2026-09-07 (that `tsp`'s PST-side `bodies_html`
+check has the identical blind spot the MSG-side fix corrected) is now
+**confirmed, not merely suspected.**
+
+The message believed to be the PST's "RTF-only" fixture item was exported
+via Outlook's Save As → `.msg` and independently verified two ways:
+
+1. `tsp`'s own (already-fixed) MSG diagnostic reported
+   `bodies_html_native=0`, `bodies_html_via_rtf=1` — HTML recovered only
+   via `msg_parser`'s RTF-decoding fallback, not a native property.
+2. Direct byte-level enumeration of the exported file's raw OLE/CFB
+   property streams independently confirmed: `PidTagBody` (0x1000)
+   present, `PidTagRtfCompressed` (0x1009) present, `PidTagBodyHtml`
+   (0x1013) **absent**. Two independent methods agree completely.
+
+Since PST and MSG serialize the identical MAPI/MS-OXPROPS property model
+in different containers, and Outlook's export preserves rather than
+manufactures properties, there is no reason to believe the original PST
+message's property set differs from what this export shows.
+
+**Concrete implication: `bodies_html=55/57` from the P4a evidence above is
+very likely an undercount.** At least one message classified as
+"RTF-only" is actually HTML-authored content that `outlook-pst`'s
+diagnostic cannot see, because it only checks native `PidTagBodyHtml`
+presence — the exact same single-field check that was wrong on the MSG
+side before the 2026-09-07 fix.
+
+**Fixing this is a larger lift than the MSG-side fix was**, because
+`outlook-pst` has no `html_from_rtf()`-equivalent convenience method the
+way `msg_parser` does. It would require: (1) extracting
+`PidTagRtfCompressed`'s raw binary value (currently `tsp` only checks its
+*presence*, never reads the value), (2) decompressing it per MS-OXRTFCP,
+and (3) extracting the encapsulated HTML per MS-OXRTFEX. Candidate
+crates identified for steps (2) and (3), not yet adopted or verified
+against this project's fixtures:
+
+- `compressed-rtf` (MS-OXRTFCP decompression) — maintained by the same
+  author as `outlook-pst` (`wravery`/Bill Avery), which is a meaningful
+  trust signal given that family relationship; exposes a simple
+  `decompress_rtf(data: &[u8]) -> Result<String>`.
+- A second crate for RTF→text/HTML extraction that correctly handles
+  Outlook's `\fromhtml` encapsulation (skipping `\*\htmltag` destinations)
+  would still be needed; one candidate (`rtf-parser`) was seen used for
+  exactly this purpose in an unrelated third-party project, but has not
+  been independently researched or vetted for this project.
+
+**Decision made and implemented (2026-09-13): fixed, not merely
+documented.** `tsp` now checks `PidTagRtfCompressed` for MS-OXRTFEX
+encapsulation whenever native `PidTagBodyHtml` is absent, mirroring the
+MSG-side fix exactly, and its output is now symmetric between the two
+adapters: `bodies_html_native`, `bodies_html_via_rtf`, and a combined
+`bodies_html`, plus `rtf_decompression_errors` for the case where the
+property is present but doesn't decompress cleanly. See "PST-side
+HTML-in-RTF fix, implementation details" below for what changed and why
+a full RTF-to-HTML extractor was deliberately *not* built.
+
+### PST-side HTML-in-RTF fix, implementation details (2026-09-13)
+
+Only step 2 of the three steps outlined above (decompression) was
+implemented; step 1 (extracting the raw value, not just checking
+presence) was needed to feed it; **step 3 (extracting the actual HTML
+text) was deliberately not built**, because it isn't needed. Per
+MS-OXRTFEX's own "Recognizing RTF Containing Encapsulation" section, a
+de-encapsulating reader that finds the FROMHTML control word
+(`\fromhtml1`) "SHOULD conclude the RTF document contains encapsulated
+HTML and stop further inspection" — presence of that one control word is
+the specification-sanctioned detection signal, not a heuristic
+substitute for real extraction. Since `tsp` is a privacy-safe presence/
+count diagnostic that has never printed body content on either format
+side, checking for this one marker is sufficient; nothing was gained by
+also adopting a full RTF-to-HTML converter, so `rtf-parser` (flagged as
+an unvetted candidate above) was not pursued.
+
+`compressed-rtf` (MS-OXRTFCP decompression) was adopted, with its magic
+numbers and dictionary cross-checked against `msg_parser`'s own
+independent from-scratch implementation of the same algorithm — both
+agree exactly, which is meaningful corroboration from two unrelated
+authors' implementations of the same Microsoft spec.
+
+One real defensive finding from reading `compressed-rtf`'s actual source
+rather than trusting its signature: `decompress_rtf` indexes into the
+first 16 bytes of its input unconditionally as part of its own header
+read, and **panics** rather than returning an error if given fewer bytes.
+`tsp` now guards this explicitly (any `PidTagRtfCompressed` value under
+16 bytes is treated as a decompression failure before ever calling the
+crate function), so a truncated or corrupt property cannot crash `tsp`.
+This was not something the crate's public API signature (`fn
+decompress_rtf(data: &[u8]) -> Result<String>`) would have revealed —
+only reading the actual implementation did.
+
+**Verification status:** unit tests cover the pure branching logic
+(absent property, non-binary property, too-short buffer, and a
+structurally-invalid-but-correctly-sized buffer all correctly avoid being
+misread as "no encapsulated HTML found"). The actual success path —
+real compressed RTF, real `\fromhtml1` detection — has not been
+independently unit-tested with hand-constructed bytes, since verifying a
+byte-exact valid MS-OXRTFCP fixture without a Rust toolchain risked
+asserting something untested as tested. That path's real verification is
+the Windows run against `tsp-tester.pst` and the `RTF_message.msg`
+export, both of which now have direct evidence this fix should resolve
+correctly (see "CONFIRMED" section above) but have not yet been re-run
+against this exact code.
 
 ## Why zero-byte and by-reference attachments were dropped as fixture goals (2026-09-07)
 
@@ -232,6 +339,8 @@ already supports it) — see `m2-results.md`.
 ## What remains unproven
 
 No claim is made that teaspoon has proven:
+- the 2026-09-13 RTF-encapsulated-HTML fix, compiled or run on Windows —
+  implemented and unit-tested at the branching-logic level only;
 - all PST variants;
 - complete property fidelity;
 - body *extraction* (only body-type *availability* is established);

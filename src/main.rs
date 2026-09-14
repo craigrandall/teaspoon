@@ -173,7 +173,13 @@ fn run_pst_diagnostic(path: &Path) -> Result<()> {
 
     println!("bodies_plain={}", totals.bodies_plain);
     println!("bodies_html={}", totals.bodies_html);
+    println!("bodies_html_native={}", totals.bodies_html_native);
+    println!("bodies_html_via_rtf={}", totals.bodies_html_via_rtf);
     println!("bodies_rtf={}", totals.bodies_rtf);
+    println!(
+        "rtf_decompression_errors={}",
+        totals.rtf_decompression_errors
+    );
 
     // --- P4a: recipient / attachment aggregate counts -----------------------
     println!(
@@ -264,7 +270,10 @@ struct PstTotals {
 
     bodies_plain: u64,
     bodies_html: u64,
+    bodies_html_native: u64,
+    bodies_html_via_rtf: u64,
     bodies_rtf: u64,
+    rtf_decompression_errors: u64,
 
     messages_with_recipients: u64,
     total_recipients: u64,
@@ -354,15 +363,95 @@ fn inspect_message(message: &dyn PstMessage, totals: &mut PstTotals) {
 
     record_message_class(totals, properties.message_class());
 
+    // HTML detection has two layers, exactly mirroring the MSG-side fix
+    // (2026-09-07) and the confirmed finding (2026-09-13) that this
+    // dependency has the identical blind spot: many real messages have no
+    // native PidTagBodyHtml property at all -- Outlook instead encapsulates
+    // the HTML inside PidTagRtfCompressed per MS-OXRTFEX, detectable via the
+    // \fromhtml1 control word, which the specification itself designates as
+    // the correct de-encapsulation signal. This is a presence-only check:
+    // tsp never needs the extracted HTML/RTF content itself, only whether
+    // this marker exists, so no RTF-to-HTML conversion is implemented here.
+    let has_html_native = properties.get(PROP_BODY_HTML).is_some();
+    let has_rtf = properties.get(PROP_RTF_COMPRESSED).is_some();
+    let has_html_via_rtf = if has_html_native {
+        false
+    } else {
+        match check_rtf_for_encapsulated_html(properties.get(PROP_RTF_COMPRESSED)) {
+            RtfHtmlCheck::Decompressed { contains_fromhtml } => contains_fromhtml,
+            RtfHtmlCheck::DecompressionFailed => {
+                totals.rtf_decompression_errors += 1;
+                false
+            }
+            RtfHtmlCheck::NoRtfProperty | RtfHtmlCheck::NotBinary => false,
+        }
+    };
+
     record_body_flags(
         totals,
         properties.get(PROP_BODY).is_some(),
-        properties.get(PROP_BODY_HTML).is_some(),
-        properties.get(PROP_RTF_COMPRESSED).is_some(),
+        has_html_native,
+        has_html_via_rtf,
+        has_rtf,
     );
 
     inspect_recipients(message, totals);
     inspect_attachments(message, totals);
+}
+
+/// The result of checking `PidTagRtfCompressed` for MS-OXRTFEX HTML
+/// encapsulation. Kept as distinct variants rather than a single bool so
+/// "no RTF property at all" (the common, unremarkable case) is never
+/// conflated with "RTF was present but failed to decompress" (a genuine
+/// anomaly worth its own counter), consistent with this project's
+/// no-silent-loss principle.
+enum RtfHtmlCheck {
+    NoRtfProperty,
+    NotBinary,
+    DecompressionFailed,
+    Decompressed { contains_fromhtml: bool },
+}
+
+/// Checks whether `PidTagRtfCompressed`, if present, contains HTML content
+/// encapsulated per MS-OXRTFEX. Per that specification, a de-encapsulating
+/// reader finding the FROMHTML control word (`\fromhtml1`) "SHOULD
+/// conclude the RTF document contains encapsulated HTML and stop further
+/// inspection" -- so presence of that exact control word is the
+/// specification-sanctioned signal, not a heuristic. Decompression uses
+/// `compressed-rtf` (MS-OXRTFCP), maintained by the same author as
+/// `outlook-pst`; its magic numbers and dictionary were independently
+/// cross-checked against `msg_parser`'s own from-scratch implementation of
+/// the same algorithm and match exactly. Never returns or exposes the
+/// actual RTF or HTML content -- only whether this one marker is present.
+///
+/// `compressed_rtf::decompress_rtf` indexes into the first 16 bytes of its
+/// input unconditionally as part of its own MS-OXRTFCP header read, and
+/// panics rather than erroring if given fewer -- confirmed by reading the
+/// crate's actual source rather than assumed from its signature. This
+/// function guards that case explicitly so a truncated or corrupt
+/// `PidTagRtfCompressed` value cannot crash `tsp`.
+fn check_rtf_for_encapsulated_html(rtf_property: Option<&PropertyValue>) -> RtfHtmlCheck {
+    let Some(value) = rtf_property else {
+        return RtfHtmlCheck::NoRtfProperty;
+    };
+    let PropertyValue::Binary(binary) = value else {
+        return RtfHtmlCheck::NotBinary;
+    };
+    let buffer = binary.buffer();
+    // `compressed_rtf::decompress_rtf` indexes into the first 16 bytes of
+    // its input unconditionally (its own MS-OXRTFCP header read) and
+    // panics if given fewer -- confirmed by reading the crate's actual
+    // source, not assumed from its signature. Guarded here rather than
+    // letting a truncated or corrupt property crash tsp outright.
+    if buffer.len() < 16 {
+        return RtfHtmlCheck::DecompressionFailed;
+    }
+    match compressed_rtf::decompress_rtf(buffer) {
+        Ok(rtf) => RtfHtmlCheck::Decompressed {
+            contains_fromhtml: rtf.contains("\\fromhtml1"),
+        },
+        Err(_) => RtfHtmlCheck::DecompressionFailed,
+    }
 }
 
 /// Records a message-class observation. `class` is `Err` when the message
@@ -384,18 +473,33 @@ fn record_message_class(totals: &mut PstTotals, class: std::io::Result<String>) 
 /// commonly populates a plain-text compatibility mirror alongside an
 /// HTML- or RTF-authored body regardless of how the message was actually
 /// composed, so `bodies_plain` is expected to run high even on a mailbox
-/// with little genuinely plain-text-only content. This has not been
-/// independently confirmed against the PST-side dependency's own
-/// behavior; it is an inference from the parallel MSG-side finding
-/// (2026-09-07) that HTML content is frequently stored without a native
-/// `PidTagBodyHtml` property at all -- the same messages likely also
-/// carry a synthesized plain-text mirror for the same compatibility
-/// reasons.
-fn record_body_flags(totals: &mut PstTotals, has_plain: bool, has_html: bool, has_rtf: bool) {
+/// with little genuinely plain-text-only content. (Confirmed 2026-09-13
+/// as a real, not just inferred, characteristic of this project's PST
+/// fixture, alongside the HTML-in-RTF finding below.)
+///
+/// `has_html_native` and `has_html_via_rtf` are tracked as distinct
+/// signals, never silently merged, mirroring the MSG-side fix
+/// (2026-09-07) and the confirmed finding (2026-09-13) that this
+/// dependency has the identical blind spot: `bodies_html` alone would
+/// have undercounted real HTML content stored only via MS-OXRTFEX
+/// encapsulation in the RTF body.
+fn record_body_flags(
+    totals: &mut PstTotals,
+    has_plain: bool,
+    has_html_native: bool,
+    has_html_via_rtf: bool,
+    has_rtf: bool,
+) {
     if has_plain {
         totals.bodies_plain += 1;
     }
-    if has_html {
+    if has_html_native {
+        totals.bodies_html_native += 1;
+    }
+    if has_html_via_rtf {
+        totals.bodies_html_via_rtf += 1;
+    }
+    if has_html_native || has_html_via_rtf {
         totals.bodies_html += 1;
     }
     if has_rtf {
@@ -918,12 +1022,66 @@ mod tests {
     #[test]
     fn body_flags_are_presence_only() {
         let mut totals = PstTotals::default();
-        record_body_flags(&mut totals, true, true, false);
-        record_body_flags(&mut totals, true, false, false);
+        record_body_flags(&mut totals, true, true, false, false);
+        record_body_flags(&mut totals, true, false, false, false);
 
         assert_eq!(totals.bodies_plain, 2);
         assert_eq!(totals.bodies_html, 1);
         assert_eq!(totals.bodies_rtf, 0);
+    }
+
+    #[test]
+    fn pst_html_native_and_via_rtf_are_tracked_separately_but_both_count_as_html() {
+        let mut totals = PstTotals::default();
+        // Native PidTagBodyHtml present.
+        record_body_flags(&mut totals, false, true, false, false);
+        // No native property, but HTML recovered via MS-OXRTFEX
+        // encapsulation in the RTF body -- the case the 2026-09-13 fix
+        // exists for.
+        record_body_flags(&mut totals, false, false, true, true);
+
+        assert_eq!(totals.bodies_html_native, 1);
+        assert_eq!(totals.bodies_html_via_rtf, 1);
+        assert_eq!(totals.bodies_html, 2);
+    }
+
+    #[test]
+    fn rtf_html_check_distinguishes_absent_non_binary_and_decompression_failure() {
+        // No RTF property at all -- the common, unremarkable case.
+        assert!(matches!(
+            check_rtf_for_encapsulated_html(None),
+            RtfHtmlCheck::NoRtfProperty
+        ));
+
+        // Present but not a binary value -- shouldn't happen per spec, but
+        // must not be misread as "no encapsulated HTML found".
+        assert!(matches!(
+            check_rtf_for_encapsulated_html(Some(&PropertyValue::Integer32(0))),
+            RtfHtmlCheck::NotBinary
+        ));
+
+        // Present, binary, but shorter than the 16 bytes
+        // compressed_rtf::decompress_rtf reads unconditionally as its own
+        // header -- must be caught before ever calling that function, or
+        // it panics rather than returning an error.
+        let too_short = PropertyValue::Binary(outlook_pst::ltp::prop_context::BinaryValue::new(
+            vec![0; 8],
+        ));
+        assert!(matches!(
+            check_rtf_for_encapsulated_html(Some(&too_short)),
+            RtfHtmlCheck::DecompressionFailed
+        ));
+
+        // Present, binary, long enough, but not valid compressed RTF (a
+        // bogus size header) -- a genuine anomaly, tracked separately from
+        // "no encapsulated HTML found".
+        let garbage = PropertyValue::Binary(outlook_pst::ltp::prop_context::BinaryValue::new(
+            vec![0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ));
+        assert!(matches!(
+            check_rtf_for_encapsulated_html(Some(&garbage)),
+            RtfHtmlCheck::DecompressionFailed
+        ));
     }
 
     #[test]

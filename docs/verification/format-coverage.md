@@ -9,7 +9,8 @@
 | Message properties | Yes | Partial/raw | N/A | Planned | Yes (P3: 4,096 property values) |
 | Message class | Yes | Aggregate counts only | N/A | Planned | Yes (P4a: `IPM.Note`=57) |
 | Plain body | Yes | Presence only | N/A | Planned | Yes (P4a: 1/57, v0.1.4.3) |
-| HTML body | Yes | Presence only | N/A | Planned | Yes (P4a: 55/57) |
+| HTML body (native `PidTagBodyHtml`) | Yes | Presence only | N/A | Planned | Implemented (2026-09-13 fix), pending Windows run — prior "55/57" figure (P4a) is a confirmed undercount |
+| HTML body (encapsulated in RTF, MS-OXRTFEX) | Yes | `\fromhtml1` marker detection only | N/A | Planned | Implemented (2026-09-13 fix), pending Windows run — confirmed real via forensic export test, not yet re-verified against this code |
 | RTF body | Yes | Presence only | N/A | Planned | Yes (P4a: 1/57, v0.1.4.3) |
 | Recipients (count) | Yes | Aggregate counts only | N/A | Planned | Yes (P4a: 69 across 57 messages) |
 | Recipients (To/CC) | Yes | Per-row classification | N/A | Planned | Yes (P4b: 57 To, 11 CC) |
