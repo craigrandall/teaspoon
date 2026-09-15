@@ -683,8 +683,7 @@ fn inspect_recipients(message: &dyn PstMessage, totals: &mut PstTotals) {
             continue;
         };
 
-        let recipient_type =
-            type_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
+        let recipient_type = type_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
         record_recipient_type(totals, recipient_type);
     }
 
