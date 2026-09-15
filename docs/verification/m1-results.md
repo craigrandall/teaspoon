@@ -194,18 +194,40 @@ This was not something the crate's public API signature (`fn
 decompress_rtf(data: &[u8]) -> Result<String>`) would have revealed —
 only reading the actual implementation did.
 
-**Verification status:** unit tests cover the pure branching logic
-(absent property, non-binary property, too-short buffer, and a
-structurally-invalid-but-correctly-sized buffer all correctly avoid being
-misread as "no encapsulated HTML found"). The actual success path —
-real compressed RTF, real `\fromhtml1` detection — has not been
-independently unit-tested with hand-constructed bytes, since verifying a
-byte-exact valid MS-OXRTFCP fixture without a Rust toolchain risked
-asserting something untested as tested. That path's real verification is
-the Windows run against `tsp-tester.pst` and the `RTF_message.msg`
-export, both of which now have direct evidence this fix should resolve
-correctly (see "CONFIRMED" section above) but have not yet been re-run
-against this exact code.
+**Verification status, and a second, more important finding it led to
+(2026-09-13):** the first Windows run against `tsp-tester.pst` after this
+fix returned `bodies_html_native=55`, `bodies_html_via_rtf=0` — unchanged
+from before the fix, and the opposite of what the "CONFIRMED" evidence
+above predicted (`bodies_html_via_rtf=1` for the one RTF-only message).
+`rtf_decompression_errors=0` confirmed this was a clean negative result,
+not a crash or failure, which made the contradiction worth chasing rather
+than dismissing.
+
+**Resolution: this PST-side result was correct, and the earlier MSG-side
+result was not.** Craig confirmed `RTF_message.msg` genuinely is the PST's
+RTF-only message, then used Outlook's own View Source feature on it. The
+resulting HTML carried an explicit `<!-- Converted from text/rtf
+format -->` comment and a `Generator: MS Exchange Server` tag — i.e.,
+Exchange generated that HTML at *render time* for the View Source display
+feature, an unrelated mechanism from MS-OXRTFEX encapsulation that says
+nothing about whether `\fromhtml1` was ever in the message's actual RTF.
+This message is genuinely RTF-authored. The earlier MSG-side finding
+(`bodies_html_via_rtf=1` via `msg_parser::Outlook::html_from_rtf()`) was a
+false positive: that method turned out not to gate on the FROMHTML
+control word at all. See `m2-results.md`, "CORRECTED: fromhtml detection
+was not actually spec-gated," for the fix this led to on the MSG side —
+both diagnostics now share one function (`rtf_bytes_contain_fromhtml`)
+checking the literal control word against decompressed bytes, rather than
+each trusting a different crate's higher-level convenience method.
+
+Unit tests cover the pure branching logic (absent property, non-binary
+property, too-short buffer, and a structurally-invalid-but-correctly-sized
+buffer all correctly avoid being misread as "no encapsulated HTML found"),
+plus the shared marker-matching function directly. The genuine
+`\fromhtml1`-present success path has now been indirectly exercised via
+real data on the MSG side (once corrected) but not yet reconfirmed on the
+PST side with a message actually known to contain the marker — the one
+PST message tested turned out to be a true negative, not a positive.
 
 ## Why zero-byte and by-reference attachments were dropped as fixture goals (2026-09-07)
 
@@ -339,8 +361,10 @@ already supports it) — see `m2-results.md`.
 ## What remains unproven
 
 No claim is made that teaspoon has proven:
-- the 2026-09-13 RTF-encapsulated-HTML fix, compiled or run on Windows —
-  implemented and unit-tested at the branching-logic level only;
+- the 2026-09-13 RTF-encapsulated-HTML fix's positive-detection path
+  (real `\fromhtml1` presence, correctly detected) against a real PST
+  message — only the negative path (correctly finding no marker in a
+  genuinely RTF-authored message) has real-data confirmation so far;
 - all PST variants;
 - complete property fidelity;
 - body *extraction* (only body-type *availability* is established);

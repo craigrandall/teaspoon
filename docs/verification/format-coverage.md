@@ -10,7 +10,7 @@
 | Message class | Yes | Aggregate counts only | N/A | Planned | Yes (P4a: `IPM.Note`=57) |
 | Plain body | Yes | Presence only | N/A | Planned | Yes (P4a: 1/57, v0.1.4.3) |
 | HTML body (native `PidTagBodyHtml`) | Yes | Presence only | N/A | Planned | Implemented (2026-09-13 fix), pending Windows run — prior "55/57" figure (P4a) is a confirmed undercount |
-| HTML body (encapsulated in RTF, MS-OXRTFEX) | Yes | `\fromhtml1` marker detection only | N/A | Planned | Implemented (2026-09-13 fix), pending Windows run — confirmed real via forensic export test, not yet re-verified against this code |
+| HTML body (encapsulated in RTF, MS-OXRTFEX) | Yes | `\fromhtml1` marker detection only | N/A | Planned | Implemented, pending re-run — negative path confirmed on real data (the one PST message tested is genuinely RTF-authored, correctly detected as such); positive path not yet confirmed on the PST side (see docs/verification/m1-results.md) |
 | RTF body | Yes | Presence only | N/A | Planned | Yes (P4a: 1/57, v0.1.4.3) |
 | Recipients (count) | Yes | Aggregate counts only | N/A | Planned | Yes (P4a: 69 across 57 messages) |
 | Recipients (To/CC) | Yes | Per-row classification | N/A | Planned | Yes (P4b: 57 To, 11 CC) |

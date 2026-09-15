@@ -104,7 +104,47 @@ fn main() -> Result<()> {
 }
 
 // =============================================================================
-// PST diagnostic (M1, unchanged in behavior from v0.1.4.3)
+// Shared: MS-OXRTFEX "RTF containing encapsulated HTML" detection
+// =============================================================================
+
+/// The MS-OXRTFEX control word a de-encapsulating reader uses to recognize
+/// RTF containing encapsulated HTML. Per that specification, a reader
+/// finding this control word "SHOULD conclude the RTF document contains
+/// encapsulated HTML and stop further inspection" -- its presence alone is
+/// the specification-sanctioned signal, not a heuristic.
+///
+/// Shared by both the PST and MSG diagnostics so they apply identically
+/// strict detection, rather than two different signals that can silently
+/// drift apart -- which is exactly what happened here: the MSG side
+/// originally (2026-09-07) trusted `msg_parser::Outlook::html_from_rtf()`'s
+/// mere non-emptiness as "HTML was found," without confirming that method
+/// itself gates on this control word. It turned out not to: tested against
+/// `RTF_message.msg` (confirmed, via Outlook's own View Source feature, to
+/// be genuinely RTF-authored content -- its HTML view carries an explicit
+/// `<!-- Converted from text/rtf format -->` comment and an
+/// `MS Exchange Server` generator tag, meaning Exchange generated that HTML
+/// at render time for display, which is an unrelated mechanism from
+/// MS-OXRTFEX encapsulation), `html_from_rtf()` still returned non-empty
+/// content (2026-09-13). Both diagnostics now check for this literal
+/// control word directly against decompressed RTF bytes instead of
+/// trusting either crate's own higher-level "give me HTML" convenience
+/// method.
+const FROMHTML_MARKER: &[u8] = b"\\fromhtml1";
+
+/// Returns whether decompressed RTF bytes contain the FROMHTML control
+/// word. A plain byte search, not a UTF-8/String conversion: RTF is an
+/// ASCII-based control-word format (non-ASCII text is escaped as `\'XX`
+/// hex sequences), so searching raw bytes avoids any encoding-conversion
+/// question entirely.
+fn rtf_bytes_contain_fromhtml(rtf_bytes: &[u8]) -> bool {
+    rtf_bytes
+        .windows(FROMHTML_MARKER.len())
+        .any(|window| window == FROMHTML_MARKER)
+}
+
+// =============================================================================
+// PST diagnostic (M1, unchanged in behavior from v0.1.4.3 except body-flag
+// detection, corrected 2026-09-13)
 // =============================================================================
 
 /// MS-OXPROPS property identifiers used only to check *presence* or read a
@@ -364,14 +404,14 @@ fn inspect_message(message: &dyn PstMessage, totals: &mut PstTotals) {
     record_message_class(totals, properties.message_class());
 
     // HTML detection has two layers, exactly mirroring the MSG-side fix
-    // (2026-09-07) and the confirmed finding (2026-09-13) that this
-    // dependency has the identical blind spot: many real messages have no
-    // native PidTagBodyHtml property at all -- Outlook instead encapsulates
-    // the HTML inside PidTagRtfCompressed per MS-OXRTFEX, detectable via the
-    // \fromhtml1 control word, which the specification itself designates as
-    // the correct de-encapsulation signal. This is a presence-only check:
-    // tsp never needs the extracted HTML/RTF content itself, only whether
-    // this marker exists, so no RTF-to-HTML conversion is implemented here.
+    // (2026-09-07, corrected 2026-09-13) and the confirmed finding
+    // (2026-09-13) that this dependency has the identical blind spot:
+    // many real messages have no native PidTagBodyHtml property at all --
+    // Outlook instead encapsulates the HTML inside PidTagRtfCompressed per
+    // MS-OXRTFEX, detectable via the FROMHTML control word (see
+    // [`FROMHTML_MARKER`]). This is a presence-only check: tsp never needs
+    // the extracted HTML/RTF content itself, only whether this marker
+    // exists, so no RTF-to-HTML conversion is implemented here.
     let has_html_native = properties.get(PROP_BODY_HTML).is_some();
     let has_rtf = properties.get(PROP_RTF_COMPRESSED).is_some();
     let has_html_via_rtf = if has_html_native {
@@ -413,11 +453,8 @@ enum RtfHtmlCheck {
 }
 
 /// Checks whether `PidTagRtfCompressed`, if present, contains HTML content
-/// encapsulated per MS-OXRTFEX. Per that specification, a de-encapsulating
-/// reader finding the FROMHTML control word (`\fromhtml1`) "SHOULD
-/// conclude the RTF document contains encapsulated HTML and stop further
-/// inspection" -- so presence of that exact control word is the
-/// specification-sanctioned signal, not a heuristic. Decompression uses
+/// encapsulated per MS-OXRTFEX (see [`FROMHTML_MARKER`] for why presence of
+/// that one control word is the correct signal). Decompression uses
 /// `compressed-rtf` (MS-OXRTFCP), maintained by the same author as
 /// `outlook-pst`; its magic numbers and dictionary were independently
 /// cross-checked against `msg_parser`'s own from-scratch implementation of
@@ -448,7 +485,7 @@ fn check_rtf_for_encapsulated_html(rtf_property: Option<&PropertyValue>) -> RtfH
     }
     match compressed_rtf::decompress_rtf(buffer) {
         Ok(rtf) => RtfHtmlCheck::Decompressed {
-            contains_fromhtml: rtf.contains("\\fromhtml1"),
+            contains_fromhtml: rtf_bytes_contain_fromhtml(rtf.as_bytes()),
         },
         Err(_) => RtfHtmlCheck::DecompressionFailed,
     }
@@ -479,10 +516,10 @@ fn record_message_class(totals: &mut PstTotals, class: std::io::Result<String>) 
 ///
 /// `has_html_native` and `has_html_via_rtf` are tracked as distinct
 /// signals, never silently merged, mirroring the MSG-side fix
-/// (2026-09-07) and the confirmed finding (2026-09-13) that this
-/// dependency has the identical blind spot: `bodies_html` alone would
-/// have undercounted real HTML content stored only via MS-OXRTFEX
-/// encapsulation in the RTF body.
+/// (2026-09-07, corrected 2026-09-13) and the confirmed finding
+/// (2026-09-13) that this dependency has the identical blind spot:
+/// `bodies_html` alone would have undercounted real HTML content stored
+/// only via MS-OXRTFEX encapsulation in the RTF body.
 fn record_body_flags(
     totals: &mut PstTotals,
     has_plain: bool,
@@ -646,7 +683,8 @@ fn inspect_recipients(message: &dyn PstMessage, totals: &mut PstTotals) {
             continue;
         };
 
-        let recipient_type = type_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
+        let recipient_type =
+            type_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
         record_recipient_type(totals, recipient_type);
     }
 
@@ -689,7 +727,7 @@ fn inspect_attachments(message: &dyn PstMessage, totals: &mut PstTotals) {
 }
 
 // =============================================================================
-// MSG diagnostic (M2-P1/P2 equivalent, new)
+// MSG diagnostic (M2-P1/P2 equivalent; HTML detection corrected 2026-09-13)
 // =============================================================================
 
 /// PidTagAttachMethod values as exposed by `msg_parser`'s `attach_method`
@@ -727,6 +765,10 @@ fn run_msg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<
     println!("bodies_html_native={}", totals.bodies_html_native);
     println!("bodies_html_via_rtf={}", totals.bodies_html_via_rtf);
     println!("bodies_rtf={}", totals.bodies_rtf);
+    println!(
+        "rtf_decompression_errors={}",
+        totals.rtf_decompression_errors
+    );
 
     println!(
         "messages_with_recipients={}",
@@ -797,6 +839,7 @@ struct MsgTotals {
     bodies_html_native: u64,
     bodies_html_via_rtf: u64,
     bodies_rtf: u64,
+    rtf_decompression_errors: u64,
 
     messages_with_recipients: u64,
     recipients_to: u64,
@@ -823,22 +866,33 @@ struct MsgTotals {
 fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
     record_msg_class(totals, &outlook.message_class);
 
-    // HTML detection has two layers, and they are tracked separately rather
-    // than silently merged, consistent with this project's loss-transparency
-    // principle: many real messages (confirmed by direct inspection of a
-    // fixture file's raw OLE property streams) have no native PidTagBodyHtml
-    // property at all -- Outlook instead encapsulates the HTML inside the
-    // RTF body (MS-OXRTFEX), which msg_parser can recover via
-    // `html_from_rtf()`. Checking only the native `.html` field, as this
-    // code originally did, silently misses that entire common case.
+    // HTML detection, corrected 2026-09-13: this used to trust
+    // `Outlook::html_from_rtf()`'s mere non-emptiness as "HTML was found."
+    // That was wrong -- proven wrong by `RTF_message.msg`, a message
+    // confirmed genuinely RTF-authored (via Outlook's own View Source
+    // feature showing an explicit "Converted from text/rtf format" /
+    // "MS Exchange Server" render-time conversion, not authored HTML) for
+    // which `html_from_rtf()` still returned non-empty content. It
+    // evidently does not gate on the FROMHTML control word the way the
+    // specification requires for a real detection signal. This now checks
+    // the decompressed RTF bytes directly for that control word, via the
+    // same shared check the PST side uses (see [`FROMHTML_MARKER`]),
+    // rather than trusting either crate's own higher-level convenience
+    // method.
     let has_html_native = !outlook.html.is_empty();
+    let has_rtf = !outlook.rtf_compressed.is_empty();
     let has_html_via_rtf = if has_html_native {
         false
+    } else if has_rtf {
+        match outlook.rtf_decompressed() {
+            Some(bytes) => rtf_bytes_contain_fromhtml(&bytes),
+            None => {
+                totals.rtf_decompression_errors += 1;
+                false
+            }
+        }
     } else {
-        outlook
-            .html_from_rtf()
-            .map(|html| !html.is_empty())
-            .unwrap_or(false)
+        false
     };
 
     record_msg_body_flags(
@@ -846,7 +900,7 @@ fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
         !outlook.body.is_empty(),
         has_html_native,
         has_html_via_rtf,
-        !outlook.rtf_compressed.is_empty(),
+        has_rtf,
     );
 
     record_msg_recipients(
@@ -992,6 +1046,21 @@ fn record_embedded_message_class(totals: &mut MsgTotals, class: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Shared fromhtml-marker check ---------------------------------------
+
+    #[test]
+    fn fromhtml_marker_is_found_regardless_of_surrounding_bytes() {
+        assert!(rtf_bytes_contain_fromhtml(
+            b"{\\rtf1\\ansi\\fromhtml1 \\deff0{\\fonttbl}}"
+        ));
+        assert!(!rtf_bytes_contain_fromhtml(
+            b"{\\rtf1\\ansi\\deff0{\\fonttbl}}"
+        ));
+        assert!(!rtf_bytes_contain_fromhtml(b""));
+        // Shorter than the marker itself must not panic or false-positive.
+        assert!(!rtf_bytes_contain_fromhtml(b"\\from"));
+    }
 
     // --- PST-side tests (unchanged from v0.1.4.3, PstTotals renamed) -------
 

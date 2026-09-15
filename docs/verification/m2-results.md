@@ -88,26 +88,20 @@ consistent with two separate 2-recipient messages. No arithmetic anomalies.
 
 Three findings need investigation before this data can be trusted:
 
-1. **RESOLVED (2026-09-07).** `bodies_html=0` universally was not a
-   fixture problem or an environment default — it was a real gap in this
-   diagnostic's detection logic. Direct byte-level inspection of a
-   deliberately-HTML fixture file (`This is an example HTML message.msg`,
-   confirmed genuine HTML via its view-source: real `<html>`/`<body>`
-   markup, Word-generated) proved the file has **no native
-   `PidTagBodyHtml` (0x1013) property stream at all** — only `PidTagBody`
-   (0x1000, plain) and `PidTagRtfCompressed` (0x1009, RTF) exist. Outlook
-   had encapsulated the HTML inside the RTF body instead (MS-OXRTFEX), a
-   legitimate and common MAPI storage strategy. This diagnostic originally
-   checked only the native `.html` field and never used `msg_parser`'s own
-   documented fallback for this exact case, `Outlook::html_from_rtf()`.
-   Fixed: HTML detection now checks native `.html` first, then falls back
-   to `html_from_rtf()`, and the two paths are tracked as distinct counters
-   (`bodies_html_native`, `bodies_html_via_rtf`) rather than silently
-   merged, consistent with this project's loss-transparency principle —
-   `bodies_html` remains as an "either path" convenience total. This
-   strongly suggests, though does not independently confirm for each file,
-   that all prior 28 fixture messages share this same RTF-encapsulated-HTML
-   storage pattern rather than being genuinely RTF-only as first assumed.
+1. **PARTIALLY RESOLVED, then corrected further (2026-09-07, then
+   2026-09-13).** `bodies_html=0` universally was not a fixture problem or
+   an environment default — it was a real gap in this diagnostic's
+   detection logic. Direct byte-level inspection of a deliberately-HTML
+   fixture file (`This is an example HTML message.msg`, confirmed genuine
+   HTML via its view-source: real `<html>`/`<body>` markup, Word-generated)
+   proved the file has **no native `PidTagBodyHtml` (0x1013) property
+   stream at all** — only `PidTagBody` (0x1000, plain) and
+   `PidTagRtfCompressed` (0x1009, RTF) exist. Outlook had encapsulated the
+   HTML inside the RTF body instead (MS-OXRTFEX), a legitimate and common
+   MAPI storage strategy. The 2026-09-07 fix added a fallback to
+   `Outlook::html_from_rtf()`, treating its mere non-emptiness as "HTML was
+   found." **That fallback was itself wrong, corrected 2026-09-13** — see
+   "CORRECTED: fromhtml detection was not actually spec-gated" below.
 2. **`attachments_zero_byte=3` of 4 total attachments.** Two of these are
    plausibly explained by `payload_bytes` not being the right field to
    check for embedded-message/OLE attachment types (methods `5` and `6`),
@@ -161,6 +155,53 @@ writeup); findings specific to or mirrored on the MSG side:
 - **`bodies_plain` interpretation caveat** — identical to the PST side,
   see `m1-results.md`.
 
+## CORRECTED: fromhtml detection was not actually spec-gated (2026-09-13)
+
+The 2026-09-07 fix trusted `Outlook::html_from_rtf()`'s mere non-emptiness
+as proof of MS-OXRTFEX HTML encapsulation. **This was wrong**, discovered
+while independently verifying the PST-side fix (see `m1-results.md`,
+"CONFIRMED: PST-side HTML-in-RTF blind spot" and the PST-side fix that
+followed it):
+
+- Testing the PST-side fix against the live `tsp-tester.pst` produced an
+  unexpected result: its one RTF-only message showed no FROMHTML marker
+  at all (`bodies_html_via_rtf=0`), directly contradicting the earlier
+  MSG-side finding that this same message (exported as `RTF_message.msg`)
+  had `bodies_html_via_rtf=1`.
+- Craig confirmed `RTF_message.msg` genuinely is the message in
+  `tsp-tester.pst`, and used Outlook's own View Source feature on it. The
+  resulting HTML carried an explicit `<!-- Converted from text/rtf
+  format -->` comment and a `Generator: MS Exchange Server` tag — i.e.,
+  Exchange generated that HTML at *render time* for the View Source
+  display feature. That is an unrelated mechanism from MS-OXRTFEX
+  encapsulation; its existence says nothing about whether `\fromhtml1` was
+  ever present in the message's actual `PidTagRtfCompressed` property.
+  (Contrast with the markup style of the genuinely-HTML-authored test
+  file from 2026-09-07, which carried Word-specific CSS classes and
+  `mso-`-prefixed styling comments — qualitatively different from this
+  message's generic `<SPAN>`/`<FONT>` markup.)
+- Conclusion: `html_from_rtf()` does not gate on the FROMHTML control word
+  the way the specification requires for a real detection signal — it
+  appears to perform RTF-to-HTML conversion unconditionally, the same way
+  Exchange's View Source rendering does, regardless of whether the
+  content was ever really HTML.
+
+**Fixed**: the MSG-side diagnostic no longer calls `html_from_rtf()` at
+all. It now uses `Outlook::rtf_decompressed()` to get the raw decompressed
+RTF bytes and checks them directly for the literal `\fromhtml1` control
+word — the exact same check, via a single shared function
+(`rtf_bytes_contain_fromhtml`), that the PST side uses. Both diagnostics
+now apply identically strict, specification-correct detection instead of
+two different signals that could (and did) silently disagree. A new
+`rtf_decompression_errors` counter was added to `MsgTotals`, mirroring the
+PST side, for the case where `rtf_compressed` is present but
+`rtf_decompressed()` returns `None`.
+
+This means the earlier "27 of 29 messages via RTF" figure (recorded
+2026-09-07) was very likely an overcount, and needs to be re-measured with
+this corrected code before being trusted.
+
+
 ## What remains unproven
 
 The build and test suite passing, and this first run completing without a
@@ -173,8 +214,11 @@ do not establish that:
   exactly that gap);
 - embedded-message opening actually works against real data (this run's
   one data point is a `None`, not a success — see finding 3 above);
-- body-type detection is measuring what it's intended to measure, given
-  the uniform plain+RTF/zero-HTML result across all 9 files (finding 1);
+- body-type detection is measuring what it's intended to measure — the
+  original uniform plain+RTF/zero-HTML result (finding 1) turned out to
+  reveal a real detection bug (`html_from_rtf()` not being spec-gated),
+  now corrected 2026-09-13, but the corrected code has not yet been
+  compiled or re-run against the fixture set;
 - the zero-byte attachment count reflects genuine zero-byte files rather
   than an artifact of which field is being checked for which attachment
   type — the 2026-09-13 fix (see above) should resolve this, but has not
