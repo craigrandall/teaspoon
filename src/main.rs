@@ -220,6 +220,10 @@ fn run_pst_diagnostic(path: &Path) -> Result<()> {
         "rtf_decompression_errors={}",
         totals.rtf_decompression_errors
     );
+    println!(
+        "rtf_decompressed_bytes_total={}",
+        totals.rtf_decompressed_bytes_total
+    );
 
     // --- P4a: recipient / attachment aggregate counts -----------------------
     println!(
@@ -314,6 +318,13 @@ struct PstTotals {
     bodies_html_via_rtf: u64,
     bodies_rtf: u64,
     rtf_decompression_errors: u64,
+    /// Sum of decompressed-RTF byte lengths across every message where
+    /// decompression succeeded (regardless of whether the FROMHTML marker
+    /// was found). Never the content itself -- a size-only diagnostic
+    /// added 2026-09-14 specifically to let the PST and MSG sides be
+    /// compared against each other when they disagree on the same
+    /// underlying message, without ever printing or comparing content.
+    rtf_decompressed_bytes_total: u64,
 
     messages_with_recipients: u64,
     total_recipients: u64,
@@ -418,7 +429,13 @@ fn inspect_message(message: &dyn PstMessage, totals: &mut PstTotals) {
         false
     } else {
         match check_rtf_for_encapsulated_html(properties.get(PROP_RTF_COMPRESSED)) {
-            RtfHtmlCheck::Decompressed { contains_fromhtml } => contains_fromhtml,
+            RtfHtmlCheck::Decompressed {
+                contains_fromhtml,
+                decompressed_bytes,
+            } => {
+                totals.rtf_decompressed_bytes_total += decompressed_bytes as u64;
+                contains_fromhtml
+            }
             RtfHtmlCheck::DecompressionFailed => {
                 totals.rtf_decompression_errors += 1;
                 false
@@ -449,7 +466,10 @@ enum RtfHtmlCheck {
     NoRtfProperty,
     NotBinary,
     DecompressionFailed,
-    Decompressed { contains_fromhtml: bool },
+    Decompressed {
+        contains_fromhtml: bool,
+        decompressed_bytes: usize,
+    },
 }
 
 /// Checks whether `PidTagRtfCompressed`, if present, contains HTML content
@@ -486,6 +506,7 @@ fn check_rtf_for_encapsulated_html(rtf_property: Option<&PropertyValue>) -> RtfH
     match compressed_rtf::decompress_rtf(buffer) {
         Ok(rtf) => RtfHtmlCheck::Decompressed {
             contains_fromhtml: rtf_bytes_contain_fromhtml(rtf.as_bytes()),
+            decompressed_bytes: rtf.len(),
         },
         Err(_) => RtfHtmlCheck::DecompressionFailed,
     }
@@ -768,6 +789,10 @@ fn run_msg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<
         "rtf_decompression_errors={}",
         totals.rtf_decompression_errors
     );
+    println!(
+        "rtf_decompressed_bytes_total={}",
+        totals.rtf_decompressed_bytes_total
+    );
 
     println!(
         "messages_with_recipients={}",
@@ -839,6 +864,7 @@ struct MsgTotals {
     bodies_html_via_rtf: u64,
     bodies_rtf: u64,
     rtf_decompression_errors: u64,
+    rtf_decompressed_bytes_total: u64,
 
     messages_with_recipients: u64,
     recipients_to: u64,
@@ -884,7 +910,10 @@ fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
         false
     } else if has_rtf {
         match outlook.rtf_decompressed() {
-            Some(bytes) => rtf_bytes_contain_fromhtml(&bytes),
+            Some(bytes) => {
+                totals.rtf_decompressed_bytes_total += bytes.len() as u64;
+                rtf_bytes_contain_fromhtml(&bytes)
+            }
             None => {
                 totals.rtf_decompression_errors += 1;
                 false
