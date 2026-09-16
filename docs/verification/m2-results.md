@@ -198,8 +198,44 @@ PST side, for the case where `rtf_compressed` is present but
 `rtf_decompressed()` returns `None`.
 
 This means the earlier "27 of 29 messages via RTF" figure (recorded
-2026-09-07) was very likely an overcount, and needs to be re-measured with
-this corrected code before being trusted.
+2026-09-07) was suspected of being an overcount, and needed to be
+re-measured with this corrected code before being trusted.
+
+### RESOLVED (2026-09-14): re-measured at 27/29 again — and that's the correct figure, not a repeat of the bug
+
+Re-running the corrected code against the same 29-file fixture produced
+`bodies_html_via_rtf=27` again — numerically unchanged from the
+pre-correction figure. That coincidence needed to be checked rather than
+assumed either way (bug still present, or a genuine re-confirmation).
+
+Isolating `RTF_message.msg` (the one file with independent, non-`tsp`
+ground truth — confirmed via Outlook's own View Source feature to be
+genuinely RTF-authored) and running it alone through the corrected code
+showed `bodies_html_via_rtf=1` — appearing to contradict the PST-side
+diagnostic's `bodies_html_via_rtf=0` for what should be the same
+underlying message, despite both sides now sharing the identical
+`rtf_bytes_contain_fromhtml` check.
+
+A size-only diagnostic (`rtf_decompressed_bytes_total`) resolved this: the
+PST-native message's decompressed RTF is 10,778 bytes; the exported
+`.msg`'s is 3,191 bytes — a 3.4× difference, far beyond any decompression
+quirk. **The exported file genuinely contains different, regenerated RTF
+content, not the original PST-stored bytes** — most likely because
+Exchange was actively resynthesizing this specific message's RTF/HTML
+representations (consistent with the earlier View Source evidence), and
+the resynthesized version picked up a `\fromhtml1` marker the PST-native
+version never had. Full writeup: `m1-results.md`, "RESOLVED (2026-09-14):
+the PST/MSG disagreement was a cross-export artifact, not a bug in either
+fix."
+
+**Conclusion: the corrected MSG-side detection is working correctly.**
+`RTF_message.msg` was never a reliable stand-in for the PST-native
+message's true content once exported — that's a limit of the
+export-as-verification-proxy technique, not evidence against the fix.
+The `27/29` figure reflects genuine `.msg` files, not PST exports subject
+to this resynthesis behavior, and stands as the corrected, trustworthy
+measurement.
+
 
 
 ## What remains unproven
@@ -215,10 +251,12 @@ do not establish that:
 - embedded-message opening actually works against real data (this run's
   one data point is a `None`, not a success — see finding 3 above);
 - body-type detection is measuring what it's intended to measure — the
-  original uniform plain+RTF/zero-HTML result (finding 1) turned out to
-  reveal a real detection bug (`html_from_rtf()` not being spec-gated),
-  now corrected 2026-09-13, but the corrected code has not yet been
-  compiled or re-run against the fixture set;
+  original uniform plain+RTF/zero-HTML result (finding 1) revealed a real
+  detection bug (`html_from_rtf()` not being spec-gated), corrected
+  2026-09-13, re-run and confirmed 2026-09-14 (27/29 via RTF, cross-checked
+  against a genuine size discrepancy explaining the one file that briefly
+  looked like a contradiction — see the "RESOLVED (2026-09-14)" section
+  above);
 - the zero-byte attachment count reflects genuine zero-byte files rather
   than an artifact of which field is being checked for which attachment
   type — the 2026-09-13 fix (see above) should resolve this, but has not

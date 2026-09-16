@@ -229,6 +229,53 @@ real data on the MSG side (once corrected) but not yet reconfirmed on the
 PST side with a message actually known to contain the marker — the one
 PST message tested turned out to be a true negative, not a positive.
 
+### RESOLVED (2026-09-14): the PST/MSG disagreement was a cross-export artifact, not a bug in either fix
+
+After the correction above, re-testing surfaced one more apparent
+contradiction: the PST-side diagnostic, run directly against the live
+`tsp-tester.pst`, reported `bodies_html_via_rtf=0` for its one RTF-only
+message — but the MSG-side diagnostic, run against that same message
+exported as `RTF_message.msg`, reported `bodies_html_via_rtf=1`. Since
+both sides now call the identical `rtf_bytes_contain_fromhtml` on
+decompressed bytes, the disagreement had to be in what bytes each side
+was actually checking, not the check itself.
+
+A privacy-safe size-only diagnostic (`rtf_decompressed_bytes_total`, sum
+of decompressed RTF byte lengths, never content) was added to both sides
+to test this without needing the file's content again. Result:
+
+- PST-native decompressed RTF: **10,778 bytes**
+- Exported `.msg`'s decompressed RTF: **3,191 bytes** (3.4× smaller)
+
+This is not a rounding difference or a minor decompression-implementation
+quirk between `compressed-rtf` and `msg_parser` — it is conclusive
+evidence that **the exported `.msg` file genuinely contains different,
+substantially smaller RTF content than the live PST message does.**
+Combined with the earlier View Source evidence (`<!-- Converted from
+text/rtf format -->`, `Generator: MS Exchange Server`), the most likely
+explanation is that Outlook's Save As → `.msg` export triggered Exchange
+to resynthesize a simplified RTF representation for this specific
+actively-synced message, rather than copying the stored
+`PidTagRtfCompressed` bytes verbatim — and that resynthesized version
+picked up a `\fromhtml1` marker the original never had.
+
+**Conclusion: both fixes are correct.** The PST-side result
+(`bodies_html_via_rtf=0`) reflects the message's true, stored content.
+The MSG-side result for this one *exported* file reflects different,
+regenerated content — not a flaw in the MSG-side detection logic itself.
+This also means the aggregate MSG-side finding (27 of 29 `.msg` files
+showing `bodies_html_via_rtf=1`) should **not** be discounted on the
+strength of this one file: those 29 files are genuine `.msg` files, not
+PST-exports subject to this specific resynthesis behavior, so there is no
+similar reason to doubt them without separate evidence.
+
+**Methodological takeaway, not a code change:** exporting a PST message
+to `.msg` via Save As is not guaranteed to reproduce byte-identical
+property content, at least for messages Exchange is actively
+RTF/HTML-syncing. This is a real limit on using cross-format export as a
+verification technique going forward, worth remembering the next time a
+PST-side and MSG-side result are compared this way.
+
 ## Why zero-byte and by-reference attachments were dropped as fixture goals (2026-09-07)
 
 Both were deliberately removed from the fixture-construction goal, not
@@ -361,10 +408,13 @@ already supports it) — see `m2-results.md`.
 ## What remains unproven
 
 No claim is made that teaspoon has proven:
-- the 2026-09-13 RTF-encapsulated-HTML fix's positive-detection path
-  (real `\fromhtml1` presence, correctly detected) against a real PST
-  message — only the negative path (correctly finding no marker in a
-  genuinely RTF-authored message) has real-data confirmation so far;
+- the 2026-09-13/14 RTF-encapsulated-HTML fix's positive-detection path
+  (real `\fromhtml1` presence, correctly detected) against a real *PST*
+  message specifically — the negative path is confirmed (correctly
+  finding no marker in a genuinely RTF-authored PST message), and the
+  positive path is confirmed on the *MSG* side (27 real `.msg` files),
+  but no PST message in the current fixture is known to contain the
+  marker to test the PST side's positive path directly;
 - all PST variants;
 - complete property fidelity;
 - body *extraction* (only body-type *availability* is established);
