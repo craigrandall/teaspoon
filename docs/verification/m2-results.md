@@ -2,7 +2,7 @@
 
 ## Status
 
-**Compiles and runs cleanly on Windows (15/15 tests pass) against a real 9-file `.msg` fixture set.** This is *not* the same as "verified" — the run surfaced three findings that need investigation before this diagnostic's output can be trusted (see "First real-run evidence and open questions" below). Treat the code as working; treat the specific numbers as under investigation, not confirmed.
+**Compiles and runs cleanly on Windows (21/21 tests pass) against real fixture sets on both a `.pst` and a `.msg` basis.** Body-type detection (native HTML, HTML-via-RTF-encapsulation, plain, RTF) is corrected and confirmed against real data as of 2026-09-14. Recipient/attachment classification and the zero-byte/method-conditioning fix are confirmed correct against real data. Embedded-message *opening* (not classification, which works) was investigated across two independent real attempts and found not achievable in practice — see "M2c" below; this is now an accepted, documented ceiling, not an open question.
 
 ## Dependency
 
@@ -238,6 +238,71 @@ measurement.
 
 
 
+## M2c: embedded-message opening investigated and found not achievable in practice (2026-09-14)
+
+Mirroring P4c on the PST side (`outlook-pst` could not open embedded
+messages through its public API), the same underlying capability was
+investigated on the MSG side and reached the same practical outcome,
+though for a different, less fully-understood reason.
+
+`msg_parser` explicitly documents this as supported: attachments with
+`attach_method == 5` are nested `.msg` files, and `Attachment::as_message()`
+is documented to parse them recursively. `tsp`'s classification of
+`attach_method` is confirmed correct — `attachments_method_embedded_message`
+counts these attachments accurately across two independent fixture rounds.
+But actually opening one has failed on every real attempt so far:
+
+- **First attempt (2026-09-07):** one embedded-message attachment,
+  `embedded_messages_opened=0`, `embedded_message_open_errors=0` — `None`,
+  not an error.
+- **Second attempt (2026-09-14), built via a different construction
+  method specifically to rule out a fluke of the first:** a fixture round
+  adding two more embedded-message attachments (three total across the
+  enhanced `tsp-tester.pst`, two isolated in a dedicated
+  `msgs\embedded` test folder) — same result:
+  `embedded_messages_opened=0`, `embedded_message_open_errors=0` again.
+
+Two independent, differently-constructed real attachments producing an
+identical silent `None` — not an explicit `Err` either time — is no
+longer treated as a fluke of one construction method. Something in
+`as_message()`'s internal gating, separate from the `attach_method` check
+(which demonstrably works), is not recognizing these as parseable.
+
+**The exact root cause was not found.** `msg_parser`'s actual
+`Attachment::as_message()` implementation was searched for across three
+separate research attempts (varying search terms, direct GitHub source
+lookups) and did not surface — a real limit of this investigation, stated
+plainly rather than papered over with a plausible-sounding guess.
+
+**Decision: stop here, do not invest further fixture-construction effort
+chasing this.** Two consistent negative results with no explicit error is
+treated as sufficient evidence of a real, practical limitation, mirroring
+the evidentiary bar P4c was closed at. Two possible parallel, low-cost
+next steps — filing an issue with the `msg_parser` maintainer, or
+attempting to read the crate's actual source directly (e.g. from Craig's
+local Cargo registry cache, the way the P4b column-read API was finally
+confirmed after docs.rs research alone stalled) — are both cheap enough to
+revisit later, but neither is being pursued as of this writing.
+
+**A strategic point this raises, not just a technical one:** opening
+embedded messages was one of the stronger points in favor of choosing
+`msg_parser` over alternatives (see the 2026-09-07 comparative analysis)
+— specifically, that it "already solves what P4c couldn't." That
+specific differentiator has not held up against real data. `msg_parser`
+still has real, demonstrated advantages over the alternative considered
+(byte-level attachment content, named-property resolution, active
+maintenance), but this one is documentation, not demonstrated behavior,
+at least against real Outlook-constructed embeds tried so far. Worth
+carrying forward accurately into the still-deferred "custom parser vs.
+`msg_parser` in production" decision at M3, rather than relying on the
+original comparison's now-partially-outdated reasoning.
+
+`tsp` can *detect and count* embedded-message attachments on the MSG side
+(confirmed correct, twice); it cannot open them — the same practical
+ceiling as the PST side, for what now appears to be a different
+underlying reason on each side (an unreachable public API on the PST
+side; an internal gating condition of unknown cause on the MSG side).
+
 ## What remains unproven
 
 The build and test suite passing, and this first run completing without a
@@ -248,8 +313,11 @@ do not establish that:
   local source dump the way the P4b breakthrough was — lower confidence
   than that work carried, and this run's anomalies may be evidence of
   exactly that gap);
-- embedded-message opening actually works against real data (this run's
-  one data point is a `None`, not a success — see finding 3 above);
+- embedded-message opening actually working against real data — investigated
+  (M2c) across two independent attempts and found not to work in practice,
+  for a root cause not identified despite three research attempts; `tsp`
+  correctly detects and counts these attachments but cannot open them,
+  mirroring P4c's PST-side ceiling;
 - body-type detection is measuring what it's intended to measure — the
   original uniform plain+RTF/zero-HTML result (finding 1) revealed a real
   detection bug (`html_from_rtf()` not being spec-gated), corrected
@@ -257,10 +325,12 @@ do not establish that:
   against a genuine size discrepancy explaining the one file that briefly
   looked like a contradiction — see the "RESOLVED (2026-09-14)" section
   above);
-- the zero-byte attachment count reflects genuine zero-byte files rather
-  than an artifact of which field is being checked for which attachment
-  type — the 2026-09-13 fix (see above) should resolve this, but has not
-  yet been compiled or run;
+- the zero-byte attachment fix — compiled, run, and confirmed correct
+  2026-09-14: the method-conditioned split (`attachments_zero_byte` vs.
+  `attachments_zero_size_other_method`) behaves as designed against real
+  data, including a newly-added embedded-message/OLE-attachment set where
+  `attachments_zero_size_other_method` exactly matched the sum of those
+  two methods' counts;
 - any of these counts are correct in the sense of matching the fixture's
   actual intended composition.
 
