@@ -1,0 +1,56 @@
+name: CI
+# This workflow runs on every push to `main` and every pull request targeting `main`.
+# It automates the compile/lint/unit-test portion of the verification gate defined
+# in CONTRIBUTING.md.
+#
+# IMPORTANT SCOPE NOTE: this workflow cannot exercise tsp's actual PST/MSG parsing
+# behavior. Real .pst/.msg fixtures are deliberately excluded from the repo
+# (see .gitignore) for privacy reasons, so there is nothing for `tsp.exe` to run
+# against here. A green run here confirms the code compiles, passes lint, and
+# passes its unit tests on every OS in the matrix -- it does NOT confirm PST/MSG
+# parsing correctness. That verification remains Craig's manual step, run against
+# real fixtures on Windows, exactly as it has been for every milestone so far.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+          # setup-rust-toolchain caches ~/.cargo and target/ itself by default;
+          # a separate actions/cache step for the same paths would just be a
+          # second, redundant cache using this repo's shared 10GB cache quota.
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check compilation
+        run: cargo check
+
+      - name: Lint with Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Build release binary
+        run: cargo build --release
