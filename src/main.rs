@@ -21,6 +21,14 @@ use outlook_pst::{
 struct Args {
     /// A .pst file, a single .msg file, or a directory of .msg files to inspect.
     input: PathBuf,
+
+    /// Use the experimental custom MS-OXMSG parser (raw CFB structural
+    /// enumeration via the `cfb` crate) instead of `msg_parser` for .msg
+    /// input. PST input is unaffected. This is a P1/P2-equivalent spike:
+    /// it proves the container opens and enumerates its structure, and
+    /// does not yet decode any property value.
+    #[arg(long)]
+    oxmsg: bool,
 }
 
 enum InputKind {
@@ -99,7 +107,13 @@ fn main() -> Result<()> {
         InputKind::Msg {
             files,
             subdirectories_skipped,
-        } => run_msg_diagnostic(&files, subdirectories_skipped),
+        } => {
+            if args.oxmsg {
+                run_oxmsg_diagnostic(&files, subdirectories_skipped)
+            } else {
+                run_msg_diagnostic(&files, subdirectories_skipped)
+            }
+        }
     }
 }
 
@@ -1071,9 +1085,247 @@ fn record_embedded_message_class(totals: &mut MsgTotals, class: &str) {
     }
 }
 
+// =============================================================================
+// Custom MS-OXMSG parser groundwork (experimental, opt-in via --oxmsg)
+// =============================================================================
+//
+// P1/P2-equivalent spike, mirroring the shape M1's PST spike started with:
+// prove a real .msg container opens via a generic, non-Outlook-specific CFB
+// (MS-CFB / Compound File Binary) reader, and enumerate its structure --
+// message class not yet decoded, no property value read, nothing beyond
+// presence/name/size. This exists because msg_parser has no raw/generic
+// property-iteration equivalent to outlook-pst's `.get(id)`/`.iter()`,
+// which is the one structural inconsistency remaining between teaspoon's
+// two format adapters (see the 2026-09-14 comparative analysis in project
+// correspondence). The `cfb` crate (crates.io, MIT) handles the generic
+// container-parsing layer; only the MS-OXMSG-specific naming convention
+// below is teaspoon's own.
+//
+// MS-OXMSG stores every message property as one of two things inside the
+// CFB container:
+// - fixed-length properties, packed together inside a single stream named
+//   `__properties_version1.0` (not yet decoded here -- its byte length is
+//   reported, not its packed contents);
+// - variable-length properties (strings, binary, multi-valued), each its
+//   own stream, named `__substg1.0_PPPPTTTT` where PPPP is the 4-hex-digit
+//   property ID and TTTT is the 4-hex-digit property type -- the exact
+//   naming convention independently confirmed by hand three times earlier
+//   in this project via raw byte-level forensic inspection of real .msg
+//   files (e.g. `__substg1.0_1000001F` = PidTagBody, PT_UNICODE).
+// Recipients and attachments each get their own numbered sub-storage
+// (`__recip_version1.0_#NNNNNNNN`, `__attach_version1.0_#NNNNNNNN`), and
+// named (non-standard) properties get a dedicated `__nameid_version1.0`
+// storage. All of this is name/size/count only -- never content.
+
+fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
+    println!("inventory=privacy_safe");
+    println!("input_kind=msg_oxmsg");
+    println!("files_scanned={}", files.len());
+    println!("subdirectories_skipped={subdirectories_skipped}");
+
+    let mut totals = OxmsgTotals::default();
+
+    for file in files {
+        match cfb::open(file) {
+            Ok(comp) => inspect_oxmsg(&comp, &mut totals),
+            Err(_) => totals.open_errors += 1,
+        }
+    }
+
+    println!("open_errors={}", totals.open_errors);
+    println!("total_entries={}", totals.total_entries);
+    println!("has_properties_stream={}", totals.has_properties_stream);
+    println!(
+        "properties_stream_bytes_total={}",
+        totals.properties_stream_bytes_total
+    );
+    println!("property_streams_total={}", totals.property_streams_total);
+    println!(
+        "attachment_storages_total={}",
+        totals.attachment_storages_total
+    );
+    println!(
+        "recipient_storages_total={}",
+        totals.recipient_storages_total
+    );
+    println!(
+        "has_named_property_storage={}",
+        totals.has_named_property_storage
+    );
+    println!(
+        "unrecognized_entries_total={}",
+        totals.unrecognized_entries_total
+    );
+    for (prop_id, count) in &totals.property_id_counts {
+        println!("property_id id=0x{prop_id:04X} count={count}");
+    }
+
+    Ok(())
+}
+
+#[derive(Default)]
+struct OxmsgTotals {
+    open_errors: u64,
+    total_entries: u64,
+
+    has_properties_stream: u64,
+    properties_stream_bytes_total: u64,
+
+    property_streams_total: u64,
+    /// Aggregate counts by MAPI property ID across every file scanned.
+    /// Property IDs are a bounded, standard MAPI vocabulary (like message
+    /// class names elsewhere in this codebase), not user content, so
+    /// reporting them by ID does not violate the privacy-safe design.
+    property_id_counts: BTreeMap<u16, u64>,
+
+    attachment_storages_total: u64,
+    recipient_storages_total: u64,
+    has_named_property_storage: u64,
+
+    /// Entries whose name matched none of the known MS-OXMSG conventions.
+    /// Counted, never silently dropped, consistent with this project's
+    /// no-silent-loss principle -- a nonzero count here means either an
+    /// MS-OXMSG structure this parser doesn't know about yet, or a real
+    /// anomaly worth a closer look.
+    unrecognized_entries_total: u64,
+}
+
+fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTotals) {
+    let mut saw_properties_stream = false;
+    let mut saw_named_property_storage = false;
+
+    for entry in comp.walk() {
+        totals.total_entries += 1;
+        match classify_oxmsg_entry(entry.name(), entry.is_root()) {
+            OxmsgEntryKind::Root => {}
+            OxmsgEntryKind::PropertiesStream => {
+                saw_properties_stream = true;
+                totals.properties_stream_bytes_total += entry.len();
+            }
+            OxmsgEntryKind::PropertyStream { prop_id } => {
+                totals.property_streams_total += 1;
+                *totals.property_id_counts.entry(prop_id).or_insert(0) += 1;
+            }
+            OxmsgEntryKind::AttachmentStorage => totals.attachment_storages_total += 1,
+            OxmsgEntryKind::RecipientStorage => totals.recipient_storages_total += 1,
+            OxmsgEntryKind::NamedPropertyStorage => saw_named_property_storage = true,
+            OxmsgEntryKind::Unrecognized => totals.unrecognized_entries_total += 1,
+        }
+    }
+
+    if saw_properties_stream {
+        totals.has_properties_stream += 1;
+    }
+    if saw_named_property_storage {
+        totals.has_named_property_storage += 1;
+    }
+}
+
+enum OxmsgEntryKind {
+    Root,
+    PropertiesStream,
+    PropertyStream { prop_id: u16 },
+    AttachmentStorage,
+    RecipientStorage,
+    NamedPropertyStorage,
+    Unrecognized,
+}
+
+/// Classifies a single CFB entry by name alone, using the MS-CFB
+/// storage/stream naming conventions MS-OXMSG defines (see the module
+/// comment above). Takes a plain `&str` rather than a `cfb::Entry`
+/// directly -- that type has no public constructor, so keeping the
+/// classification logic pure and string-based is what makes it possible
+/// to unit-test without a real CFB file on disk.
+fn classify_oxmsg_entry(name: &str, is_root: bool) -> OxmsgEntryKind {
+    if is_root {
+        return OxmsgEntryKind::Root;
+    }
+    if name == "__properties_version1.0" {
+        return OxmsgEntryKind::PropertiesStream;
+    }
+    if name == "__nameid_version1.0" {
+        return OxmsgEntryKind::NamedPropertyStorage;
+    }
+    if name.starts_with("__attach_version1.0_#") {
+        return OxmsgEntryKind::AttachmentStorage;
+    }
+    if name.starts_with("__recip_version1.0_#") {
+        return OxmsgEntryKind::RecipientStorage;
+    }
+    if let Some(hex) = name.strip_prefix("__substg1.0_") {
+        if hex.len() == 8 {
+            if let (Ok(prop_id), Ok(_prop_type)) = (
+                u16::from_str_radix(&hex[0..4], 16),
+                u16::from_str_radix(&hex[4..8], 16),
+            ) {
+                return OxmsgEntryKind::PropertyStream { prop_id };
+            }
+        }
+    }
+    OxmsgEntryKind::Unrecognized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Custom MS-OXMSG parser groundwork (--oxmsg) -------------------------
+
+    #[test]
+    fn oxmsg_entry_classification_covers_every_known_convention() {
+        assert!(matches!(
+            classify_oxmsg_entry("Root Entry", true),
+            OxmsgEntryKind::Root
+        ));
+        assert!(matches!(
+            classify_oxmsg_entry("__properties_version1.0", false),
+            OxmsgEntryKind::PropertiesStream
+        ));
+        assert!(matches!(
+            classify_oxmsg_entry("__nameid_version1.0", false),
+            OxmsgEntryKind::NamedPropertyStorage
+        ));
+        assert!(matches!(
+            classify_oxmsg_entry("__attach_version1.0_#00000000", false),
+            OxmsgEntryKind::AttachmentStorage
+        ));
+        assert!(matches!(
+            classify_oxmsg_entry("__recip_version1.0_#00000000", false),
+            OxmsgEntryKind::RecipientStorage
+        ));
+        assert!(matches!(
+            classify_oxmsg_entry("something_unexpected", false),
+            OxmsgEntryKind::Unrecognized
+        ));
+    }
+
+    #[test]
+    fn oxmsg_property_stream_name_decodes_property_id() {
+        // __substg1.0_1000001F is PidTagBody (0x1000), PT_UNICODE (0x001F).
+        // The classifier validates both 16-bit components as hexadecimal,
+        // while the current diagnostic retains only the property ID.
+        match classify_oxmsg_entry("__substg1.0_1000001F", false) {
+            OxmsgEntryKind::PropertyStream { prop_id } => {
+                assert_eq!(prop_id, 0x1000);
+            }
+            _ => panic!("expected PropertyStream"),
+        }
+    }
+
+    #[test]
+    fn oxmsg_malformed_substg_name_is_unrecognized_not_a_panic() {
+        // Non-hex characters where a property ID/type should be.
+        assert!(matches!(
+            classify_oxmsg_entry("__substg1.0_ZZZZZZZZ", false),
+            OxmsgEntryKind::Unrecognized
+        ));
+        // Wrong length (too short) for a valid PPPPTTTT suffix.
+        assert!(matches!(
+            classify_oxmsg_entry("__substg1.0_1000", false),
+            OxmsgEntryKind::Unrecognized
+        ));
+    }
 
     // --- Shared fromhtml-marker check ---------------------------------------
 

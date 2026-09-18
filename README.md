@@ -13,11 +13,13 @@ Shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of 
 - P1 through P4b are done and verified on Windows against a real PST fixture deliberately enhanced to cover plain/RTF bodies, a BCC recipient, an embedded-message attachment, and an OLE attachment — see `docs/verification/m1-results.md`.
 - Zero-byte and by-reference attachments were explicitly excluded as fixture goals (empirically impractical to compose / obsolete in modern email) — see `docs/verification/m1-results.md` for the documented rationale. The classification code for both remains.
 - Opening/traversing embedded-message or OLE attachment *content* was investigated (P4c) and found not achievable through `outlook-pst` v1.2.0's public API — accepted as M1's practical ceiling, not a defect. `tsp` correctly detects and counts these attachments; it can't open them.
-- **2026-09-13:** the original `bodies_html` count was confirmed to be an undercount — `outlook-pst`'s diagnostic only checked the native `PidTagBodyHtml` property, missing HTML encapsulated inside RTF per MS-OXRTFEX (the same blind spot fixed on the MSG side on 2026-09-07). Fixed: `tsp` now decompresses `PidTagRtfCompressed` (via `compressed-rtf`) and checks for the specification-defined `\fromhtml1` marker when native HTML is absent. Implemented, pending a Windows compile and re-run — see `docs/verification/m1-results.md`.
+- HTML-in-RTF detection (MS-OXRTFEX `\fromhtml1` encapsulation) is implemented and confirmed correct against real data — see `docs/verification/m1-results.md`.
 
 This is deliberately **not** the production miner and does not yet emit Markdown or extract body/attachment content.
 
-**M2 — MSG ingestion spike: started, unverified.** `tsp` now dispatches on its input: a `.pst` file uses the unchanged M1 path; a single `.msg` file or a directory of `.msg` files (scanned non-recursively) uses a new diagnostic built on the `msg_parser` crate, mirroring M1's structure (message class, body-type availability, recipient-type and attachment classification) plus a genuinely new check — an actual attempt to open each embedded-message attachment as a nested message, one level deep, which is the capability P4c found unreachable on the PST side. See `docs/verification/m2-results.md` for what's implemented, what's still unproven, and the specific `.msg` fixture set needed to close the gap. `msg_parser` is a provisional choice for this spike, not a final production commitment.
+**M2 — MSG ingestion spike: body-type detection, recipient/attachment classification, and the zero-byte/subdirectory-visibility fixes are all confirmed correct against real data.** `tsp` dispatches on its input: a `.pst` file uses the unchanged M1 path; a single `.msg` file or a directory of `.msg` files (scanned non-recursively) uses a diagnostic built on the `msg_parser` crate, mirroring M1's structure. Opening an embedded-message attachment as a nested message (M2c) was investigated across two independent real attempts and found not achievable in practice, for a root cause not identified despite repeated research — an accepted ceiling, mirroring P4c on the PST side. See `docs/verification/m2-results.md` for the full evidence trail. `msg_parser` remains a provisional choice, not a final production commitment — see the custom-parser groundwork below.
+
+**Custom MS-OXMSG parser groundwork (experimental, opt-in): started.** `msg_parser` has no raw/generic property-iteration equivalent to `outlook-pst`'s `.get(id)`/`.iter()` — the one structural inconsistency remaining between teaspoon's two format adapters, and directly at odds with the loss-aware-representation principle below. Run with `--oxmsg` against `.msg` input to use a from-scratch structural enumeration built on the `cfb` crate (a generic MS-CFB/Compound File Binary reader) instead of `msg_parser`. This is a P1/P2-equivalent spike: it proves a real `.msg` container opens and enumerates its property streams, attachment/recipient sub-storages, and named-property storage by name, ID, and size — it does not yet decode any property value. See `docs/verification/oxmsg-results.md`.
 
 ## Design principles
 
@@ -29,14 +31,17 @@ This is deliberately **not** the production miner and does not yet emit Markdown
 6. Source provenance is part of the output model.
 7. Evidence distinguishes specification support, implementation support, tests, and independent verification.
 
-## M1 usage
+## Usage
 
 ```powershell
 cargo run --release -- .\sample.pst
+cargo run --release -- .\sample.msg
+cargo run --release -- .\folder-of-msgs\
+cargo run --release -- --oxmsg .\sample.msg   # experimental custom MS-OXMSG parser
 ```
 
-A real PST fixture is required to perform the behavioral portion of M1. No personal PST is embedded in this repository.
+Real PST/MSG fixtures are required to perform the behavioral portion of any milestone. No personal mail data is embedded in this repository.
 
 ## Important limitation
 
-M1 establishes the PST ingestion seam; it does **not** yet prove complete extraction fidelity. Markdown rendering, attachment byte preservation, named-property normalization, body extraction, and differential validation remain future work.
+Neither M1 nor M2 yet proves complete extraction fidelity. Markdown rendering, attachment byte preservation, named-property normalization, body extraction, and differential validation remain future work.
