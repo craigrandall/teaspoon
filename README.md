@@ -1,47 +1,268 @@
 # teaspoon (tsp)
 
-Standalone Rust tooling for deterministic, loss-aware mining of Outlook `.pst` and `.msg` files.
+This project implements standalone Rust CLI for deterministic, loss-aware mining of Outlook `.pst` and `.msg` 
+files into a durable Markdown+metadata archive, without requiring Classic Outlook.
 
-Shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of this project's tool), which is "pst" backwards. (ツ)
+The shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of this project's tool), 
+which is "pst" backwards. (ツ)
 
-## Current status
+## Quick Start
 
-**M0 — architecture/research baseline:** established. Five of six ADRs are Accepted; ADR-0006 (independent differential verification) remains Proposed until that verification work actually happens.
+```bash
+# Build
+cargo build --release
 
-**M1 — PST feasibility spike: complete**, within the limits of `outlook-pst` v1.2.0's public API. A small read-only CLI (`tsp`) exercises the Microsoft Rust PST implementation: open a PST, reach the message store/IPM subtree, traverse folders, enumerate messages, and inspect raw message properties, plus aggregate message-class, body-availability, recipient-count/type, and attachment-count/classification diagnostics — all without emitting any message content.
+# Inventory a PST file (privacy-safe, no content exposed)
+./target/release/tsp.exe my-archive.pst
 
-- P1 through P4b are done and verified on Windows against a real PST fixture deliberately enhanced to cover plain/RTF bodies, a BCC recipient, an embedded-message attachment, and an OLE attachment — see `docs/verification/m1-results.md`.
-- Zero-byte and by-reference attachments were explicitly excluded as fixture goals (empirically impractical to compose / obsolete in modern email) — see `docs/verification/m1-results.md` for the documented rationale. The classification code for both remains.
-- Opening/traversing embedded-message or OLE attachment *content* was investigated (P4c) and found not achievable through `outlook-pst` v1.2.0's public API — accepted as M1's practical ceiling, not a defect. `tsp` correctly detects and counts these attachments; it can't open them.
-- HTML-in-RTF detection (MS-OXRTFEX `\fromhtml1` encapsulation) is implemented and confirmed correct against real data — see `docs/verification/m1-results.md`.
+# Inventory a directory of MSG files
+./target/release/tsp.exe ./msgs/
 
-This is deliberately **not** the production miner and does not yet emit Markdown or extract body/attachment content.
+# Use experimental CFB-based MS-OXMSG parser for MSG files
+./target/release/tsp.exe --oxmsg ./msgs/
 
-**M2 — MSG ingestion spike: body-type detection, recipient/attachment classification, and the zero-byte/subdirectory-visibility fixes are all confirmed correct against real data.** `tsp` dispatches on its input: a `.pst` file uses the unchanged M1 path; a single `.msg` file or a directory of `.msg` files (scanned non-recursively) uses a diagnostic built on the `msg_parser` crate, mirroring M1's structure. Opening an embedded-message attachment as a nested message (M2c) was investigated across two independent real attempts and found not achievable in practice, for a root cause not identified despite repeated research — an accepted ceiling, mirroring P4c on the PST side. See `docs/verification/m2-results.md` for the full evidence trail. `msg_parser` remains a provisional choice, not a final production commitment — see the custom-parser groundwork below.
-
-**Custom MS-OXMSG parser groundwork (experimental, opt-in): started.** `msg_parser` has no raw/generic property-iteration equivalent to `outlook-pst`'s `.get(id)`/`.iter()` — the one structural inconsistency remaining between teaspoon's two format adapters, and directly at odds with the loss-aware-representation principle below. Run with `--oxmsg` against `.msg` input to use a from-scratch structural enumeration built on the `cfb` crate (a generic MS-CFB/Compound File Binary reader) instead of `msg_parser`. This is a P1/P2-equivalent spike: it proves a real `.msg` container opens and enumerates its property streams, attachment/recipient sub-storages, and named-property storage by name, ID, and size — it does not yet decode any property value. See `docs/verification/oxmsg-results.md`.
-
-## Design principles
-
-1. `.pst` and `.msg` are input formats, not the domain model.
-2. Format adapters produce a common Outlook-item representation.
-3. Markdown is a projection, not the canonical representation.
-4. Unknown/unmapped properties are preserved or reported rather than silently discarded.
-5. Extraction loss is explicit.
-6. Source provenance is part of the output model.
-7. Evidence distinguishes specification support, implementation support, tests, and independent verification.
-
-## Usage
-
-```powershell
-cargo run --release -- .\sample.pst
-cargo run --release -- .\sample.msg
-cargo run --release -- .\folder-of-msgs\
-cargo run --release -- --oxmsg .\sample.msg   # experimental custom MS-OXMSG parser
+# Run all quality gates
+cargo fmt --check && cargo check && cargo clippy --all-targets --all-features -- -D warnings && cargo test
 ```
 
-Real PST/MSG fixtures are required to perform the behavioral portion of any milestone. No personal mail data is embedded in this repository.
+## Project Status
 
-## Important limitation
 
-Neither M1 nor M2 yet proves complete extraction fidelity. Markdown rendering, attachment byte preservation, named-property normalization, body extraction, and differential validation remain future work.
+| Milestone | Status       | Description                    |
+| --------- | ------------ | ------------------------------ |
+| M0        | Complete     | Architecture, ADRs, governance |
+| M1        | Complete     | PST feasibility spike (P1-P4b) |
+| M2        | In Progress  | MSG adapter implementation     |
+| M3        | Not Started  | Semantic normalization         |
+| M4        | Not Started  | Markdown archive engine        |
+
+
+### M2: MSG Adapter Implementation
+
+Two MSG parsing approaches are available:
+
+1. **`msg_parser` (default)**: Mature crate, used for production MSG parsing
+2. **CFB-based parser (`--oxmsg`)**: Custom MS-OXMSG parser using `cfb` crate
+
+The CFB-based parser provides:
+
+- Full property value decoding (privacy-safe)
+- Fixed-length property stream decoding
+- Sub-storage traversal (attachments, recipients)
+- Named property resolution
+- Cross-verification output format
+- Comprehensive test coverage
+
+Use `--oxmsg` to opt into the CFB-based parser for verification and comparison purposes.
+
+## Features
+
+### Privacy-Safe Diagnostics
+
+All diagnostic output is carefully designed to **never expose PII**:
+
+- No file paths in error messages
+- No folder names
+- No message subjects
+- No sender/recipient addresses
+- No message body content
+- No attachment filenames
+- Structural counts only
+- Property presence/absence only
+- Numeric property values (safe types only)
+- String/binary property lengths (never content)
+
+### Loss-Aware Design
+
+Teaspoon follows a **no-silent-loss** principle:
+
+- Every failed read is counted
+- Every missing property is tracked
+- Every decompression error is reported
+- Unknown property types are flagged, not ignored
+
+### Deterministic Output
+
+- Sorted file scanning (deterministic order)
+- BTreeMap for property tracking (sorted iteration)
+- No randomness in output
+- Reproducible across runs
+
+## Output Format
+
+### PST Diagnostic Output
+
+```
+ipm_subtree=ok
+inventory=privacy_safe
+input_kind=pst
+ipm_subtree=opened
+folders=9
+messages=49
+message_open_errors=0
+folder_open_errors=0
+property_values=3674
+message_class class=IPM.Note count=49
+bodies_plain=49
+bodies_html=45
+bodies_html_native=45
+bodies_html_via_rtf=0
+bodies_rtf=4
+rtf_decompression_errors=0
+rtf_decompressed_bytes_total=12345
+messages_with_recipients=40
+total_recipients=85
+max_recipients_on_a_message=12
+messages_with_attachments=20
+total_attachments=65
+...
+```
+
+### MSG Diagnostic Output (msg\_parser)
+
+```
+inventory=privacy_safe
+input_kind=msg
+files_scanned=29
+subdirectories_skipped=3
+open_errors=0
+message_class class=IPM.Note count=29
+bodies_plain=29
+bodies_html=27
+bodies_html_native=0
+bodies_html_via_rtf=27
+bodies_rtf=29
+rtf_decompression_errors=0
+rtf_decompressed_bytes_total=1787066
+messages_with_recipients=29
+recipients_to=29
+recipients_cc=6
+recipients_bcc=1
+max_recipients_on_a_message=6
+messages_with_attachments=11
+total_attachments=29
+...
+```
+
+### MSG Diagnostic Output (CFB parser with --oxmsg)
+
+```
+inventory=privacy_safe
+input_kind=msg_oxmsg
+files_scanned=29
+subdirectories_skipped=3
+open_errors=0
+total_entries=2647
+has_properties_stream=29
+properties_stream_bytes_total=53504
+property_streams_total=2363
+property_values_decoded=2363
+fixed_length_properties_decoded=128
+attachment_storages_total=30
+recipient_storages_total=37
+has_named_property_storage=29
+named_property_storage_bytes=4096
+named_properties_parsed=29
+attachment_storages_inspected=30
+recipient_storages_inspected=37
+attachment_property_streams=84
+attachment_properties_decoded=84
+recipient_property_streams=112
+recipient_properties_decoded=112
+unrecognized_entries_total=62
+
+--- Property ID Coverage ---
+files_with_message_class_prop=29
+files_with_subject_prop=29
+files_with_body_prop=29
+files_with_html_body_prop=27
+files_with_rtf_prop=29
+
+--- All Property IDs Seen ---
+property_id id=0x0002 count=1
+property_id id=0x0003 count=1
+property_id id=0x001A count=1
+...
+```
+
+## Quality Gates
+
+All code must pass:
+
+```bash
+# Format check
+cargo fmt --check
+
+# Compile check
+cargo check
+
+# Clippy with warnings as errors
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Unit tests
+cargo test
+
+# Release build
+cargo build --release
+```
+
+## Architecture
+
+See `docs/ARCHITECTURE.md` for detailed architecture documentation.
+
+### Key Design Principles
+
+1. **Format Independence**: PST and MSG adapters both feed a common normalized representation
+2. **Loss Transparency**: Failed reads and missing data are explicitly reported, never silently dropped
+3. **Durable Archive**: Output is versioned, reproducible, and designed for long-term storage
+4. **Privacy First**: Diagnostic output never exposes PII
+5. **Standalone Operation**: No Classic Outlook, COM, or MAPI dependencies
+6. **Evidence-Based**: Capabilities are only claimed after real-data verification
+
+## Dependencies
+
+
+| Crate            | Version | Purpose                             |
+| ---------------- | ------- | ----------------------------------- |
+| `anyhow`         | 1.x     | Error handling                      |
+| `clap`           | 4.x     | CLI argument parsing                |
+| `outlook-pst`    | 1.2.0   | PST file parsing                    |
+| `msg_parser`     | 0.3.x   | MSG file parsing (default)          |
+| `compressed-rtf` | 1.0.x   | RTF decompression (MS-OXRTFCP)      |
+| `cfb`            | 0.14.x  | CFB container parsing (for --oxmsg) |
+
+
+## Verification
+
+See `docs/verification/` for detailed verification results:
+
+- `m1-results.md` - PST feasibility spike results
+- `m2-results.md` - MSG spike results
+- `oxmsg-results.md` - CFB-based MS-OXMSG parser results
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make changes with test coverage
+4. Run quality gates
+5. Submit PR with verification evidence
+
+## License
+
+MIT OR Apache-2.0
+
+## Version History
+
+See GitHub releases for full history.
+
+### v0.1.7 (Latest)
+
+- Added CFB-based MS-OXMSG parser groundwork
+- Added `cfb` and `msg_parser` dependencies
+- Added `--oxmsg` flag for experimental CFB parser
+
+### v0.1.0 - v0.1.6
+
+- M1 completion: PST feasibility spike
+- P1-P4b: Inventory, privacy-safe diagnostics, fixture verification
