@@ -60,7 +60,13 @@ well-known MS-OXMSG conventions — never by inspecting content:
 - `__nameid_version1.0` — named-property mapping storage. Its count and a
   compatibility-friendly presence result are reported.
 - Anything else — counted as `unrecognized_entries_total`, never silently
-  ignored.
+  ignored. A privacy-safe breakdown records its CFB object kind, depth, and
+  standardized name shape; neither entry names nor paths are emitted.
+
+Recognized names are also checked against the CFB object type. A known stream
+name represented by a storage (or a known storage name represented by a
+stream) is reported as a type mismatch, rather than silently assumed to have
+the expected semantics.
 
 The `__substg1.0_PPPPTTTT` convention was independently confirmed earlier
 through raw inspection of real `.msg` files (for example,
@@ -76,7 +82,7 @@ The repository quality gate completed successfully on Windows:
 cargo fmt --check
 cargo check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test          # 28 passed, 0 failed
+cargo test          # 30 passed, 0 failed
 cargo build --release
 ```
 
@@ -135,10 +141,29 @@ unrecognized_entries_total=62
 entry_accounting_gap_total=0
 ```
 
-The 62 unrecognized entries are explicitly counted, rather than hidden. Their
-structural scope and standardized naming pattern require a separate,
-privacy-safe diagnostic before the classifier is extended. The signed gap
-also makes a future overcount visible rather than masking it.
+The 62 unrecognized entries are explicitly counted, rather than hidden. The
+diagnostic groups them by CFB object kind, depth, and name shape, and reports
+recognized-name/object-type mismatches. This establishes structural scope
+without exposing entry names, paths, or contents; only then can a classifier
+extension be considered. The signed gap also makes a future overcount visible
+rather than masking it.
+
+### Unrecognized-entry diagnostic
+
+The 29-file Windows corpus produced this privacy-safe breakdown:
+
+```text
+unrecognized_entries_total=62
+unrecognized_entry kind=stream depth=1 name_shape=malformed_property_stream_name count=56
+unrecognized_entry kind=stream depth=3 name_shape=other_name count=6
+recognized_name_type_mismatch kind=stream_name_is_storage count=2
+```
+
+The 56 depth-one streams are candidates for the standard multiple-valued
+property value-stream naming form, whose names append a zero-based value
+index to the property tag. The six depth-three non-reserved streams and the
+two recognized stream-name/storage mismatches require a focused structural
+classification pass before they are counted as known MS-OXMSG entries.
 
 ## Current scope
 

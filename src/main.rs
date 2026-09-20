@@ -1175,6 +1175,20 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
         "unrecognized_entries_total={}",
         totals.unrecognized_entries_total
     );
+    for ((object_kind, depth, name_shape), count) in &totals.unrecognized_entries {
+        println!(
+            "unrecognized_entry kind={} depth={} name_shape={} count={count}",
+            object_kind.as_str(),
+            depth,
+            name_shape.as_str()
+        );
+    }
+    for (mismatch, count) in &totals.recognized_name_type_mismatches {
+        println!(
+            "recognized_name_type_mismatch kind={} count={count}",
+            mismatch.as_str()
+        );
+    }
     for (prop_id, count) in &totals.property_id_counts {
         println!("property_id id=0x{prop_id:04X} count={count}");
     }
@@ -1212,6 +1226,10 @@ struct OxmsgTotals {
     /// MS-OXMSG structure this parser doesn't know about yet, or a real
     /// anomaly worth a closer look.
     unrecognized_entries_total: u64,
+    /// Privacy-safe structural breakdown. Names and paths are never emitted.
+    unrecognized_entries: BTreeMap<(CfbObjectKind, u64, UnrecognizedNameShape), u64>,
+    /// A recognized MS-OXMSG name whose CFB object type is unexpected.
+    recognized_name_type_mismatches: BTreeMap<RecognizedNameTypeMismatch, u64>,
 }
 
 impl OxmsgTotals {
@@ -1229,7 +1247,15 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
 
     for entry in comp.walk() {
         totals.total_entries += 1;
-        match classify_oxmsg_entry(entry.name(), entry.is_root()) {
+        let entry_kind = classify_oxmsg_entry(entry.name(), entry.is_root());
+        let object_kind = cfb_object_kind(entry.is_stream());
+        if let Some(mismatch) = recognized_name_type_mismatch(&entry_kind, object_kind) {
+            *totals
+                .recognized_name_type_mismatches
+                .entry(mismatch)
+                .or_insert(0) += 1;
+        }
+        match entry_kind {
             OxmsgEntryKind::Root => {
                 totals.root_entries_total += 1;
                 totals.recognized_entries_total += 1;
@@ -1257,7 +1283,17 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
                 totals.recognized_entries_total += 1;
                 totals.named_property_storages_total += 1;
             }
-            OxmsgEntryKind::Unrecognized => totals.unrecognized_entries_total += 1,
+            OxmsgEntryKind::Unrecognized => {
+                totals.unrecognized_entries_total += 1;
+                *totals
+                    .unrecognized_entries
+                    .entry((
+                        object_kind,
+                        cfb_entry_depth(entry.path()),
+                        unrecognized_name_shape(entry.name()),
+                    ))
+                    .or_insert(0) += 1;
+            }
         }
     }
 
@@ -1266,6 +1302,7 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
     }
 }
 
+#[derive(Clone, Copy)]
 enum OxmsgEntryKind {
     Root,
     PropertiesStream,
@@ -1274,6 +1311,94 @@ enum OxmsgEntryKind {
     RecipientStorage,
     NamedPropertyStorage,
     Unrecognized,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CfbObjectKind {
+    Storage,
+    Stream,
+}
+
+impl CfbObjectKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Storage => "storage",
+            Self::Stream => "stream",
+        }
+    }
+}
+
+fn cfb_object_kind(is_stream: bool) -> CfbObjectKind {
+    if is_stream {
+        CfbObjectKind::Stream
+    } else {
+        CfbObjectKind::Storage
+    }
+}
+
+fn cfb_entry_depth(path: &Path) -> u64 {
+    path.components().count().saturating_sub(1) as u64
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum UnrecognizedNameShape {
+    MalformedPropertyStream,
+    OtherReserved,
+    Other,
+}
+
+impl UnrecognizedNameShape {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedPropertyStream => "malformed_property_stream_name",
+            Self::OtherReserved => "other_reserved_name",
+            Self::Other => "other_name",
+        }
+    }
+}
+
+fn unrecognized_name_shape(name: &str) -> UnrecognizedNameShape {
+    if name.starts_with("__substg1.0_") {
+        UnrecognizedNameShape::MalformedPropertyStream
+    } else if name.starts_with("__") {
+        UnrecognizedNameShape::OtherReserved
+    } else {
+        UnrecognizedNameShape::Other
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RecognizedNameTypeMismatch {
+    StorageNameIsStream,
+    StreamNameIsStorage,
+}
+
+impl RecognizedNameTypeMismatch {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StorageNameIsStream => "storage_name_is_stream",
+            Self::StreamNameIsStorage => "stream_name_is_storage",
+        }
+    }
+}
+
+fn recognized_name_type_mismatch(
+    entry_kind: &OxmsgEntryKind,
+    object_kind: CfbObjectKind,
+) -> Option<RecognizedNameTypeMismatch> {
+    match (entry_kind, object_kind) {
+        (
+            OxmsgEntryKind::PropertiesStream | OxmsgEntryKind::PropertyStream { .. },
+            CfbObjectKind::Storage,
+        ) => Some(RecognizedNameTypeMismatch::StreamNameIsStorage),
+        (
+            OxmsgEntryKind::AttachmentStorage
+            | OxmsgEntryKind::RecipientStorage
+            | OxmsgEntryKind::NamedPropertyStorage,
+            CfbObjectKind::Stream,
+        ) => Some(RecognizedNameTypeMismatch::StorageNameIsStream),
+        _ => None,
+    }
 }
 
 /// Classifies a single CFB entry by name alone, using the MS-CFB
@@ -1370,6 +1495,47 @@ mod tests {
             classify_oxmsg_entry("__substg1.0_1000", false),
             OxmsgEntryKind::Unrecognized
         ));
+    }
+
+    #[test]
+    fn oxmsg_unrecognized_name_shapes_preserve_privacy_safe_structure() {
+        assert_eq!(
+            unrecognized_name_shape("__substg1.0_ZZZZZZZZ"),
+            UnrecognizedNameShape::MalformedPropertyStream
+        );
+        assert_eq!(
+            unrecognized_name_shape("__custom_version1.0"),
+            UnrecognizedNameShape::OtherReserved
+        );
+        assert_eq!(
+            unrecognized_name_shape("unexpected"),
+            UnrecognizedNameShape::Other
+        );
+    }
+
+    #[test]
+    fn oxmsg_known_names_with_wrong_cfb_object_types_are_reported() {
+        assert_eq!(
+            recognized_name_type_mismatch(
+                &OxmsgEntryKind::PropertyStream { prop_id: 0x1000 },
+                CfbObjectKind::Storage
+            ),
+            Some(RecognizedNameTypeMismatch::StreamNameIsStorage)
+        );
+        assert_eq!(
+            recognized_name_type_mismatch(
+                &OxmsgEntryKind::AttachmentStorage,
+                CfbObjectKind::Stream
+            ),
+            Some(RecognizedNameTypeMismatch::StorageNameIsStream)
+        );
+        assert_eq!(
+            recognized_name_type_mismatch(
+                &OxmsgEntryKind::RecipientStorage,
+                CfbObjectKind::Storage
+            ),
+            None
+        );
     }
 
     #[test]
