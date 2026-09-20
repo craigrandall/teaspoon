@@ -1145,6 +1145,10 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
     );
     println!("has_properties_stream={}", totals.has_properties_stream);
     println!(
+        "properties_stream_entries_total={}",
+        totals.properties_stream_entries_total
+    );
+    println!(
         "properties_stream_bytes_total={}",
         totals.properties_stream_bytes_total
     );
@@ -1186,6 +1190,9 @@ struct OxmsgTotals {
     recognized_entries_total: u64,
 
     has_properties_stream: u64,
+    /// Every `__properties_version1.0` entry, including property streams
+    /// inside recipient, attachment, and embedded-message storages.
+    properties_stream_entries_total: u64,
     properties_stream_bytes_total: u64,
 
     property_streams_total: u64,
@@ -1229,6 +1236,7 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
             }
             OxmsgEntryKind::PropertiesStream => {
                 totals.recognized_entries_total += 1;
+                totals.properties_stream_entries_total += 1;
                 saw_properties_stream = true;
                 totals.properties_stream_bytes_total += entry.len();
             }
@@ -1396,6 +1404,34 @@ mod tests {
         };
 
         assert_eq!(totals.entry_accounting_gap_total(), -1);
+    }
+
+    #[test]
+    fn oxmsg_entry_category_totals_include_every_properties_stream() {
+        let totals = OxmsgTotals {
+            total_entries: 10,
+            root_entries_total: 1,
+            recognized_entries_total: 8,
+            properties_stream_entries_total: 3,
+            property_streams_total: 2,
+            attachment_storages_total: 1,
+            recipient_storages_total: 1,
+            named_property_storages_total: 0,
+            unrecognized_entries_total: 2,
+            ..OxmsgTotals::default()
+        };
+
+        assert_eq!(
+            totals.root_entries_total
+                + totals.properties_stream_entries_total
+                + totals.property_streams_total
+                + totals.attachment_storages_total
+                + totals.recipient_storages_total
+                + totals.named_property_storages_total
+                + totals.unrecognized_entries_total,
+            totals.total_entries
+        );
+        assert_eq!(totals.entry_accounting_gap_total(), 0);
     }
 
     // --- Shared fromhtml-marker check ---------------------------------------

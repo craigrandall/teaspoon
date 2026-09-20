@@ -7,10 +7,10 @@
 evidence. It remains a name/size/count diagnostic only: it does not yet
 decode property values or establish complete MS-OXMSG support.
 
-The first fixture run also exposed a one-entry accounting discrepancy. The
-implementation deliberately reports that discrepancy rather than guessing at
-or concealing its cause. Identifying the remaining entry is the next
-verification step.
+The first fixture run initially appeared to expose a one-entry accounting
+discrepancy. A subsequent corpus run resolved that appearance: the comparison
+mistook a per-file property-stream presence counter for an entry counter.
+Every enumerated entry is now accounted for explicitly.
 
 ## Why this exists
 
@@ -50,7 +50,8 @@ every entry (storage or stream). Each entry name is classified against
 well-known MS-OXMSG conventions — never by inspecting content:
 
 - `__properties_version1.0` — the stream holding fixed-length properties.
-  Presence and byte length are reported; packed contents are not decoded.
+  Per-file presence, every-entry count, and byte length are reported; packed
+  contents are not decoded.
 - `__substg1.0_PPPPTTTT` — variable-length property streams. `PPPP` is the
   four-hex-digit MAPI property ID and `TTTT` the four-hex-digit property type.
   Counts are reported by property ID, never by stream content.
@@ -75,7 +76,7 @@ The repository quality gate completed successfully on Windows:
 cargo fmt --check
 cargo check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test          # 24 passed, 0 failed
+cargo test          # 28 passed, 0 failed
 cargo build --release
 ```
 
@@ -91,7 +92,8 @@ files_scanned=1
 subdirectories_skipped=0
 open_errors=0
 total_entries=60
-has_properties_stream=1
+has_properties_stream=1              # files with one or more such streams
+properties_stream_entries_total=2    # root and recipient storage streams
 properties_stream_bytes_total=1080
 property_streams_total=55
 attachment_storages_total=0
@@ -105,42 +107,38 @@ streams, including `0x1000`, `0x1009`, `0x300B`, and the `0x8000`+
 named-property range. This is structural evidence only; no property values
 were decoded.
 
-### Entry-accounting discrepancy
+### Entry accounting
 
-The first real run established that the reported 60 CFB entries are currently
-represented by these known aggregate categories:
+The original 60-entry fixture was initially summarized as 59 categorized
+entries because `has_properties_stream=1` was treated as an entry count. That
+field is deliberately a per-file presence counter: it reports whether a file
+has at least one `__properties_version1.0` stream. The recipient storage in
+that fixture has its own property stream, producing two property-stream
+entries in total.
 
-- 1 root entry;
-- 1 `__properties_version1.0` stream;
-- 55 `__substg1.0_PPPPTTTT` property streams;
-- 1 recipient storage; and
-- 1 named-property storage.
-
-Those categories add to 59 entries, while `unrecognized_entries_total=0`.
-Therefore one CFB entry is not represented by the aggregate classification
-counters. This is not evidence that the entry is invalid, and the total must
-not be adjusted to hide it.
-
-The accounting cleanup makes the invariant explicit with:
+The accounting diagnostic makes the distinction explicit with:
 
 - `root_entries_total`;
+- `properties_stream_entries_total`;
 - `recognized_entries_total`;
 - `unrecognized_entries_total`; and
 - signed `entry_accounting_gap_total`.
 
-For this fixture, the corrected diagnostic should show:
+The 29-file Windows corpus confirmed complete accounting:
 
 ```text
-total_entries=60
-root_entries_total=1
-recognized_entries_total=59
-entry_accounting_gap_total=1
-unrecognized_entries_total=0
+total_entries=2647
+root_entries_total=29
+properties_stream_entries_total=97
+recognized_entries_total=2585
+unrecognized_entries_total=62
+entry_accounting_gap_total=0
 ```
 
-The next real-fixture run must identify the remaining entry before the
-MS-OXMSG property-decoding layer is expanded. The signed gap also makes a
-future overcount visible rather than masking it.
+The 62 unrecognized entries are explicitly counted, rather than hidden. Their
+structural scope and standardized naming pattern require a separate,
+privacy-safe diagnostic before the classifier is extended. The signed gap
+also makes a future overcount visible rather than masking it.
 
 ## Current scope
 
