@@ -1134,6 +1134,15 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
 
     println!("open_errors={}", totals.open_errors);
     println!("total_entries={}", totals.total_entries);
+    println!("root_entries_total={}", totals.root_entries_total);
+    println!(
+        "recognized_entries_total={}",
+        totals.recognized_entries_total
+    );
+    println!(
+        "entry_accounting_gap_total={}",
+        totals.entry_accounting_gap_total()
+    );
     println!("has_properties_stream={}", totals.has_properties_stream);
     println!(
         "properties_stream_bytes_total={}",
@@ -1149,8 +1158,14 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
         totals.recipient_storages_total
     );
     println!(
+        "named_property_storages_total={}",
+        totals.named_property_storages_total
+    );
+    // Keep the original presence field for consumers that only need a
+    // compatibility-friendly yes/no result.
+    println!(
         "has_named_property_storage={}",
-        totals.has_named_property_storage
+        totals.named_property_storages_total > 0
     );
     println!(
         "unrecognized_entries_total={}",
@@ -1167,6 +1182,8 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
 struct OxmsgTotals {
     open_errors: u64,
     total_entries: u64,
+    root_entries_total: u64,
+    recognized_entries_total: u64,
 
     has_properties_stream: u64,
     properties_stream_bytes_total: u64,
@@ -1180,7 +1197,7 @@ struct OxmsgTotals {
 
     attachment_storages_total: u64,
     recipient_storages_total: u64,
-    has_named_property_storage: u64,
+    named_property_storages_total: u64,
 
     /// Entries whose name matched none of the known MS-OXMSG conventions.
     /// Counted, never silently dropped, consistent with this project's
@@ -1190,34 +1207,54 @@ struct OxmsgTotals {
     unrecognized_entries_total: u64,
 }
 
+impl OxmsgTotals {
+    /// Difference between every enumerated CFB entry and the classified
+    /// categories. This remains signed so a future overcount is visible.
+    fn entry_accounting_gap_total(&self) -> i64 {
+        self.total_entries as i64
+            - self.recognized_entries_total as i64
+            - self.unrecognized_entries_total as i64
+    }
+}
+
 fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTotals) {
     let mut saw_properties_stream = false;
-    let mut saw_named_property_storage = false;
 
     for entry in comp.walk() {
         totals.total_entries += 1;
         match classify_oxmsg_entry(entry.name(), entry.is_root()) {
-            OxmsgEntryKind::Root => {}
+            OxmsgEntryKind::Root => {
+                totals.root_entries_total += 1;
+                totals.recognized_entries_total += 1;
+            }
             OxmsgEntryKind::PropertiesStream => {
+                totals.recognized_entries_total += 1;
                 saw_properties_stream = true;
                 totals.properties_stream_bytes_total += entry.len();
             }
             OxmsgEntryKind::PropertyStream { prop_id } => {
+                totals.recognized_entries_total += 1;
                 totals.property_streams_total += 1;
                 *totals.property_id_counts.entry(prop_id).or_insert(0) += 1;
             }
-            OxmsgEntryKind::AttachmentStorage => totals.attachment_storages_total += 1,
-            OxmsgEntryKind::RecipientStorage => totals.recipient_storages_total += 1,
-            OxmsgEntryKind::NamedPropertyStorage => saw_named_property_storage = true,
+            OxmsgEntryKind::AttachmentStorage => {
+                totals.recognized_entries_total += 1;
+                totals.attachment_storages_total += 1;
+            }
+            OxmsgEntryKind::RecipientStorage => {
+                totals.recognized_entries_total += 1;
+                totals.recipient_storages_total += 1;
+            }
+            OxmsgEntryKind::NamedPropertyStorage => {
+                totals.recognized_entries_total += 1;
+                totals.named_property_storages_total += 1;
+            }
             OxmsgEntryKind::Unrecognized => totals.unrecognized_entries_total += 1,
         }
     }
 
     if saw_properties_stream {
         totals.has_properties_stream += 1;
-    }
-    if saw_named_property_storage {
-        totals.has_named_property_storage += 1;
     }
 }
 
@@ -1325,6 +1362,40 @@ mod tests {
             classify_oxmsg_entry("__substg1.0_1000", false),
             OxmsgEntryKind::Unrecognized
         ));
+    }
+
+    #[test]
+    fn oxmsg_entry_accounting_gap_is_zero_when_all_entries_are_accounted_for() {
+        let totals = OxmsgTotals {
+            total_entries: 60,
+            recognized_entries_total: 59,
+            unrecognized_entries_total: 1,
+            ..OxmsgTotals::default()
+        };
+
+        assert_eq!(totals.entry_accounting_gap_total(), 0);
+    }
+
+    #[test]
+    fn oxmsg_entry_accounting_gap_exposes_a_missing_entry() {
+        let totals = OxmsgTotals {
+            total_entries: 60,
+            recognized_entries_total: 59,
+            ..OxmsgTotals::default()
+        };
+
+        assert_eq!(totals.entry_accounting_gap_total(), 1);
+    }
+
+    #[test]
+    fn oxmsg_entry_accounting_gap_is_negative_when_categories_overcount() {
+        let totals = OxmsgTotals {
+            total_entries: 60,
+            recognized_entries_total: 61,
+            ..OxmsgTotals::default()
+        };
+
+        assert_eq!(totals.entry_accounting_gap_total(), -1);
     }
 
     // --- Shared fromhtml-marker check ---------------------------------------
