@@ -1106,16 +1106,17 @@ fn record_embedded_message_class(totals: &mut MsgTotals, class: &str) {
 // - fixed-length properties, packed together inside a single stream named
 //   `__properties_version1.0` (not yet decoded here -- its byte length is
 //   reported, not its packed contents);
-// - variable-length properties (strings, binary, multi-valued), each its
-//   own stream, named `__substg1.0_PPPPTTTT` where PPPP is the 4-hex-digit
-//   property ID and TTTT is the 4-hex-digit property type -- the exact
-//   naming convention independently confirmed by hand three times earlier
-//   in this project via raw byte-level forensic inspection of real .msg
-//   files (e.g. `__substg1.0_1000001F` = PidTagBody, PT_UNICODE).
+// - variable-length properties (strings, binary, and variable-length
+//   multi-valued values) use streams named
+//   `__substg1.0_PPPPTTTT`, where PPPP is the 4-hex-digit property ID and
+//   TTTT is the 4-hex-digit property type. Variable-length multi-valued
+//   values add a zero-based `-NNNNNNNN` value-index suffix.
 // Recipients and attachments each get their own numbered sub-storage
-// (`__recip_version1.0_#NNNNNNNN`, `__attach_version1.0_#NNNNNNNN`), and
-// named (non-standard) properties get a dedicated `__nameid_version1.0`
-// storage. All of this is name/size/count only -- never content.
+// (`__recip_version1.0_#NNNNNNNN`, `__attach_version1.0_#NNNNNNNN`).
+// Embedded/custom-object storage is represented by
+// `__substg1.0_3701000D`, while named (non-standard) properties get a
+// dedicated `__nameid_version1.0` storage. All of this is name/size/count
+// only -- never content.
 
 fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
     println!("inventory=privacy_safe");
@@ -1154,6 +1155,14 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
     );
     println!("property_streams_total={}", totals.property_streams_total);
     println!(
+        "indexed_property_streams_total={}",
+        totals.indexed_property_streams_total
+    );
+    println!(
+        "embedded_object_storages_total={}",
+        totals.embedded_object_storages_total
+    );
+    println!(
         "attachment_storages_total={}",
         totals.attachment_storages_total
     );
@@ -1189,6 +1198,18 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
             mismatch.as_str()
         );
     }
+    for (scope, count) in &totals.properties_streams_by_scope {
+        println!("properties_stream scope={} count={count}", scope.as_str());
+    }
+    for (scope, count) in &totals.property_streams_by_scope {
+        println!("property_stream scope={} count={count}", scope.as_str());
+    }
+    for ((scope, prop_id), count) in &totals.property_id_counts_by_scope {
+        println!(
+            "property_id scope={} id=0x{prop_id:04X} count={count}",
+            scope.as_str()
+        );
+    }
     for (prop_id, count) in &totals.property_id_counts {
         println!("property_id id=0x{prop_id:04X} count={count}");
     }
@@ -1210,15 +1231,29 @@ struct OxmsgTotals {
     properties_stream_bytes_total: u64,
 
     property_streams_total: u64,
+    /// Property streams whose names include the zero-based value index used
+    /// by variable-length multiple-valued properties.
+    indexed_property_streams_total: u64,
     /// Aggregate counts by MAPI property ID across every file scanned.
     /// Property IDs are a bounded, standard MAPI vocabulary (like message
     /// class names elsewhere in this codebase), not user content, so
     /// reporting them by ID does not violate the privacy-safe design.
     property_id_counts: BTreeMap<u16, u64>,
+    /// Property-stream counts separated by the containing MS-OXMSG object
+    /// scope, so message/recipient/attachment/embedded/named-property
+    /// structures are not conflated.
+    property_streams_by_scope: BTreeMap<OxmsgEntryScope, u64>,
+    /// Property ID counts separated by the containing MS-OXMSG object scope.
+    property_id_counts_by_scope: BTreeMap<(OxmsgEntryScope, u16), u64>,
+    /// Property-stream counts separated by the containing MS-OXMSG object
+    /// scope. The named-property mapping storage is intentionally distinct
+    /// from ordinary Message/Recipient/Attachment property scopes.
+    properties_streams_by_scope: BTreeMap<OxmsgEntryScope, u64>,
 
     attachment_storages_total: u64,
     recipient_storages_total: u64,
     named_property_storages_total: u64,
+    embedded_object_storages_total: u64,
 
     /// Entries whose name matched none of the known MS-OXMSG conventions.
     /// Counted, never silently dropped, consistent with this project's
@@ -1265,10 +1300,23 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
                 totals.properties_stream_entries_total += 1;
                 saw_properties_stream = true;
                 totals.properties_stream_bytes_total += entry.len();
+
+                let scope = oxmsg_entry_scope(entry.path());
+                *totals.properties_streams_by_scope.entry(scope).or_insert(0) += 1;
             }
-            OxmsgEntryKind::PropertyStream { prop_id } => {
+            OxmsgEntryKind::PropertyStream { prop_id, indexed } => {
                 totals.recognized_entries_total += 1;
                 totals.property_streams_total += 1;
+                if indexed {
+                    totals.indexed_property_streams_total += 1;
+                }
+
+                let scope = oxmsg_entry_scope(entry.path());
+                *totals.property_streams_by_scope.entry(scope).or_insert(0) += 1;
+                *totals
+                    .property_id_counts_by_scope
+                    .entry((scope, prop_id))
+                    .or_insert(0) += 1;
                 *totals.property_id_counts.entry(prop_id).or_insert(0) += 1;
             }
             OxmsgEntryKind::AttachmentStorage => {
@@ -1282,6 +1330,10 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
             OxmsgEntryKind::NamedPropertyStorage => {
                 totals.recognized_entries_total += 1;
                 totals.named_property_storages_total += 1;
+            }
+            OxmsgEntryKind::EmbeddedObjectStorage => {
+                totals.recognized_entries_total += 1;
+                totals.embedded_object_storages_total += 1;
             }
             OxmsgEntryKind::Unrecognized => {
                 totals.unrecognized_entries_total += 1;
@@ -1306,11 +1358,33 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
 enum OxmsgEntryKind {
     Root,
     PropertiesStream,
-    PropertyStream { prop_id: u16 },
+    PropertyStream { prop_id: u16, indexed: bool },
     AttachmentStorage,
     RecipientStorage,
     NamedPropertyStorage,
+    EmbeddedObjectStorage,
     Unrecognized,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum OxmsgEntryScope {
+    Message,
+    Recipient,
+    Attachment,
+    EmbeddedObject,
+    NamedPropertyStorage,
+}
+
+impl OxmsgEntryScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Recipient => "recipient",
+            Self::Attachment => "attachment",
+            Self::EmbeddedObject => "embedded_object",
+            Self::NamedPropertyStorage => "named_property_storage",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1394,7 +1468,8 @@ fn recognized_name_type_mismatch(
         (
             OxmsgEntryKind::AttachmentStorage
             | OxmsgEntryKind::RecipientStorage
-            | OxmsgEntryKind::NamedPropertyStorage,
+            | OxmsgEntryKind::NamedPropertyStorage
+            | OxmsgEntryKind::EmbeddedObjectStorage,
             CfbObjectKind::Stream,
         ) => Some(RecognizedNameTypeMismatch::StorageNameIsStream),
         _ => None,
@@ -1423,17 +1498,62 @@ fn classify_oxmsg_entry(name: &str, is_root: bool) -> OxmsgEntryKind {
     if name.starts_with("__recip_version1.0_#") {
         return OxmsgEntryKind::RecipientStorage;
     }
-    if let Some(hex) = name.strip_prefix("__substg1.0_") {
-        if hex.len() == 8 {
-            if let (Ok(prop_id), Ok(_prop_type)) = (
-                u16::from_str_radix(&hex[0..4], 16),
-                u16::from_str_radix(&hex[4..8], 16),
-            ) {
-                return OxmsgEntryKind::PropertyStream { prop_id };
-            }
-        }
+    if name == "__substg1.0_3701000D" {
+        return OxmsgEntryKind::EmbeddedObjectStorage;
+    }
+    if let Some((prop_id, indexed)) = parse_property_stream_name(name) {
+        return OxmsgEntryKind::PropertyStream { prop_id, indexed };
     }
     OxmsgEntryKind::Unrecognized
+}
+
+fn parse_property_stream_name(name: &str) -> Option<(u16, bool)> {
+    let suffix = name.strip_prefix("__substg1.0_")?;
+
+    if suffix.len() == 8 {
+        let prop_id = u16::from_str_radix(&suffix[0..4], 16).ok()?;
+        u16::from_str_radix(&suffix[4..8], 16).ok()?;
+        return Some((prop_id, false));
+    }
+
+    let (tag, index) = suffix.split_once('-')?;
+    if tag.len() != 8 || index.len() != 8 {
+        return None;
+    }
+
+    let prop_id = u16::from_str_radix(&tag[0..4], 16).ok()?;
+    u16::from_str_radix(&tag[4..8], 16).ok()?;
+    u32::from_str_radix(index, 16).ok()?;
+
+    Some((prop_id, true))
+}
+
+fn oxmsg_entry_scope(path: &Path) -> OxmsgEntryScope {
+    let mut scope = OxmsgEntryScope::Message;
+
+    for component in path.components() {
+        let Some(name) = component.as_os_str().to_str() else {
+            continue;
+        };
+
+        match name {
+            "__nameid_version1.0" => {
+                scope = OxmsgEntryScope::NamedPropertyStorage;
+            }
+            "__substg1.0_3701000D" => {
+                scope = OxmsgEntryScope::EmbeddedObject;
+            }
+            name if name.starts_with("__attach_version1.0_#") => {
+                scope = OxmsgEntryScope::Attachment;
+            }
+            name if name.starts_with("__recip_version1.0_#") => {
+                scope = OxmsgEntryScope::Recipient;
+            }
+            _ => {}
+        }
+    }
+
+    scope
 }
 
 #[cfg(test)]
@@ -1476,11 +1596,86 @@ mod tests {
         // The classifier validates both 16-bit components as hexadecimal,
         // while the current diagnostic retains only the property ID.
         match classify_oxmsg_entry("__substg1.0_1000001F", false) {
-            OxmsgEntryKind::PropertyStream { prop_id } => {
+            OxmsgEntryKind::PropertyStream { prop_id, indexed } => {
                 assert_eq!(prop_id, 0x1000);
+                assert!(!indexed);
             }
             _ => panic!("expected PropertyStream"),
         }
+    }
+
+    #[test]
+    fn oxmsg_indexed_property_stream_name_is_recognized() {
+        match classify_oxmsg_entry("__substg1.0_6844101F-00000000", false) {
+            OxmsgEntryKind::PropertyStream { prop_id, indexed } => {
+                assert_eq!(prop_id, 0x6844);
+                assert!(indexed);
+            }
+            _ => panic!("expected indexed PropertyStream"),
+        }
+    }
+
+    #[test]
+    fn oxmsg_malformed_indexed_property_stream_name_is_unrecognized() {
+        assert!(matches!(
+            classify_oxmsg_entry("__substg1.0_6844101F-0000000", false),
+            OxmsgEntryKind::Unrecognized
+        ));
+        assert!(matches!(
+            classify_oxmsg_entry("__substg1.0_6844101F-0000000G", false),
+            OxmsgEntryKind::Unrecognized
+        ));
+        assert!(matches!(
+            classify_oxmsg_entry("__substg1.0_6844101F-00000000-extra", false),
+            OxmsgEntryKind::Unrecognized
+        ));
+    }
+
+    #[test]
+    fn oxmsg_embedded_object_storage_is_recognized() {
+        assert!(matches!(
+            classify_oxmsg_entry("__substg1.0_3701000D", false),
+            OxmsgEntryKind::EmbeddedObjectStorage
+        ));
+    }
+
+    #[test]
+    fn oxmsg_entry_scope_tracks_nearest_structural_container() {
+        let message_properties = Path::new("Root Entry").join("__properties_version1.0");
+        let attachment_properties = Path::new("Root Entry")
+            .join("__attach_version1.0_#00000000")
+            .join("__properties_version1.0");
+        let recipient_property = Path::new("Root Entry")
+            .join("__recip_version1.0_#00000000")
+            .join("__substg1.0_0037001F");
+        let embedded_properties = Path::new("Root Entry")
+            .join("__attach_version1.0_#00000000")
+            .join("__substg1.0_3701000D")
+            .join("__properties_version1.0");
+        let named_property_stream = Path::new("Root Entry")
+            .join("__nameid_version1.0")
+            .join("__substg1.0_00020102");
+
+        assert_eq!(
+            oxmsg_entry_scope(&message_properties),
+            OxmsgEntryScope::Message
+        );
+        assert_eq!(
+            oxmsg_entry_scope(&attachment_properties),
+            OxmsgEntryScope::Attachment
+        );
+        assert_eq!(
+            oxmsg_entry_scope(&recipient_property),
+            OxmsgEntryScope::Recipient
+        );
+        assert_eq!(
+            oxmsg_entry_scope(&embedded_properties),
+            OxmsgEntryScope::EmbeddedObject
+        );
+        assert_eq!(
+            oxmsg_entry_scope(&named_property_stream),
+            OxmsgEntryScope::NamedPropertyStorage
+        );
     }
 
     #[test]
@@ -1517,7 +1712,10 @@ mod tests {
     fn oxmsg_known_names_with_wrong_cfb_object_types_are_reported() {
         assert_eq!(
             recognized_name_type_mismatch(
-                &OxmsgEntryKind::PropertyStream { prop_id: 0x1000 },
+                &OxmsgEntryKind::PropertyStream {
+                    prop_id: 0x1000,
+                    indexed: false,
+                },
                 CfbObjectKind::Storage
             ),
             Some(RecognizedNameTypeMismatch::StreamNameIsStorage)
@@ -1535,6 +1733,13 @@ mod tests {
                 CfbObjectKind::Storage
             ),
             None
+        );
+        assert_eq!(
+            recognized_name_type_mismatch(
+                &OxmsgEntryKind::EmbeddedObjectStorage,
+                CfbObjectKind::Stream
+            ),
+            Some(RecognizedNameTypeMismatch::StorageNameIsStream)
         );
     }
 
@@ -1575,14 +1780,15 @@ mod tests {
     #[test]
     fn oxmsg_entry_category_totals_include_every_properties_stream() {
         let totals = OxmsgTotals {
-            total_entries: 10,
+            total_entries: 11,
             root_entries_total: 1,
-            recognized_entries_total: 8,
+            recognized_entries_total: 9,
             properties_stream_entries_total: 3,
             property_streams_total: 2,
             attachment_storages_total: 1,
             recipient_storages_total: 1,
             named_property_storages_total: 0,
+            embedded_object_storages_total: 1,
             unrecognized_entries_total: 2,
             ..OxmsgTotals::default()
         };
@@ -1594,6 +1800,7 @@ mod tests {
                 + totals.attachment_storages_total
                 + totals.recipient_storages_total
                 + totals.named_property_storages_total
+                + totals.embedded_object_storages_total
                 + totals.unrecognized_entries_total,
             totals.total_entries
         );
