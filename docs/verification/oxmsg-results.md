@@ -153,39 +153,111 @@ rather than masking it.
 The 29-file Windows corpus produced this privacy-safe breakdown:
 
 ```text
-unrecognized_entries_total=62
-unrecognized_entry kind=stream depth=1 name_shape=malformed_property_stream_name count=56
-unrecognized_entry kind=stream depth=3 name_shape=other_name count=6
-recognized_name_type_mismatch kind=stream_name_is_storage count=2
+total_entries=2647
+root_entries_total=29
+recognized_entries_total=2641
+opaque_payload_entries_total=6
+unrecognized_entries_total=0
+entry_accounting_gap_total=0
+embedded_object_storages_total=2
+embedded_object_storages_message_shaped_total=1
+embedded_object_storages_custom_total=1
+embedded_object_storage shape=custom clsid=f4754c9b-64f5-4b40-8af4-679732ac0607 count=1
+embedded_object_storage shape=message_shaped clsid=00000000-0000-0000-0000-000000000000 count=1
+opaque_payload_entry kind=stream depth_below_payload=1 count=6
 ```
 
-The 56 depth-one streams are candidates for the standard multiple-valued
-property value-stream naming form, whose names append a zero-based value
-index to the property tag. The six depth-three non-reserved streams and the
-two recognized stream-name/storage mismatches require a focused structural
-classification pass before they are counted as known MS-OXMSG entries.
+### What was resolved, and how
 
-## Current scope
+Earlier corpus runs left 62 unrecognized entries plus two name/type mismatches.
+They resolved as follows:
 
-The verified implementation currently establishes that:
+| Earlier finding | Count | Resolution |
+| --- | --- | --- |
+| depth-1 `malformed_property_stream_name` streams | 56 | Standard multiple-valued value-stream names (`__substg1.0_PPPPTTTT-NNNNNNNN`), recognized in v0.1.9. Corpus shows `indexed_property_streams_total=56`. |
+| `stream_name_is_storage` mismatches | 2 | The two `__substg1.0_3701000D` embedded-object storages, now classified as storages. No mismatch lines remain. |
+| depth-3 `other_name` streams | 6 | Direct children of the single **custom** embedded-object storage. Counted as `opaque_payload`. |
 
-- `cfb` v0.14 can open a real `.msg` file;
-- `cfb::walk()` can enumerate its CFB entries;
-- principal MS-OXMSG entry naming conventions can be classified;
-- variable-property stream names can yield MAPI property IDs;
-- properties-stream presence and size can be observed;
-- recipient and named-property storages can be identified; and
-- unknown/unrecognized entries are explicitly counted.
+### The six streams
 
-It does **not** yet establish:
+- `opaque_payload_entry kind=stream depth_below_payload=1 count=6`: all six are
+  direct children of the one custom `__substg1.0_3701000D` storage. The corpus
+  has exactly one such storage, so no other placement is possible.
+- That storage has no `__properties_version1.0`, so it is not message-shaped.
+  Its CLSID is `f4754c9b-64f5-4b40-8af4-679732ac0607`, the class identifier
+  registered for `Word.Document` (Word 2007-era document objects).
+- MS-OXMSG "Custom Attachment Storage" leaves the content format of such a
+  storage to the application that produced it. These six streams are therefore
+  Word's own OLE object streams, outside MS-OXMSG naming.
 
-- complete MS-OXMSG structural accounting across the fixture corpus;
-- fixed-property decoding from `__properties_version1.0`;
-- variable-property value decoding;
-- named-property mapping resolution;
-- attachment-property decoding;
-- embedded-message decoding; or
-- production replacement of `msg_parser`.
+**Classification decision.** The six are counted in a separate
+`opaque_payload` category, not folded into `recognized_entries_total`.
+`recognized` means "an MS-OXMSG name we understand"; `opaque_payload` means
+"structurally accounted for, contents not interpreted". That the corpus reaches
+`unrecognized_entries_total=0` follows from this structural rule, and the
+`unrecognized` category remains in the diagnostic for any future file where an
+entry sits outside every known container.
 
-Those remain subsequent milestones requiring further real-data runs,
-implementation, and explicit tests.
+### The two embedded-object storages
+
+| Storage | Shape | CLSID | Cross-check |
+| --- | --- | --- | --- |
+| 1 | message-shaped (directly contains `__properties_version1.0`) | nil | `msg_parser` reports `attachments_method_embedded_message=1` |
+| 2 | custom (no `__properties_version1.0`) | Word.Document | `msg_parser` reports `attachments_method_ole=1` |
+
+The counts agree. This is a corpus-level correspondence, not a per-attachment
+binding: the `--oxmsg` path does not yet decode `PidTagAttachMethod`.
+`msg_parser` reports `embedded_messages_opened=0` despite the one
+embedded-message attachment, consistent with the M2c finding.
+
+### Cross-checks against `msg_parser`
+
+| Quantity | `--oxmsg` | `msg_parser` | Difference |
+| --- | --- | --- | --- |
+| recipient storages vs `to+cc+bcc` | 37 | 36 | 1 |
+| attachment storages vs `total_attachments` | 30 | 29 | 1 |
+
+Both differences fit the embedded message's own contents (one recipient, one
+attachment) being visible to `--oxmsg` but not to `msg_parser`. The recipient
+difference cannot yet be told apart from a recipient that `msg_parser` cannot
+represent (its `ORIG` limitation, see `record_msg_recipients`). Neither
+difference is explained until properties are decoded.
+
+### Internal consistency
+
+- Categories sum to the total: 29 root + 97 properties streams + 2417 property
+  streams + 30 attachment + 37 recipient + 29 named-property + 2 embedded-object
+  = 2641, plus 6 opaque = 2647.
+- Properties streams by scope: 29 message + 37 recipient + 30 attachment + 1
+  embedded-object = 97. Each recipient and attachment storage has exactly one.
+- Named-property storages: 29, one per file, none inside the embedded message,
+  consistent with embedded messages sharing the top-level name mapping.
+- `properties_stream_bytes_total=53504`. With headers of 32 bytes (message),
+  24 (embedded message) and 8 (recipient, attachment), the remainder is
+  52016 bytes = 3251 x 16, so the sizes are consistent with 16-byte fixed-length
+  property entries. This is a consistency check on the total, not decoding.
+
+### Known ambiguity to fix before decoding
+
+Streams inside `__nameid_version1.0` (`00020102`, `00030102`, `00040102` and the
+`0x1000`-range hash-bucket streams) are not MAPI properties. The unscoped
+`property_id` totals mix them with real properties: unscoped `0x1000` is 33 =
+29 message + 1 embedded-object + 3 named-property buckets, and `0x1009` is 54.
+The scoped lines are correct; the unscoped ones are not usable for decoding.
+
+## Current scope (replacement)
+
+The verified implementation now establishes that:
+
+- `cfb` v0.14 opens and enumerates every entry of all 29 fixtures;
+- every entry is accounted for (`entry_accounting_gap_total=0`) across the
+  corpus, with none unrecognized;
+- MS-OXMSG entry naming, including multiple-valued value streams, is classified;
+- embedded-object storages are distinguished as message-shaped or custom, and
+  custom-storage contents are reported as opaque payload;
+- entries are attributed to message, recipient, attachment, embedded-object and
+  named-property scopes.
+
+It still does **not** establish: fixed-property decoding, variable-property
+value decoding, named-property mapping resolution, attachment-property
+decoding, embedded-message decoding, or production replacement of `msg_parser`.

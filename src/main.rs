@@ -1259,6 +1259,7 @@ struct OxmsgTotals {
     /// Property IDs are a bounded, standard MAPI vocabulary (like message
     /// class names elsewhere in this codebase), not user content, so
     /// reporting them by ID does not violate the privacy-safe design.
+    /// It excludes named-property-storage streams.
     property_id_counts: BTreeMap<u16, u64>,
     /// Property-stream counts separated by the containing MS-OXMSG object
     /// scope, so message/recipient/attachment/embedded/named-property
@@ -1369,7 +1370,13 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
                     .property_id_counts_by_scope
                     .entry((scope, prop_id))
                     .or_insert(0) += 1;
-                *totals.property_id_counts.entry(prop_id).or_insert(0) += 1;
+                // Named-property storage streams are not MAPI properties:
+                // their four-hex prefix is a stream identifier (0x0002-0x0004
+                // and the 0x1000-range hash buckets), which would collide
+                // with real property IDs such as PidTagBody (0x1000).
+                if scope != OxmsgEntryScope::NamedPropertyStorage {
+                    *totals.property_id_counts.entry(prop_id).or_insert(0) += 1;
+                }
             }
             OxmsgEntryKind::AttachmentStorage => {
                 totals.recognized_entries_total += 1;
@@ -2279,5 +2286,16 @@ mod tests {
             ..OxmsgTotals::default()
         };
         assert_eq!(totals.entry_accounting_gap_total(), 0);
+    }
+
+    #[test]
+    fn oxmsg_named_property_storage_streams_are_not_property_ids() {
+        let path = Path::new("/")
+            .join("__nameid_version1.0")
+            .join("__substg1.0_10000102");
+        assert_eq!(
+            oxmsg_entry_scope(&path),
+            OxmsgEntryScope::NamedPropertyStorage
+        );
     }
 }
