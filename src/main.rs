@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -1184,9 +1184,30 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
         "unrecognized_entries_total={}",
         totals.unrecognized_entries_total
     );
-    for ((object_kind, depth, name_shape), count) in &totals.unrecognized_entries {
+    println!(
+        "embedded_object_storages_message_shaped_total={}",
+        totals.embedded_object_storages_message_shaped_total
+    );
+    println!(
+        "embedded_object_storages_custom_total={}",
+        totals.embedded_object_storages_custom_total
+    );
+    for ((shape, clsid), count) in &totals.embedded_object_storages_by_shape {
+        println!("embedded_object_storage shape={shape} clsid={clsid} count={count}");
+    }
+    println!(
+        "opaque_payload_entries_total={}",
+        totals.opaque_payload_entries_total
+    );
+    for ((object_kind, below), count) in &totals.opaque_payload_entries {
         println!(
-            "unrecognized_entry kind={} depth={} name_shape={} count={count}",
+            "opaque_payload_entry kind={} depth_below_payload={below} count={count}",
+            object_kind.as_str()
+        );
+    }
+    for ((object_kind, depth, name_shape, ancestry), count) in &totals.unrecognized_entries {
+        println!(
+            "unrecognized_entry kind={} depth={} name_shape={} ancestry={ancestry} count={count}",
             object_kind.as_str(),
             depth,
             name_shape.as_str()
@@ -1262,9 +1283,22 @@ struct OxmsgTotals {
     /// anomaly worth a closer look.
     unrecognized_entries_total: u64,
     /// Privacy-safe structural breakdown. Names and paths are never emitted.
-    unrecognized_entries: BTreeMap<(CfbObjectKind, u64, UnrecognizedNameShape), u64>,
+    unrecognized_entries: BTreeMap<(CfbObjectKind, u64, UnrecognizedNameShape, String), u64>,
     /// A recognized MS-OXMSG name whose CFB object type is unexpected.
     recognized_name_type_mismatches: BTreeMap<RecognizedNameTypeMismatch, u64>,
+
+    /// Entries beneath a custom (non-message-shaped) `__substg1.0_3701000D`
+    /// storage. Their names are defined by the producing application, not
+    /// MS-OXMSG (MS-OXMSG "Custom Attachment Storage"), so they are counted
+    /// as opaque payload rather than matched against MS-OXMSG names.
+    opaque_payload_entries_total: u64,
+    /// (object kind, depth below the payload root) -> count.
+    opaque_payload_entries: BTreeMap<(CfbObjectKind, u64), u64>,
+    embedded_object_storages_message_shaped_total: u64,
+    embedded_object_storages_custom_total: u64,
+    /// (shape, storage CLSID) -> count. CLSIDs are a bounded class-identifier
+    /// vocabulary, not user content.
+    embedded_object_storages_by_shape: BTreeMap<(&'static str, String), u64>,
 }
 
 impl OxmsgTotals {
@@ -1273,17 +1307,35 @@ impl OxmsgTotals {
     fn entry_accounting_gap_total(&self) -> i64 {
         self.total_entries as i64
             - self.recognized_entries_total as i64
+            - self.opaque_payload_entries_total as i64
             - self.unrecognized_entries_total as i64
     }
 }
 
 fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTotals) {
     let mut saw_properties_stream = false;
+    let message_shaped_parents = message_shaped_parent_paths(comp);
 
     for entry in comp.walk() {
         totals.total_entries += 1;
-        let entry_kind = classify_oxmsg_entry(entry.name(), entry.is_root());
         let object_kind = cfb_object_kind(entry.is_stream());
+
+        // Ancestry outranks name: anything beneath a custom attachment
+        // storage is application-defined, whatever it happens to be called.
+        if let Some(payload_root) =
+            enclosing_custom_payload_root(entry.path(), &message_shaped_parents)
+        {
+            totals.opaque_payload_entries_total += 1;
+            let below =
+                cfb_entry_depth(entry.path()).saturating_sub(cfb_entry_depth(&payload_root));
+            *totals
+                .opaque_payload_entries
+                .entry((object_kind, below))
+                .or_insert(0) += 1;
+            continue;
+        }
+
+        let entry_kind = classify_oxmsg_entry(entry.name(), entry.is_root());
         if let Some(mismatch) = recognized_name_type_mismatch(&entry_kind, object_kind) {
             *totals
                 .recognized_name_type_mismatches
@@ -1334,6 +1386,17 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
             OxmsgEntryKind::EmbeddedObjectStorage => {
                 totals.recognized_entries_total += 1;
                 totals.embedded_object_storages_total += 1;
+                let shape = if message_shaped_parents.contains(entry.path()) {
+                    totals.embedded_object_storages_message_shaped_total += 1;
+                    "message_shaped"
+                } else {
+                    totals.embedded_object_storages_custom_total += 1;
+                    "custom"
+                };
+                *totals
+                    .embedded_object_storages_by_shape
+                    .entry((shape, entry.clsid().to_string()))
+                    .or_insert(0) += 1;
             }
             OxmsgEntryKind::Unrecognized => {
                 totals.unrecognized_entries_total += 1;
@@ -1343,6 +1406,7 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
                         object_kind,
                         cfb_entry_depth(entry.path()),
                         unrecognized_name_shape(entry.name()),
+                        oxmsg_ancestry_shape(entry.path()),
                     ))
                     .or_insert(0) += 1;
             }
@@ -1554,6 +1618,56 @@ fn oxmsg_entry_scope(path: &Path) -> OxmsgEntryScope {
     }
 
     scope
+}
+
+const EMBEDDED_OBJECT_STORAGE_NAME: &str = "__substg1.0_3701000D";
+
+/// Parents of every `__properties_version1.0` stream. A `3701000D` storage in
+/// this set is message-shaped (an embedded message); one not in it is a
+/// custom attachment storage.
+fn message_shaped_parent_paths(comp: &cfb::CompoundFile<std::fs::File>) -> BTreeSet<PathBuf> {
+    comp.walk()
+        .filter(|e| e.is_stream() && e.name() == "__properties_version1.0")
+        .filter_map(|e| e.path().parent().map(Path::to_path_buf))
+        .collect()
+}
+
+/// If `path` lies beneath a custom (non-message-shaped) embedded-object
+/// storage, returns the outermost such storage's path. The storage itself is
+/// not "beneath" itself, so it keeps its own classification.
+fn enclosing_custom_payload_root(
+    path: &Path,
+    message_shaped: &BTreeSet<PathBuf>,
+) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .filter(|a| a.file_name().and_then(|n| n.to_str()) == Some(EMBEDDED_OBJECT_STORAGE_NAME))
+        .filter(|a| !message_shaped.contains(*a))
+        .last()
+        .map(Path::to_path_buf)
+}
+
+/// Privacy-safe ancestry: fixed-vocabulary tokens only, never entry names.
+fn oxmsg_ancestry_shape(path: &Path) -> String {
+    let mut tokens: Vec<&'static str> = Vec::new();
+    let ancestors: Vec<&Path> = path.ancestors().skip(1).collect();
+    for ancestor in ancestors.iter().rev() {
+        let Some(name) = ancestor.file_name().and_then(|n| n.to_str()) else {
+            continue; // the root has no file name
+        };
+        tokens.push(match name {
+            "__nameid_version1.0" => "named_property_storage",
+            EMBEDDED_OBJECT_STORAGE_NAME => "embedded_object",
+            n if n.starts_with("__attach_version1.0_#") => "attachment",
+            n if n.starts_with("__recip_version1.0_#") => "recipient",
+            _ => "other_storage",
+        });
+    }
+    if tokens.is_empty() {
+        "root".to_string()
+    } else {
+        format!("root/{}", tokens.join("/"))
+    }
 }
 
 #[cfg(test)]
@@ -2106,5 +2220,64 @@ mod tests {
 
         assert_eq!(totals.embedded_message_classes.get("IPM.Note"), Some(&1));
         assert_eq!(totals.embedded_message_classes.len(), 1);
+    }
+
+    #[test]
+    fn oxmsg_entries_beneath_a_custom_embedded_object_storage_are_payload() {
+        let payload = Path::new("/")
+            .join("__attach_version1.0_#00000000")
+            .join("__substg1.0_3701000D");
+        let stream = payload.join("\u{1}CompObj");
+        let message_shaped = BTreeSet::new();
+
+        assert_eq!(
+            enclosing_custom_payload_root(&stream, &message_shaped),
+            Some(payload.clone())
+        );
+        // The storage itself keeps its own classification.
+        assert_eq!(
+            enclosing_custom_payload_root(&payload, &message_shaped),
+            None
+        );
+    }
+
+    #[test]
+    fn oxmsg_message_shaped_embedded_object_children_are_not_payload() {
+        let payload = Path::new("/")
+            .join("__attach_version1.0_#00000000")
+            .join("__substg1.0_3701000D");
+        let stream = payload.join("__substg1.0_1000001F");
+        let mut message_shaped = BTreeSet::new();
+        message_shaped.insert(payload);
+
+        assert_eq!(
+            enclosing_custom_payload_root(&stream, &message_shaped),
+            None
+        );
+    }
+
+    #[test]
+    fn oxmsg_ancestry_shape_uses_fixed_vocabulary_only() {
+        let path = Path::new("/")
+            .join("__attach_version1.0_#00000000")
+            .join("__substg1.0_3701000D")
+            .join("anything");
+        assert_eq!(
+            oxmsg_ancestry_shape(&path),
+            "root/attachment/embedded_object"
+        );
+        assert_eq!(oxmsg_ancestry_shape(Path::new("/x")), "root");
+    }
+
+    #[test]
+    fn oxmsg_accounting_gap_counts_opaque_payload_as_accounted_for() {
+        let totals = OxmsgTotals {
+            total_entries: 10,
+            recognized_entries_total: 6,
+            opaque_payload_entries_total: 3,
+            unrecognized_entries_total: 1,
+            ..OxmsgTotals::default()
+        };
+        assert_eq!(totals.entry_accounting_gap_total(), 0);
     }
 }
