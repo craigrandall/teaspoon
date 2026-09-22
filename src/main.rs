@@ -1945,6 +1945,9 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
         }
     }
 
+    if saw_properties_stream {
+        totals.has_properties_stream += 1;
+    }
     // Named properties are resolved once per file (the mapping storage is
     // shared by the whole message, embedded messages included) rather than
     // once per entry.
