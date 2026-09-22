@@ -280,6 +280,41 @@ GUID) is correctly classified as variable — GUIDs don't fit the entry's
 8-byte inline value field even though MAPI treats the type as "fixed" in
 the conceptual sense.
 
+### Variable-value reading and named-property resolution: mixed results
+
+The 29-file corpus confirms variable-length value reading is clean:
+
+```text
+variable_value_stream_found_total=2017
+variable_value_stream_missing_total=0
+variable_value_size_mismatch_total=0
+variable_value_odd_utf16_length_total=0
+fixed_boolean_invalid_encoding_total=0
+```
+
+(2017, not 2019, is correct: it excludes the 2 `PT_OBJECT` entries already
+accounted for via the embedded-object-storage path.)
+
+Named-property resolution surfaced a real, unresolved anomaly:
+
+```text
+named_properties_seen_total=436
+named_properties_guid_out_of_range_total=298
+named_properties_string_kind_total=0
+named_properties_numeric_kind_total=436
+```
+
+298 of 436 (68%) named-property occurrences resolve to an undefined GUID
+index, and none resolve as string-named -- implausible for real
+Outlook-authored files, and inconsistent with MS-OXMSG's requirement that
+named-property IDs be assigned consecutively with no gaps. This points to
+a decoding bug in the Entry Stream's Index-and-Kind bit-field split, not a
+data anomaly. The GUID/kind bit layout was previously described as
+"confirmed against `rs-chunks`," which overstated what was actually
+verified -- the referenced source showed the struct shape, not the actual
+mask/shift logic. **Named-property set resolution is not yet verified**
+and should not be relied on until this is resolved.
+
 ## Current scope (replacement)
 
 The verified implementation now establishes that:

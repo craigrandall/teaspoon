@@ -1351,6 +1351,15 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
     for (lid, count) in &totals.named_property_numeric_lids {
         println!("named_property_numeric_lid lid=0x{lid:04X} count={count}");
     }
+    for (guid_index, count) in &totals.named_properties_out_of_range_alternate_guid_index {
+        println!(
+            "named_property_out_of_range_alternate_guid_index value={guid_index} count={count}"
+        );
+    }
+    println!(
+        "named_properties_out_of_range_alternate_string_kind_total={}",
+        totals.named_properties_out_of_range_alternate_string_kind_total
+    );
 
     Ok(())
 }
@@ -1473,6 +1482,13 @@ struct OxmsgTotals {
     /// Numeric LIDs are small application-defined integers, not content --
     /// same footing as a property ID.
     named_property_numeric_lids: BTreeMap<u32, u64>,
+    /// Diagnostic only, for the currently-open bit-layout question: for
+    /// every entry this slice reports as `OutOfRange`, what the OTHER
+    /// 16-bit half's low 15 bits would resolve to as a guid_index. A
+    /// distribution concentrated at 1/2/3 is strong evidence the two
+    /// halves are swapped.
+    named_properties_out_of_range_alternate_guid_index: BTreeMap<u16, u64>,
+    named_properties_out_of_range_alternate_string_kind_total: u64,
 }
 
 impl OxmsgTotals {
@@ -1664,16 +1680,26 @@ struct NamedPropertyEntryRaw {
     name_id_or_offset: u32,
     guid_index: u16,
     is_string: bool,
+    /// Diagnostic only: the OTHER 16-bit half read the same way, to test
+    /// whether the two halves are actually swapped from what this slice
+    /// assumes. Remove once the real layout is confirmed against data.
+    alternate_guid_index: u16,
+    alternate_is_string: bool,
 }
 
 fn decode_named_property_entry(bytes: &[u8; 8]) -> NamedPropertyEntryRaw {
     let name_id_or_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let index_kind = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-    let guid_and_kind = (index_kind >> 16) as u16;
+    let low16 = (index_kind & 0xFFFF) as u16;
+    let high16 = (index_kind >> 16) as u16;
     NamedPropertyEntryRaw {
         name_id_or_offset,
-        guid_index: guid_and_kind & 0x7FFF,
-        is_string: guid_and_kind & 0x8000 != 0,
+        guid_index: high16 & 0x7FFF,
+        is_string: high16 & 0x8000 != 0,
+        // Kept only to test the alternative bit-layout hypothesis below --
+        // not the field this slice's design says the low half is.
+        alternate_guid_index: low16 & 0x7FFF,
+        alternate_is_string: low16 & 0x8000 != 0,
     }
 }
 
@@ -2039,6 +2065,14 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
                                 }
                                 NamedPropertySet::OutOfRange => {
                                     totals.named_properties_guid_out_of_range_total += 1;
+                                    *totals
+                                        .named_properties_out_of_range_alternate_guid_index
+                                        .entry(raw.alternate_guid_index)
+                                        .or_insert(0) += 1;
+                                    if raw.alternate_is_string {
+                                        totals.named_properties_out_of_range_alternate_string_kind_total +=
+                                            1;
+                                    }
                                 }
                             }
                         }
