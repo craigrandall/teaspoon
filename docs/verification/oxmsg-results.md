@@ -246,6 +246,40 @@ them separate). The corpus confirms it: unscoped `0x1000=30` (29 message + 1
 embedded-object), matching the sum of the scoped message and embedded-object
 lines, with no `0x0002`/`0x0003`/`0x0004` lines in the unscoped output.
 
+### Property entry decoding (first slice)
+
+The 29-file corpus confirms clean decoding of every properties-stream entry
+array:
+
+```text
+properties_entries_total=3251
+properties_entries_fixed_inline_total=1221
+properties_entries_variable_single_total=2019
+properties_entries_variable_multivalued_total=11
+properties_stream_too_short_for_header_total=0
+properties_stream_trailing_bytes_total=0
+properties_stream_unexpected_scope_total=0
+properties_stream_read_errors=0
+attach_data_object_size_sentinel_mismatches=0
+attach_data_object_reserved_vs_embedded_object_storage_gap=0
+attach_data_object_reserved_vs_custom_object_storage_gap=0
+```
+
+The three shape totals sum to `properties_entries_total` exactly (checked
+per scope against the `property_type` histogram, not just at the aggregate
+level). The `attach_data_object` cross-check — the attachment's
+`0x3701`/`PT_OBJECT` entry's Reserved field (0x01 embedded, 0x04 storage)
+compared against the CFB-structural message-shaped/custom classification
+from M2.x — agrees exactly: one entry reads `reserved=0x01`, one reads
+`reserved=0x04`, matching the one message-shaped and one custom
+embedded-object storage found earlier. Two independent signals, same
+conclusion.
+
+The property-type histogram also confirms `0x0048` (PT_CLSID, a 16-byte
+GUID) is correctly classified as variable — GUIDs don't fit the entry's
+8-byte inline value field even though MAPI treats the type as "fixed" in
+the conceptual sense.
+
 ## Current scope (replacement)
 
 The verified implementation now establishes that:
@@ -257,8 +291,11 @@ The verified implementation now establishes that:
 - embedded-object storages are distinguished as message-shaped or custom, and
   custom-storage contents are reported as opaque payload;
 - entries are attributed to message, recipient, attachment, embedded-object and
-  named-property scopes.
+  named-property scopes;
+- every `__properties_version1.0` entry array is decoded (type, ID, flags,
+  and variable-length size/reserved), with an independent property-level
+  confirmation of the M2.x message-shaped/custom classification.
 
-It still does **not** establish: fixed-property decoding, variable-property
-value decoding, named-property mapping resolution, attachment-property
-decoding, embedded-message decoding, or production replacement of `msg_parser`.
+It still does **not** establish: fixed-property value interpretation,
+variable-property value reading, named-property mapping resolution,
+embedded-message decoding, or production replacement of `msg_parser`.

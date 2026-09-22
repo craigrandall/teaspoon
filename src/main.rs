@@ -1301,6 +1301,56 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
         "attach_data_object_reserved_vs_custom_object_storage_gap={}",
         reserved_storage as i64 - totals.embedded_object_storages_custom_total as i64
     );
+    println!(
+        "fixed_boolean_invalid_encoding_total={}",
+        totals.fixed_boolean_invalid_encoding_total
+    );
+    println!(
+        "variable_value_stream_found_total={}",
+        totals.variable_value_stream_found_total
+    );
+    println!(
+        "variable_value_stream_missing_total={}",
+        totals.variable_value_stream_missing_total
+    );
+    println!(
+        "variable_value_size_mismatch_total={}",
+        totals.variable_value_size_mismatch_total
+    );
+    println!(
+        "variable_value_odd_utf16_length_total={}",
+        totals.variable_value_odd_utf16_length_total
+    );
+    println!(
+        "named_properties_seen_total={}",
+        totals.named_properties_seen_total
+    );
+    println!(
+        "named_properties_map_missing_total={}",
+        totals.named_properties_map_missing_total
+    );
+    println!(
+        "named_properties_unresolvable_total={}",
+        totals.named_properties_unresolvable_total
+    );
+    println!(
+        "named_properties_guid_out_of_range_total={}",
+        totals.named_properties_guid_out_of_range_total
+    );
+    println!(
+        "named_properties_string_kind_total={}",
+        totals.named_properties_string_kind_total
+    );
+    println!(
+        "named_properties_numeric_kind_total={}",
+        totals.named_properties_numeric_kind_total
+    );
+    for (set, count) in &totals.named_property_sets {
+        println!("named_property_set set={set} count={count}");
+    }
+    for (lid, count) in &totals.named_property_numeric_lids {
+        println!("named_property_numeric_lid lid=0x{lid:04X} count={count}");
+    }
 
     Ok(())
 }
@@ -1402,6 +1452,27 @@ struct OxmsgTotals {
     /// Per spec this entry's Size field MUST be 0xFFFFFFFF; count any that
     /// aren't, rather than assuming.
     attach_data_object_size_sentinel_mismatches: u64,
+
+    // --- Fixed-value and variable-value structural checks -----------------
+    fixed_boolean_invalid_encoding_total: u64,
+    variable_value_stream_found_total: u64,
+    variable_value_stream_missing_total: u64,
+    variable_value_size_mismatch_total: u64,
+    variable_value_odd_utf16_length_total: u64,
+
+    // --- Named-property resolution -----------------------------------------
+    named_properties_seen_total: u64,
+    named_properties_map_missing_total: u64,
+    named_properties_unresolvable_total: u64,
+    named_properties_guid_out_of_range_total: u64,
+    named_properties_string_kind_total: u64,
+    named_properties_numeric_kind_total: u64,
+    /// Property-set membership, by bounded label ("PS_MAPI",
+    /// "PS_PUBLIC_STRINGS", a well-known PSETID name, or "custom").
+    named_property_sets: BTreeMap<&'static str, u64>,
+    /// Numeric LIDs are small application-defined integers, not content --
+    /// same footing as a property ID.
+    named_property_numeric_lids: BTreeMap<u32, u64>,
 }
 
 impl OxmsgTotals {
@@ -1523,6 +1594,150 @@ fn decode_properties_stream(bytes: &[u8], header_len: usize) -> Option<DecodedPr
     Some(DecodedPropertiesStream {
         entries,
         trailing_bytes: body.len() - offset,
+    })
+}
+
+// --- Fixed-value structural checks (never print the value itself) --------
+
+/// PT_BOOLEAN's value occupies the first 2 bytes of the entry's value field
+/// (MS-OXCDATA 2.11.1); the only defined encodings are 0x0000 and 0x0001.
+fn is_valid_boolean_encoding(tail: &[u8; 8]) -> bool {
+    tail[1] == 0 && matches!(tail[0], 0 | 1)
+}
+
+// --- Variable-length value stream cross-check (never read as content) ----
+
+fn expected_variable_stream_path(parent: &Path, property_id: u16, property_type: u16) -> PathBuf {
+    parent.join(format!("__substg1.0_{property_id:04X}{property_type:04X}"))
+}
+
+/// MS-OXMSG 2.4.2.2: the declared Size field equals the value stream's byte
+/// length for most types, +2 for PT_UNICODE, +1 for PT_STRING8.
+fn expected_size_field_value(property_type: u16, actual_stream_len: u64) -> u64 {
+    match property_type {
+        0x001F => actual_stream_len + 2, // PtypString / PT_UNICODE
+        0x001E => actual_stream_len + 1, // PtypString8
+        _ => actual_stream_len,
+    }
+}
+
+// --- Named-property resolution (MS-OXMSG 2.2.3) ---------------------------
+// Well-known property-set GUIDs, MS-OXPROPS 1.3.2 (little-endian byte
+// order). A deliberately small set for this slice; anything else is
+// reported as "custom" -- never by its raw GUID bytes.
+const PSETID_ADDRESS: [u8; 16] = [
+    0x04, 0x20, 0x06, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
+];
+const PSETID_APPOINTMENT: [u8; 16] = [
+    0x02, 0x20, 0x06, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
+];
+const PSETID_COMMON: [u8; 16] = [
+    0x08, 0x20, 0x06, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
+];
+const PSETID_LOG: [u8; 16] = [
+    0x0A, 0x20, 0x06, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
+];
+const PSETID_NOTE: [u8; 16] = [
+    0x0E, 0x20, 0x06, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
+];
+const PSETID_TASK: [u8; 16] = [
+    0x03, 0x20, 0x06, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
+];
+
+fn classify_well_known_property_set(guid: &[u8; 16]) -> Option<&'static str> {
+    match *guid {
+        PSETID_ADDRESS => Some("PSETID_Address"),
+        PSETID_APPOINTMENT => Some("PSETID_Appointment"),
+        PSETID_COMMON => Some("PSETID_Common"),
+        PSETID_LOG => Some("PSETID_Log"),
+        PSETID_NOTE => Some("PSETID_Note"),
+        PSETID_TASK => Some("PSETID_Task"),
+        _ => None,
+    }
+}
+
+/// A decoded Entry Stream record (MS-OXMSG 2.2.3.2.4). `name_id_or_offset`
+/// is either a numeric LID (a small application-defined integer -- not
+/// content) or a byte offset into the string stream (never followed by
+/// this diagnostic).
+struct NamedPropertyEntryRaw {
+    name_id_or_offset: u32,
+    guid_index: u16,
+    is_string: bool,
+}
+
+fn decode_named_property_entry(bytes: &[u8; 8]) -> NamedPropertyEntryRaw {
+    let name_id_or_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let index_kind = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let guid_and_kind = (index_kind >> 16) as u16;
+    NamedPropertyEntryRaw {
+        name_id_or_offset,
+        guid_index: guid_and_kind & 0x7FFF,
+        is_string: guid_and_kind & 0x8000 != 0,
+    }
+}
+
+enum NamedPropertySet {
+    PsMapi,
+    PsPublicStrings,
+    WellKnown(&'static str),
+    Custom,
+    /// `guid_index` pointed outside the GUID stream -- a real anomaly.
+    OutOfRange,
+}
+
+struct NamedPropertyMap {
+    guid_stream: Vec<u8>,
+    entry_stream: Vec<u8>,
+}
+
+impl NamedPropertyMap {
+    fn lookup(&self, property_id: u16) -> Option<NamedPropertyEntryRaw> {
+        let index = property_id.checked_sub(0x8000)? as usize;
+        let offset = index * 8;
+        let bytes = self.entry_stream.get(offset..offset + 8)?;
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(bytes);
+        Some(decode_named_property_entry(&arr))
+    }
+
+    fn resolve_set(&self, guid_index: u16) -> NamedPropertySet {
+        match guid_index {
+            1 => NamedPropertySet::PsMapi,
+            2 => NamedPropertySet::PsPublicStrings,
+            n if n >= 3 => {
+                let offset = (n - 3) as usize * 16;
+                match self.guid_stream.get(offset..offset + 16) {
+                    Some(bytes) => {
+                        let mut g = [0u8; 16];
+                        g.copy_from_slice(bytes);
+                        match classify_well_known_property_set(&g) {
+                            Some(name) => NamedPropertySet::WellKnown(name),
+                            None => NamedPropertySet::Custom,
+                        }
+                    }
+                    None => NamedPropertySet::OutOfRange,
+                }
+            }
+            _ => NamedPropertySet::OutOfRange, // 0 is not a defined guid index
+        }
+    }
+}
+
+/// Reads and parses the named property mapping storage, if present. Per
+/// MS-OXMSG 2.2.3, this always lives at the top level, even for named
+/// properties on an embedded message (Embedded Message objects MUST NOT
+/// have their own).
+fn read_named_property_map(
+    comp: &mut cfb::CompoundFile<std::fs::File>,
+) -> Option<NamedPropertyMap> {
+    let guid_stream =
+        read_stream_bytes(comp, Path::new("/__nameid_version1.0/__substg1.0_00020102"))?;
+    let entry_stream =
+        read_stream_bytes(comp, Path::new("/__nameid_version1.0/__substg1.0_00030102"))?;
+    Some(NamedPropertyMap {
+        guid_stream,
+        entry_stream,
     })
 }
 
@@ -1677,6 +1892,11 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
         totals.has_properties_stream += 1;
     }
 
+    // Named properties are resolved once per file (the mapping storage is
+    // shared by the whole message, embedded messages included) rather than
+    // once per entry.
+    let named_property_map = read_named_property_map(comp);
+
     // Pass 2: decode the entry array of every properties stream found
     // above. This reads stream contents, but reports only structural
     // fields (type, ID, flags, and variable-length size/reserved) -- never
@@ -1715,9 +1935,48 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
             match classify_property_entry_shape(prop_entry.property_type) {
                 PropertyEntryShape::FixedInline => {
                     totals.properties_entries_fixed_inline_total += 1;
+                    if prop_entry.property_type == 0x000B
+                        && !is_valid_boolean_encoding(&prop_entry.tail)
+                    {
+                        totals.fixed_boolean_invalid_encoding_total += 1;
+                    }
                 }
                 PropertyEntryShape::VariableSingle => {
                     totals.properties_entries_variable_single_total += 1;
+                    // PT_OBJECT (0x000D) properties point at a storage, not
+                    // a stream -- already covered by the embedded-object
+                    // accounting above.
+                    let declared_size = u32::from_le_bytes([
+                        prop_entry.tail[0],
+                        prop_entry.tail[1],
+                        prop_entry.tail[2],
+                        prop_entry.tail[3],
+                    ]);
+                    if prop_entry.property_type != 0x000D && declared_size != 0xFFFF_FFFF {
+                        let parent = entry.path.parent().unwrap_or(Path::new("/"));
+                        let value_path = expected_variable_stream_path(
+                            parent,
+                            prop_entry.property_id,
+                            prop_entry.property_type,
+                        );
+                        match read_stream_bytes(comp, &value_path) {
+                            None => totals.variable_value_stream_missing_total += 1,
+                            Some(value_bytes) => {
+                                totals.variable_value_stream_found_total += 1;
+                                let expected = expected_size_field_value(
+                                    prop_entry.property_type,
+                                    value_bytes.len() as u64,
+                                );
+                                if expected != declared_size as u64 {
+                                    totals.variable_value_size_mismatch_total += 1;
+                                }
+                                if prop_entry.property_type == 0x001F && value_bytes.len() % 2 != 0
+                                {
+                                    totals.variable_value_odd_utf16_length_total += 1;
+                                }
+                            }
+                        }
+                    }
                 }
                 PropertyEntryShape::VariableMultivalued => {
                     totals.properties_entries_variable_multivalued_total += 1;
@@ -1741,6 +2000,49 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
                     .or_insert(0) += 1;
                 if size != 0xFFFF_FFFF {
                     totals.attach_data_object_size_sentinel_mismatches += 1;
+                }
+            }
+
+            // Named-property resolution (MS-OXMSG 2.2.3): identity only
+            // (property set + numeric-or-string), never a string name.
+            if prop_entry.property_id >= 0x8000 {
+                totals.named_properties_seen_total += 1;
+                match &named_property_map {
+                    None => totals.named_properties_map_missing_total += 1,
+                    Some(map) => match map.lookup(prop_entry.property_id) {
+                        None => totals.named_properties_unresolvable_total += 1,
+                        Some(raw) => {
+                            if raw.is_string {
+                                totals.named_properties_string_kind_total += 1;
+                            } else {
+                                totals.named_properties_numeric_kind_total += 1;
+                                *totals
+                                    .named_property_numeric_lids
+                                    .entry(raw.name_id_or_offset)
+                                    .or_insert(0) += 1;
+                            }
+                            match map.resolve_set(raw.guid_index) {
+                                NamedPropertySet::PsMapi => {
+                                    *totals.named_property_sets.entry("PS_MAPI").or_insert(0) += 1;
+                                }
+                                NamedPropertySet::PsPublicStrings => {
+                                    *totals
+                                        .named_property_sets
+                                        .entry("PS_PUBLIC_STRINGS")
+                                        .or_insert(0) += 1;
+                                }
+                                NamedPropertySet::WellKnown(name) => {
+                                    *totals.named_property_sets.entry(name).or_insert(0) += 1;
+                                }
+                                NamedPropertySet::Custom => {
+                                    *totals.named_property_sets.entry("custom").or_insert(0) += 1;
+                                }
+                                NamedPropertySet::OutOfRange => {
+                                    totals.named_properties_guid_out_of_range_total += 1;
+                                }
+                            }
+                        }
+                    },
                 }
             }
         }
@@ -2684,5 +2986,84 @@ mod tests {
     fn oxmsg_decode_properties_stream_reports_too_short_for_header() {
         let bytes = vec![0u8; 4]; // shorter than any known header
         assert!(decode_properties_stream(&bytes, 8).is_none());
+    }
+
+    #[test]
+    fn oxmsg_boolean_encoding_validity() {
+        assert!(is_valid_boolean_encoding(&[0, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(is_valid_boolean_encoding(&[1, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(!is_valid_boolean_encoding(&[2, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(!is_valid_boolean_encoding(&[1, 1, 0, 0, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn oxmsg_expected_size_field_accounts_for_string_null_terminator_bytes() {
+        assert_eq!(expected_size_field_value(0x001F, 10), 12); // PT_UNICODE: +2
+        assert_eq!(expected_size_field_value(0x001E, 10), 11); // PT_STRING8: +1
+        assert_eq!(expected_size_field_value(0x0102, 10), 10); // PT_BINARY: unchanged
+    }
+
+    #[test]
+    fn oxmsg_expected_variable_stream_path_matches_ms_oxmsg_naming() {
+        let parent = Path::new("/");
+        let path = expected_variable_stream_path(parent, 0x0037, 0x001F);
+        assert_eq!(path, Path::new("/__substg1.0_0037001F"));
+    }
+
+    #[test]
+    fn oxmsg_named_property_entry_decodes_numeric_and_string_kind() {
+        // Numeric: LID 0x0000811C, property index 5, guid index 4, kind 0.
+        // Index-and-kind = property_index(0x0005) | (guid_index<<16=0x0004<<16).
+        let mut bytes = [0u8; 8];
+        bytes[0..4].copy_from_slice(&0x0000_811Cu32.to_le_bytes());
+        let index_kind = 0x0005u32 | (0x0004u32 << 16);
+        bytes[4..8].copy_from_slice(&index_kind.to_le_bytes());
+        let entry = decode_named_property_entry(&bytes);
+        assert_eq!(entry.name_id_or_offset, 0x0000_811C);
+        assert_eq!(entry.guid_index, 4);
+        assert!(!entry.is_string);
+
+        // String: offset 0x10, property index 5, guid index 3, kind 1 (top
+        // bit of the upper u16 set).
+        let mut bytes = [0u8; 8];
+        bytes[0..4].copy_from_slice(&0x0000_0010u32.to_le_bytes());
+        let index_kind = 0x0005u32 | ((0x0003u32 | 0x8000) << 16);
+        bytes[4..8].copy_from_slice(&index_kind.to_le_bytes());
+        let entry = decode_named_property_entry(&bytes);
+        assert_eq!(entry.name_id_or_offset, 0x10);
+        assert_eq!(entry.guid_index, 3);
+        assert!(entry.is_string);
+    }
+
+    #[test]
+    fn oxmsg_named_property_set_sentinels_and_well_known_lookup() {
+        let map = NamedPropertyMap {
+            guid_stream: PSETID_COMMON.to_vec(),
+            entry_stream: Vec::new(),
+        };
+        assert!(matches!(map.resolve_set(1), NamedPropertySet::PsMapi));
+        assert!(matches!(
+            map.resolve_set(2),
+            NamedPropertySet::PsPublicStrings
+        ));
+        assert!(matches!(
+            map.resolve_set(3),
+            NamedPropertySet::WellKnown("PSETID_Common")
+        ));
+        assert!(matches!(map.resolve_set(4), NamedPropertySet::OutOfRange));
+    }
+
+    #[test]
+    fn oxmsg_named_property_map_lookup_indexes_from_0x8000() {
+        // Two 8-byte entries; the second is at byte offset 8.
+        let mut entry_stream = vec![0u8; 16];
+        entry_stream[8..12].copy_from_slice(&0x2Au32.to_le_bytes());
+        let map = NamedPropertyMap {
+            guid_stream: Vec::new(),
+            entry_stream,
+        };
+        let entry = map.lookup(0x8001).expect("entry at index 1");
+        assert_eq!(entry.name_id_or_offset, 0x2A);
+        assert!(map.lookup(0x7FFF).is_none()); // below 0x8000
     }
 }
