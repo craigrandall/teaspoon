@@ -237,13 +237,14 @@ difference is explained until properties are decoded.
   52016 bytes = 3251 x 16, so the sizes are consistent with 16-byte fixed-length
   property entries. This is a consistency check on the total, not decoding.
 
-### Known ambiguity to fix before decoding
+### Named-property-storage streams excluded from unscoped totals
 
 Streams inside `__nameid_version1.0` (`00020102`, `00030102`, `00040102` and the
-`0x1000`-range hash-bucket streams) are not MAPI properties. The unscoped
-`property_id` totals mix them with real properties: unscoped `0x1000` is 33 =
-29 message + 1 embedded-object + 3 named-property buckets, and `0x1009` is 54.
-The scoped lines are correct; the unscoped ones are not usable for decoding.
+`0x1000`-range hash-bucket streams) are not MAPI properties, and are now
+excluded from the unscoped `property_id` map (the scoped map already kept
+them separate). The corpus confirms it: unscoped `0x1000=30` (29 message + 1
+embedded-object), matching the sum of the scoped message and embedded-object
+lines, with no `0x0002`/`0x0003`/`0x0004` lines in the unscoped output.
 
 ## Current scope (replacement)
 

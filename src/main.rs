@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -1128,7 +1129,7 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
 
     for file in files {
         match cfb::open(file) {
-            Ok(comp) => inspect_oxmsg(&comp, &mut totals),
+            Ok(mut comp) => inspect_oxmsg(&mut comp, &mut totals),
             Err(_) => totals.open_errors += 1,
         }
     }
@@ -1234,6 +1235,72 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
     for (prop_id, count) in &totals.property_id_counts {
         println!("property_id id=0x{prop_id:04X} count={count}");
     }
+    println!(
+        "properties_entries_total={}",
+        totals.properties_entries_total
+    );
+    println!(
+        "properties_entries_fixed_inline_total={}",
+        totals.properties_entries_fixed_inline_total
+    );
+    println!(
+        "properties_entries_variable_single_total={}",
+        totals.properties_entries_variable_single_total
+    );
+    println!(
+        "properties_entries_variable_multivalued_total={}",
+        totals.properties_entries_variable_multivalued_total
+    );
+    println!(
+        "properties_stream_too_short_for_header_total={}",
+        totals.properties_stream_too_short_for_header_total
+    );
+    println!(
+        "properties_stream_trailing_bytes_total={}",
+        totals.properties_stream_trailing_bytes_total
+    );
+    println!(
+        "properties_stream_unexpected_scope_total={}",
+        totals.properties_stream_unexpected_scope_total
+    );
+    println!(
+        "properties_stream_read_errors={}",
+        totals.properties_stream_read_errors
+    );
+    for ((scope, property_type), count) in &totals.property_type_counts_by_scope {
+        println!(
+            "property_type scope={} type=0x{property_type:04X} count={count}",
+            scope.as_str()
+        );
+    }
+    for (flags, count) in &totals.property_entry_flags_counts {
+        println!("property_entry_flags value=0x{flags:X} count={count}");
+    }
+    for (reserved, count) in &totals.attach_data_object_reserved_counts {
+        println!("attach_data_object_entry reserved=0x{reserved:02X} count={count}");
+    }
+    println!(
+        "attach_data_object_size_sentinel_mismatches={}",
+        totals.attach_data_object_size_sentinel_mismatches
+    );
+    let reserved_embedded = totals
+        .attach_data_object_reserved_counts
+        .get(&0x01)
+        .copied()
+        .unwrap_or(0);
+    let reserved_storage = totals
+        .attach_data_object_reserved_counts
+        .get(&0x04)
+        .copied()
+        .unwrap_or(0);
+    println!(
+        "attach_data_object_reserved_vs_embedded_object_storage_gap={}",
+        reserved_embedded as i64 - totals.embedded_object_storages_message_shaped_total as i64
+    );
+    println!(
+        "attach_data_object_reserved_vs_custom_object_storage_gap={}",
+        reserved_storage as i64 - totals.embedded_object_storages_custom_total as i64
+    );
 
     Ok(())
 }
@@ -1300,6 +1367,41 @@ struct OxmsgTotals {
     /// (shape, storage CLSID) -> count. CLSIDs are a bounded class-identifier
     /// vocabulary, not user content.
     embedded_object_storages_by_shape: BTreeMap<(&'static str, String), u64>,
+
+    // --- Property-type/value decoding (privacy-safe first slice) ---------
+    /// Every fixed-length entry decoded from a `__properties_version1.0`
+    /// stream's entry array. Entry values are never read or reported --
+    /// only structural fields (type, ID, flags, and, for variable-length
+    /// entries, size/reserved).
+    properties_entries_total: u64,
+    properties_entries_fixed_inline_total: u64,
+    properties_entries_variable_single_total: u64,
+    properties_entries_variable_multivalued_total: u64,
+    /// A stream shorter than the header size expected for its scope.
+    properties_stream_too_short_for_header_total: u64,
+    /// A stream whose length past the header isn't an exact multiple of 16.
+    properties_stream_trailing_bytes_total: u64,
+    /// A properties stream in a scope with no defined header size (per
+    /// MS-OXMSG this should never be Named Property Mapping storage).
+    properties_stream_unexpected_scope_total: u64,
+    properties_stream_read_errors: u64,
+    /// (scope, raw property type incl. the 0x1000 multi-value bit) -> count.
+    /// Property types are a bounded MAPI vocabulary (MS-OXCDATA 2.11.1), not
+    /// user content.
+    property_type_counts_by_scope: BTreeMap<(OxmsgEntryScope, u16), u64>,
+    /// Property Entry flags are a 3-bit MS-OXMSG vocabulary (mandatory /
+    /// readable / writable), not user content.
+    property_entry_flags_counts: BTreeMap<u32, u64>,
+    /// Reserved-field values seen on the attachment-scope
+    /// PidTagAttachDataObject (0x3701, PT_OBJECT) entry. Per MS-OXMSG
+    /// 2.4.2.2, this is 0x01 for an embedded-message attachment and 0x04 for
+    /// a storage (OLE/custom) attachment -- an independent, property-level
+    /// cross-check of the CFB-structural message-shaped/custom
+    /// classification established in M2.x.
+    attach_data_object_reserved_counts: BTreeMap<u32, u64>,
+    /// Per spec this entry's Size field MUST be 0xFFFFFFFF; count any that
+    /// aren't, rather than assuming.
+    attach_data_object_size_sentinel_mismatches: u64,
 }
 
 impl OxmsgTotals {
@@ -1313,22 +1415,173 @@ impl OxmsgTotals {
     }
 }
 
-fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTotals) {
-    let mut saw_properties_stream = false;
-    let message_shaped_parents = message_shaped_parent_paths(comp);
+/// Decides only whether a property's value fits inline in a Property
+/// Entry's 8-byte value field (MS-OXMSG 2.4.2.1) or lives in a separate
+/// stream (2.4.2.2) -- never reads or reports the value itself. `base_type`
+/// must already have the 0x1000 multi-value bit cleared by the caller.
+fn is_fixed_length_base_type(base_type: u16) -> bool {
+    matches!(
+        base_type,
+        0x0002 // PT_SHORT / PT_I2
+            | 0x0003 // PT_LONG / PT_I4
+            | 0x0004 // PT_FLOAT / PT_R4
+            | 0x0005 // PT_DOUBLE / PT_R8
+            | 0x0006 // PT_CURRENCY
+            | 0x0007 // PT_APPTIME
+            | 0x000A // PT_ERROR
+            | 0x000B // PT_BOOLEAN
+            | 0x0014 // PT_I8 / PT_LONGLONG
+            | 0x0040 // PT_SYSTIME
+    )
+}
 
-    for entry in comp.walk() {
+const PROPERTY_TYPE_MULTIVALUE_BIT: u16 = 0x1000;
+
+fn property_type_is_multivalued(property_type: u16) -> bool {
+    property_type & PROPERTY_TYPE_MULTIVALUE_BIT != 0
+}
+
+#[derive(Clone, Copy)]
+enum PropertyEntryShape {
+    /// Value stored inline in the entry's 8-byte value field.
+    FixedInline,
+    /// Value stored in a separate `__substg1.0_PPPPTTTT` stream.
+    VariableSingle,
+    /// Values stored in a separate, indexed set of
+    /// `__substg1.0_PPPPTTTT-NNNNNNNN` streams.
+    VariableMultivalued,
+}
+
+fn classify_property_entry_shape(property_type: u16) -> PropertyEntryShape {
+    if property_type_is_multivalued(property_type) {
+        PropertyEntryShape::VariableMultivalued
+    } else if is_fixed_length_base_type(property_type) {
+        PropertyEntryShape::FixedInline
+    } else {
+        PropertyEntryShape::VariableSingle
+    }
+}
+
+/// The entry-array header size for a `__properties_version1.0` stream,
+/// which depends on the containing object (MS-OXMSG 2.4.1.1/2.4.1.2, and
+/// the attachment/recipient 8-byte reserved header). Named Property
+/// Mapping storage has no property stream at all (2.4), so it has no
+/// defined header size here.
+fn properties_stream_header_len(scope: OxmsgEntryScope) -> Option<usize> {
+    match scope {
+        OxmsgEntryScope::Message => Some(32),
+        OxmsgEntryScope::EmbeddedObject => Some(24),
+        OxmsgEntryScope::Attachment | OxmsgEntryScope::Recipient => Some(8),
+        OxmsgEntryScope::NamedPropertyStorage => None,
+    }
+}
+
+/// One decoded Property Entry (MS-OXMSG 2.4.2). `tail` is the raw final 8
+/// bytes: for a fixed-length entry this is the value itself (never
+/// interpreted here); for a variable-length entry it is Size (4 bytes) then
+/// Reserved (4 bytes).
+struct DecodedPropertyEntry {
+    property_type: u16,
+    property_id: u16,
+    flags: u32,
+    tail: [u8; 8],
+}
+
+struct DecodedPropertiesStream {
+    entries: Vec<DecodedPropertyEntry>,
+    /// Bytes remaining after the last full 16-byte entry. Always 0 for a
+    /// well-formed stream.
+    trailing_bytes: usize,
+}
+
+/// Parses the entry array of a `__properties_version1.0` stream. Returns
+/// `None` only when `bytes` is shorter than `header_len`, which the caller
+/// reports as an anomaly rather than silently skipping.
+fn decode_properties_stream(bytes: &[u8], header_len: usize) -> Option<DecodedPropertiesStream> {
+    let body = bytes.get(header_len..)?;
+    let mut entries = Vec::with_capacity(body.len() / 16);
+    let mut offset = 0;
+    while offset + 16 <= body.len() {
+        let property_type = u16::from_le_bytes([body[offset], body[offset + 1]]);
+        let property_id = u16::from_le_bytes([body[offset + 2], body[offset + 3]]);
+        let flags = u32::from_le_bytes([
+            body[offset + 4],
+            body[offset + 5],
+            body[offset + 6],
+            body[offset + 7],
+        ]);
+        let mut tail = [0u8; 8];
+        tail.copy_from_slice(&body[offset + 8..offset + 16]);
+        entries.push(DecodedPropertyEntry {
+            property_type,
+            property_id,
+            flags,
+            tail,
+        });
+        offset += 16;
+    }
+    Some(DecodedPropertiesStream {
+        entries,
+        trailing_bytes: body.len() - offset,
+    })
+}
+
+/// Reads a stream's full contents by path. `comp` must be the same open
+/// container the path came from.
+fn read_stream_bytes(comp: &mut cfb::CompoundFile<std::fs::File>, path: &Path) -> Option<Vec<u8>> {
+    let mut stream = comp.open_stream(path).ok()?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+fn cfb_entry_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Everything `inspect_oxmsg` needs from a CFB entry, captured up front so
+/// the immutable borrow from `comp.walk()` ends before the second pass needs
+/// `&mut comp` to read stream contents.
+struct CollectedOxmsgEntry {
+    path: PathBuf,
+    is_root: bool,
+    is_stream: bool,
+    len: u64,
+    clsid: String,
+}
+
+fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTotals) {
+    let mut saw_properties_stream = false;
+    let message_shaped_parents = message_shaped_parent_paths(&*comp);
+
+    // Pass 1: classify every entry from its name and position. This only
+    // needs immutable access, so results are collected up front, ending
+    // that borrow before pass 2 needs `&mut comp` to read stream contents.
+    let entries: Vec<CollectedOxmsgEntry> = comp
+        .walk()
+        .map(|e| CollectedOxmsgEntry {
+            path: e.path().to_path_buf(),
+            is_root: e.is_root(),
+            is_stream: e.is_stream(),
+            len: e.len(),
+            clsid: e.clsid().to_string(),
+        })
+        .collect();
+
+    for entry in &entries {
         totals.total_entries += 1;
-        let object_kind = cfb_object_kind(entry.is_stream());
+        let object_kind = cfb_object_kind(entry.is_stream);
 
         // Ancestry outranks name: anything beneath a custom attachment
         // storage is application-defined, whatever it happens to be called.
         if let Some(payload_root) =
-            enclosing_custom_payload_root(entry.path(), &message_shaped_parents)
+            enclosing_custom_payload_root(&entry.path, &message_shaped_parents)
         {
             totals.opaque_payload_entries_total += 1;
-            let below =
-                cfb_entry_depth(entry.path()).saturating_sub(cfb_entry_depth(&payload_root));
+            let below = cfb_entry_depth(&entry.path).saturating_sub(cfb_entry_depth(&payload_root));
             *totals
                 .opaque_payload_entries
                 .entry((object_kind, below))
@@ -1336,7 +1589,7 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
             continue;
         }
 
-        let entry_kind = classify_oxmsg_entry(entry.name(), entry.is_root());
+        let entry_kind = classify_oxmsg_entry(&cfb_entry_name(&entry.path), entry.is_root);
         if let Some(mismatch) = recognized_name_type_mismatch(&entry_kind, object_kind) {
             *totals
                 .recognized_name_type_mismatches
@@ -1352,9 +1605,9 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
                 totals.recognized_entries_total += 1;
                 totals.properties_stream_entries_total += 1;
                 saw_properties_stream = true;
-                totals.properties_stream_bytes_total += entry.len();
+                totals.properties_stream_bytes_total += entry.len;
 
-                let scope = oxmsg_entry_scope(entry.path());
+                let scope = oxmsg_entry_scope(&entry.path);
                 *totals.properties_streams_by_scope.entry(scope).or_insert(0) += 1;
             }
             OxmsgEntryKind::PropertyStream { prop_id, indexed } => {
@@ -1364,7 +1617,7 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
                     totals.indexed_property_streams_total += 1;
                 }
 
-                let scope = oxmsg_entry_scope(entry.path());
+                let scope = oxmsg_entry_scope(&entry.path);
                 *totals.property_streams_by_scope.entry(scope).or_insert(0) += 1;
                 *totals
                     .property_id_counts_by_scope
@@ -1393,7 +1646,7 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
             OxmsgEntryKind::EmbeddedObjectStorage => {
                 totals.recognized_entries_total += 1;
                 totals.embedded_object_storages_total += 1;
-                let shape = if message_shaped_parents.contains(entry.path()) {
+                let shape = if message_shaped_parents.contains(&entry.path) {
                     totals.embedded_object_storages_message_shaped_total += 1;
                     "message_shaped"
                 } else {
@@ -1402,7 +1655,7 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
                 };
                 *totals
                     .embedded_object_storages_by_shape
-                    .entry((shape, entry.clsid().to_string()))
+                    .entry((shape, entry.clsid.clone()))
                     .or_insert(0) += 1;
             }
             OxmsgEntryKind::Unrecognized => {
@@ -1411,9 +1664,9 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
                     .unrecognized_entries
                     .entry((
                         object_kind,
-                        cfb_entry_depth(entry.path()),
-                        unrecognized_name_shape(entry.name()),
-                        oxmsg_ancestry_shape(entry.path()),
+                        cfb_entry_depth(&entry.path),
+                        unrecognized_name_shape(&cfb_entry_name(&entry.path)),
+                        oxmsg_ancestry_shape(&entry.path),
                     ))
                     .or_insert(0) += 1;
             }
@@ -1422,6 +1675,75 @@ fn inspect_oxmsg(comp: &cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTota
 
     if saw_properties_stream {
         totals.has_properties_stream += 1;
+    }
+
+    // Pass 2: decode the entry array of every properties stream found
+    // above. This reads stream contents, but reports only structural
+    // fields (type, ID, flags, and variable-length size/reserved) -- never
+    // a property's value.
+    for entry in &entries {
+        if !entry.is_stream || cfb_entry_name(&entry.path) != "__properties_version1.0" {
+            continue;
+        }
+        let scope = oxmsg_entry_scope(&entry.path);
+        let Some(header_len) = properties_stream_header_len(scope) else {
+            totals.properties_stream_unexpected_scope_total += 1;
+            continue;
+        };
+        let Some(bytes) = read_stream_bytes(comp, &entry.path) else {
+            totals.properties_stream_read_errors += 1;
+            continue;
+        };
+        let Some(decoded) = decode_properties_stream(&bytes, header_len) else {
+            totals.properties_stream_too_short_for_header_total += 1;
+            continue;
+        };
+        if decoded.trailing_bytes != 0 {
+            totals.properties_stream_trailing_bytes_total += 1;
+        }
+        for prop_entry in decoded.entries {
+            totals.properties_entries_total += 1;
+            *totals
+                .property_type_counts_by_scope
+                .entry((scope, prop_entry.property_type))
+                .or_insert(0) += 1;
+            *totals
+                .property_entry_flags_counts
+                .entry(prop_entry.flags)
+                .or_insert(0) += 1;
+
+            match classify_property_entry_shape(prop_entry.property_type) {
+                PropertyEntryShape::FixedInline => {
+                    totals.properties_entries_fixed_inline_total += 1;
+                }
+                PropertyEntryShape::VariableSingle => {
+                    totals.properties_entries_variable_single_total += 1;
+                }
+                PropertyEntryShape::VariableMultivalued => {
+                    totals.properties_entries_variable_multivalued_total += 1;
+                }
+            }
+
+            // PidTagAttachDataObject (0x3701, PT_OBJECT 0x000D) on an
+            // attachment: an independent, property-level cross-check of the
+            // CFB-structural message-shaped/custom classification
+            // (MS-OXMSG 2.4.2.2).
+            if scope == OxmsgEntryScope::Attachment
+                && prop_entry.property_id == 0x3701
+                && prop_entry.property_type == 0x000D
+            {
+                let tail = prop_entry.tail;
+                let size = u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]);
+                let reserved = u32::from_le_bytes([tail[4], tail[5], tail[6], tail[7]]);
+                *totals
+                    .attach_data_object_reserved_counts
+                    .entry(reserved)
+                    .or_insert(0) += 1;
+                if size != 0xFFFF_FFFF {
+                    totals.attach_data_object_size_sentinel_mismatches += 1;
+                }
+            }
+        }
     }
 }
 
@@ -2297,5 +2619,70 @@ mod tests {
             oxmsg_entry_scope(&path),
             OxmsgEntryScope::NamedPropertyStorage
         );
+    }
+
+    #[test]
+    fn oxmsg_property_entry_shape_classifies_fixed_variable_and_multivalued() {
+        assert!(matches!(
+            classify_property_entry_shape(0x0003), // PT_LONG
+            PropertyEntryShape::FixedInline
+        ));
+        assert!(matches!(
+            classify_property_entry_shape(0x001F), // PT_UNICODE
+            PropertyEntryShape::VariableSingle
+        ));
+        assert!(matches!(
+            classify_property_entry_shape(0x1003), // PT_MV_LONG
+            PropertyEntryShape::VariableMultivalued
+        ));
+    }
+
+    #[test]
+    fn oxmsg_properties_stream_header_len_matches_ms_oxmsg_2_4_1() {
+        assert_eq!(
+            properties_stream_header_len(OxmsgEntryScope::Message),
+            Some(32)
+        );
+        assert_eq!(
+            properties_stream_header_len(OxmsgEntryScope::EmbeddedObject),
+            Some(24)
+        );
+        assert_eq!(
+            properties_stream_header_len(OxmsgEntryScope::Attachment),
+            Some(8)
+        );
+        assert_eq!(
+            properties_stream_header_len(OxmsgEntryScope::Recipient),
+            Some(8)
+        );
+        assert_eq!(
+            properties_stream_header_len(OxmsgEntryScope::NamedPropertyStorage),
+            None
+        );
+    }
+
+    #[test]
+    fn oxmsg_decode_properties_stream_parses_entries_and_reports_trailing_bytes() {
+        let mut bytes = vec![0u8; 8]; // an 8-byte (attachment/recipient) header
+                                      // One PT_LONG (0x0003) entry, property ID 0x0E20, flags 0x01, value 7.
+        bytes.extend_from_slice(&0x0003u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0E20u16.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&7i64.to_le_bytes());
+        bytes.extend_from_slice(&[0xAA, 0xBB]); // trailing junk, not a full entry
+
+        let decoded = decode_properties_stream(&bytes, 8).expect("decodes");
+        assert_eq!(decoded.entries.len(), 1);
+        assert_eq!(decoded.entries[0].property_type, 0x0003);
+        assert_eq!(decoded.entries[0].property_id, 0x0E20);
+        assert_eq!(decoded.entries[0].flags, 1);
+        assert_eq!(decoded.entries[0].tail, 7i64.to_le_bytes());
+        assert_eq!(decoded.trailing_bytes, 2);
+    }
+
+    #[test]
+    fn oxmsg_decode_properties_stream_reports_too_short_for_header() {
+        let bytes = vec![0u8; 4]; // shorter than any known header
+        assert!(decode_properties_stream(&bytes, 8).is_none());
     }
 }
