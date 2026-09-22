@@ -312,8 +312,25 @@ a decoding bug in the Entry Stream's Index-and-Kind bit-field split, not a
 data anomaly. The GUID/kind bit layout was previously described as
 "confirmed against `rs-chunks`," which overstated what was actually
 verified -- the referenced source showed the struct shape, not the actual
-mask/shift logic. **Named-property set resolution is not yet verified**
-and should not be relied on until this is resolved.
+mask/shift logic.
+
+A follow-up diagnostic tested the simplest specific hypothesis (the two
+16-bit halves of the Index-and-Kind field are swapped) by also reading the
+untried half for every out-of-range entry. **Disconfirmed by real data:**
+the alternate half's values cluster at 6-21 with no weight at 1-3, where a
+working GUID index would concentrate (the *resolved* group's own data
+puts 71 of 138 resolutions at exactly PS_MAPI/PS_PUBLIC_STRINGS, i.e.
+guid_index 1 or 2). A second, so-far-untested hypothesis: the low end of
+the `named_property_numeric_lid` histogram (`0x0000`-`0x1208`, many
+small, evenly-incrementing values) looks more like string-stream byte
+offsets than application-assigned LIDs, suggesting the Kind bit
+specifically -- not the whole half -- may be misread. Next step is a raw
+hex dump of a real file's GUID and Entry streams (structural bytes only;
+never the String stream's content) for direct byte-level decoding against
+the spec, the same method that resolved the RTF-in-HTML ambiguity in
+`m1-results.md`, rather than a third inferred guess. **Named-property set
+resolution remains unverified** and should not be relied on until this is
+resolved with real bytes.
 
 ## Current scope (replacement)
 

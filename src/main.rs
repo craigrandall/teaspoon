@@ -1360,6 +1360,20 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
         "named_properties_out_of_range_alternate_string_kind_total={}",
         totals.named_properties_out_of_range_alternate_string_kind_total
     );
+    for (i, dump) in totals.named_property_stream_dumps.iter().enumerate() {
+        println!(
+            "named_property_guid_stream_hex file={i} hex={}",
+            dump.guid_stream_hex
+        );
+        println!(
+            "named_property_entry_stream_hex file={i} hex={}",
+            dump.entry_stream_hex
+        );
+        println!(
+            "named_property_string_stream_len file={i} len={}",
+            dump.string_stream_len
+        );
+    }
 
     Ok(())
 }
@@ -1489,6 +1503,7 @@ struct OxmsgTotals {
     /// halves are swapped.
     named_properties_out_of_range_alternate_guid_index: BTreeMap<u16, u64>,
     named_properties_out_of_range_alternate_string_kind_total: u64,
+    named_property_stream_dumps: Vec<NamedPropertyStreamDump>,
 }
 
 impl OxmsgTotals {
@@ -1783,6 +1798,22 @@ fn cfb_entry_name(path: &Path) -> String {
         .to_string()
 }
 
+fn to_hex_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Raw ground truth for the currently-unresolved Entry Stream bit-layout
+/// question. GUID and Entry stream bytes are structural (GUIDs, offsets,
+/// indices) -- the same privacy footing as the CLSIDs and LIDs already
+/// printed elsewhere. The String stream's actual content is never read
+/// here, only its length, since a string-named property's name could be
+/// organization-specific content.
+struct NamedPropertyStreamDump {
+    guid_stream_hex: String,
+    entry_stream_hex: String,
+    string_stream_len: u64,
+}
+
 /// Everything `inspect_oxmsg` needs from a CFB entry, captured up front so
 /// the immutable borrow from `comp.walk()` ends before the second pass needs
 /// `&mut comp` to read stream contents.
@@ -1914,8 +1945,22 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
         }
     }
 
-    if saw_properties_stream {
-        totals.has_properties_stream += 1;
+    // Named properties are resolved once per file (the mapping storage is
+    // shared by the whole message, embedded messages included) rather than
+    // once per entry.
+    let named_property_map = read_named_property_map(comp);
+    if let Some(map) = &named_property_map {
+        let string_stream_len =
+            read_stream_bytes(comp, Path::new("/__nameid_version1.0/__substg1.0_00040102"))
+                .map(|b| b.len() as u64)
+                .unwrap_or(0);
+        totals
+            .named_property_stream_dumps
+            .push(NamedPropertyStreamDump {
+                guid_stream_hex: to_hex_string(&map.guid_stream),
+                entry_stream_hex: to_hex_string(&map.entry_stream),
+                string_stream_len,
+            });
     }
 
     // Named properties are resolved once per file (the mapping storage is
