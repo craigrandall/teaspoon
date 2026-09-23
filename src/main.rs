@@ -1351,29 +1351,10 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
     for (lid, count) in &totals.named_property_numeric_lids {
         println!("named_property_numeric_lid lid=0x{lid:04X} count={count}");
     }
-    for (guid_index, count) in &totals.named_properties_out_of_range_alternate_guid_index {
-        println!(
-            "named_property_out_of_range_alternate_guid_index value={guid_index} count={count}"
-        );
-    }
     println!(
-        "named_properties_out_of_range_alternate_string_kind_total={}",
-        totals.named_properties_out_of_range_alternate_string_kind_total
+        "named_properties_index_mismatch_total={}",
+        totals.named_properties_index_mismatch_total
     );
-    for (i, dump) in totals.named_property_stream_dumps.iter().enumerate() {
-        println!(
-            "named_property_guid_stream_hex file={i} hex={}",
-            dump.guid_stream_hex
-        );
-        println!(
-            "named_property_entry_stream_hex file={i} hex={}",
-            dump.entry_stream_hex
-        );
-        println!(
-            "named_property_string_stream_len file={i} len={}",
-            dump.string_stream_len
-        );
-    }
 
     Ok(())
 }
@@ -1496,14 +1477,12 @@ struct OxmsgTotals {
     /// Numeric LIDs are small application-defined integers, not content --
     /// same footing as a property ID.
     named_property_numeric_lids: BTreeMap<u32, u64>,
-    /// Diagnostic only, for the currently-open bit-layout question: for
-    /// every entry this slice reports as `OutOfRange`, what the OTHER
-    /// 16-bit half's low 15 bits would resolve to as a guid_index. A
-    /// distribution concentrated at 1/2/3 is strong evidence the two
-    /// halves are swapped.
-    named_properties_out_of_range_alternate_guid_index: BTreeMap<u16, u64>,
-    named_properties_out_of_range_alternate_string_kind_total: u64,
-    named_property_stream_dumps: Vec<NamedPropertyStreamDump>,
+    /// A resolved entry whose own claimed Property Index doesn't match the
+    /// array position it was looked up by. Per MS-OXMSG this MUST always
+    /// match; a real permanent cross-check now that the bit layout is
+    /// confirmed, rather than the disproven swap-hypothesis instrumentation
+    /// it replaces.
+    named_properties_index_mismatch_total: u64,
 }
 
 impl OxmsgTotals {
@@ -1691,30 +1670,36 @@ fn classify_well_known_property_set(guid: &[u8; 16]) -> Option<&'static str> {
 /// is either a numeric LID (a small application-defined integer -- not
 /// content) or a byte offset into the string stream (never followed by
 /// this diagnostic).
+///
+/// Bit layout, confirmed against real fixture bytes (see
+/// docs/verification/oxmsg-results.md) rather than assumed from the spec
+/// text or a partially-read crate source, both of which turned out wrong
+/// on this point: the HIGH 16 bits of the second u32 are Property Index
+/// (matches the entry's own array position exactly, MS-OXMSG 2.2.3.2.4).
+/// The LOW 16 bits pack GUID Index and Property Kind together, with Kind
+/// as the low-order bit and GUID Index in the bits above it -- not GUID
+/// Index in the low 15 bits with Kind as the top bit, and not in the high
+/// 16 bits at all.
 struct NamedPropertyEntryRaw {
     name_id_or_offset: u32,
     guid_index: u16,
     is_string: bool,
-    /// Diagnostic only: the OTHER 16-bit half read the same way, to test
-    /// whether the two halves are actually swapped from what this slice
-    /// assumes. Remove once the real layout is confirmed against data.
-    alternate_guid_index: u16,
-    alternate_is_string: bool,
+    /// The entry's own claimed array position. MS-OXMSG requires this to
+    /// equal the entry's actual offset in the stream; kept so callers can
+    /// cross-check it against the position they looked it up by.
+    property_index: u16,
 }
 
 fn decode_named_property_entry(bytes: &[u8; 8]) -> NamedPropertyEntryRaw {
     let name_id_or_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let index_kind = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-    let low16 = (index_kind & 0xFFFF) as u16;
-    let high16 = (index_kind >> 16) as u16;
+    let guid_and_kind = (index_kind & 0xFFFF) as u16;
+    let property_index = (index_kind >> 16) as u16;
     NamedPropertyEntryRaw {
         name_id_or_offset,
-        guid_index: high16 & 0x7FFF,
-        is_string: high16 & 0x8000 != 0,
-        // Kept only to test the alternative bit-layout hypothesis below --
-        // not the field this slice's design says the low half is.
-        alternate_guid_index: low16 & 0x7FFF,
-        alternate_is_string: low16 & 0x8000 != 0,
+        guid_index: guid_and_kind >> 1,
+        is_string: guid_and_kind & 1 != 0,
+        property_index,
     }
 }
 
@@ -1796,22 +1781,6 @@ fn cfb_entry_name(path: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_string()
-}
-
-fn to_hex_string(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Raw ground truth for the currently-unresolved Entry Stream bit-layout
-/// question. GUID and Entry stream bytes are structural (GUIDs, offsets,
-/// indices) -- the same privacy footing as the CLSIDs and LIDs already
-/// printed elsewhere. The String stream's actual content is never read
-/// here, only its length, since a string-named property's name could be
-/// organization-specific content.
-struct NamedPropertyStreamDump {
-    guid_stream_hex: String,
-    entry_stream_hex: String,
-    string_stream_len: u64,
 }
 
 /// Everything `inspect_oxmsg` needs from a CFB entry, captured up front so
@@ -1952,24 +1921,6 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
     // shared by the whole message, embedded messages included) rather than
     // once per entry.
     let named_property_map = read_named_property_map(comp);
-    if let Some(map) = &named_property_map {
-        let string_stream_len =
-            read_stream_bytes(comp, Path::new("/__nameid_version1.0/__substg1.0_00040102"))
-                .map(|b| b.len() as u64)
-                .unwrap_or(0);
-        totals
-            .named_property_stream_dumps
-            .push(NamedPropertyStreamDump {
-                guid_stream_hex: to_hex_string(&map.guid_stream),
-                entry_stream_hex: to_hex_string(&map.entry_stream),
-                string_stream_len,
-            });
-    }
-
-    // Named properties are resolved once per file (the mapping storage is
-    // shared by the whole message, embedded messages included) rather than
-    // once per entry.
-    let named_property_map = read_named_property_map(comp);
 
     // Pass 2: decode the entry array of every properties stream found
     // above. This reads stream contents, but reports only structural
@@ -2086,6 +2037,10 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
                     Some(map) => match map.lookup(prop_entry.property_id) {
                         None => totals.named_properties_unresolvable_total += 1,
                         Some(raw) => {
+                            let expected_index = prop_entry.property_id - 0x8000;
+                            if raw.property_index != expected_index {
+                                totals.named_properties_index_mismatch_total += 1;
+                            }
                             if raw.is_string {
                                 totals.named_properties_string_kind_total += 1;
                             } else {
@@ -2113,14 +2068,6 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
                                 }
                                 NamedPropertySet::OutOfRange => {
                                     totals.named_properties_guid_out_of_range_total += 1;
-                                    *totals
-                                        .named_properties_out_of_range_alternate_guid_index
-                                        .entry(raw.alternate_guid_index)
-                                        .or_insert(0) += 1;
-                                    if raw.alternate_is_string {
-                                        totals.named_properties_out_of_range_alternate_string_kind_total +=
-                                            1;
-                                    }
                                 }
                             }
                         }
@@ -3095,26 +3042,29 @@ mod tests {
     #[test]
     fn oxmsg_named_property_entry_decodes_numeric_and_string_kind() {
         // Numeric: LID 0x0000811C, property index 5, guid index 4, kind 0.
-        // Index-and-kind = property_index(0x0005) | (guid_index<<16=0x0004<<16).
+        // Confirmed layout: high16 = property index, low16 = (guid_index << 1) | kind.
         let mut bytes = [0u8; 8];
         bytes[0..4].copy_from_slice(&0x0000_811Cu32.to_le_bytes());
-        let index_kind = 0x0005u32 | (0x0004u32 << 16);
+        let low16 = 0x0004u32 << 1; // guid_index=4, kind=0
+        let index_kind = low16 | (0x0005u32 << 16); // property_index=5
         bytes[4..8].copy_from_slice(&index_kind.to_le_bytes());
         let entry = decode_named_property_entry(&bytes);
         assert_eq!(entry.name_id_or_offset, 0x0000_811C);
         assert_eq!(entry.guid_index, 4);
         assert!(!entry.is_string);
+        assert_eq!(entry.property_index, 5);
 
-        // String: offset 0x10, property index 5, guid index 3, kind 1 (top
-        // bit of the upper u16 set).
+        // String: offset 0x10, property index 5, guid index 3, kind 1.
         let mut bytes = [0u8; 8];
         bytes[0..4].copy_from_slice(&0x0000_0010u32.to_le_bytes());
-        let index_kind = 0x0005u32 | ((0x0003u32 | 0x8000) << 16);
+        let low16 = (0x0003u32 << 1) | 1; // guid_index=3, kind=1
+        let index_kind = low16 | (0x0005u32 << 16); // property_index=5
         bytes[4..8].copy_from_slice(&index_kind.to_le_bytes());
         let entry = decode_named_property_entry(&bytes);
         assert_eq!(entry.name_id_or_offset, 0x10);
         assert_eq!(entry.guid_index, 3);
         assert!(entry.is_string);
+        assert_eq!(entry.property_index, 5);
     }
 
     #[test]

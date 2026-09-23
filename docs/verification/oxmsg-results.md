@@ -295,42 +295,31 @@ fixed_boolean_invalid_encoding_total=0
 (2017, not 2019, is correct: it excludes the 2 `PT_OBJECT` entries already
 accounted for via the embedded-object-storage path.)
 
-Named-property resolution surfaced a real, unresolved anomaly:
+Named-property resolution initially surfaced a real anomaly (298 of 436
+occurrences resolving to an undefined GUID index, none as string-named).
+Root cause: the Entry Stream's Index-and-Kind field was decoded backwards
+on every axis -- which 16-bit half holds Property Index vs. GUID
+Index/Kind, and within the GUID/Kind half, which bit is Kind. Found by
+byte-level decoding of real fixture data (the same method that resolved
+the RTF-in-HTML ambiguity), not by further inference from spec text or
+crate source: file 0's GUID stream position 0 decodes to
+`00062008-0000-0000-C000-000000000046` (PSETID_Common) exactly, and
+applying the corrected formula to file 9's entries whose GUID resolves to
+PSETID_Task yields LIDs `0x8101` and `0x8102` -- `PidLidTaskStatus` and
+`PidLidPercentComplete`, MS-OXPROPS' own canonical names for exactly that
+pair. Confirmed the same way across four files, sixteen entries, zero
+exceptions on the Property Index cross-check (which independently
+confirmed the OTHER 16-bit half's identity: it always equals the entry's
+own array position).
 
-```text
-named_properties_seen_total=436
-named_properties_guid_out_of_range_total=298
-named_properties_string_kind_total=0
-named_properties_numeric_kind_total=436
-```
-
-298 of 436 (68%) named-property occurrences resolve to an undefined GUID
-index, and none resolve as string-named -- implausible for real
-Outlook-authored files, and inconsistent with MS-OXMSG's requirement that
-named-property IDs be assigned consecutively with no gaps. This points to
-a decoding bug in the Entry Stream's Index-and-Kind bit-field split, not a
-data anomaly. The GUID/kind bit layout was previously described as
-"confirmed against `rs-chunks`," which overstated what was actually
-verified -- the referenced source showed the struct shape, not the actual
-mask/shift logic.
-
-A follow-up diagnostic tested the simplest specific hypothesis (the two
-16-bit halves of the Index-and-Kind field are swapped) by also reading the
-untried half for every out-of-range entry. **Disconfirmed by real data:**
-the alternate half's values cluster at 6-21 with no weight at 1-3, where a
-working GUID index would concentrate (the *resolved* group's own data
-puts 71 of 138 resolutions at exactly PS_MAPI/PS_PUBLIC_STRINGS, i.e.
-guid_index 1 or 2). A second, so-far-untested hypothesis: the low end of
-the `named_property_numeric_lid` histogram (`0x0000`-`0x1208`, many
-small, evenly-incrementing values) looks more like string-stream byte
-offsets than application-assigned LIDs, suggesting the Kind bit
-specifically -- not the whole half -- may be misread. Next step is a raw
-hex dump of a real file's GUID and Entry streams (structural bytes only;
-never the String stream's content) for direct byte-level decoding against
-the spec, the same method that resolved the RTF-in-HTML ambiguity in
-`m1-results.md`, rather than a third inferred guess. **Named-property set
-resolution remains unverified** and should not be relied on until this is
-resolved with real bytes.
+The earlier "138 resolved" entries under the old code were not real
+matches -- `guid_index` was being read from Property Index, so any entry
+at array position 1 or 2 spuriously resolved as PS_MAPI/PS_PUBLIC_STRINGS
+purely because those sentinel values coincide with common early array
+positions. Named-property set resolution is fixed as of this entry and
+should be considered verified once the next corpus run shows
+`named_properties_guid_out_of_range_total=0` and the new
+`named_properties_index_mismatch_total=0`.
 
 ## Current scope (replacement)
 
