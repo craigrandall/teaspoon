@@ -1306,6 +1306,10 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
         totals.fixed_boolean_invalid_encoding_total
     );
     println!(
+        "fixed_float_non_finite_total={}",
+        totals.fixed_float_non_finite_total
+    );
+    println!(
         "variable_value_stream_found_total={}",
         totals.variable_value_stream_found_total
     );
@@ -1459,6 +1463,12 @@ struct OxmsgTotals {
 
     // --- Fixed-value and variable-value structural checks -----------------
     fixed_boolean_invalid_encoding_total: u64,
+    /// A decoded PT_FLOAT/PT_DOUBLE/PT_APPTIME value that is NaN or
+    /// infinite. Not necessarily invalid data on its own, but implausible
+    /// for the values these types are normally used for (percentages,
+    /// currency-like amounts, OLE Automation dates) -- worth investigating
+    /// as a possible decode-path bug before assuming it's genuine.
+    fixed_float_non_finite_total: u64,
     variable_value_stream_found_total: u64,
     variable_value_stream_missing_total: u64,
     variable_value_size_mismatch_total: u64,
@@ -1613,6 +1623,63 @@ fn decode_properties_stream(bytes: &[u8], header_len: usize) -> Option<DecodedPr
 /// (MS-OXCDATA 2.11.1); the only defined encodings are 0x0000 and 0x0001.
 fn is_valid_boolean_encoding(tail: &[u8; 8]) -> bool {
     tail[1] == 0 && matches!(tail[0], 0 | 1)
+}
+
+/// A property value that fits inline in a Property Entry's 8-byte value
+/// field, decoded to its real Rust type (MS-OXCDATA 2.11.1). Kept as a
+/// typed, lossless intermediate representation -- not yet formatted for
+/// display or written anywhere -- consistent with design principle 3
+/// (Markdown is a projection, not the canonical representation).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DecodedFixedValue {
+    Short(i16),
+    Long(i32),
+    Float(f32),
+    Double(f64),
+    /// PtypCurrency: a signed 64-bit integer scaled by 10000 (four decimal
+    /// places). Kept as the raw scaled integer, not divided down to a
+    /// float, to avoid any precision loss -- dividing by 10000 for display
+    /// is a later, presentation-layer concern.
+    Currency(i64),
+    /// An OLE Automation date (days since 1899-12-30; the fractional part
+    /// is time-of-day). Calendar conversion is deliberately not attempted
+    /// here.
+    AppTime(f64),
+    /// PtypErrorCode: a 32-bit MAPI error/status code.
+    Error(u32),
+    Boolean(bool),
+    I8(i64),
+    /// PtypTime: a Windows FILETIME -- 100-nanosecond intervals since
+    /// 1601-01-01 UTC. Kept as raw ticks; calendar conversion is
+    /// deliberately not attempted here.
+    SysTime(u64),
+}
+
+/// Decodes a fixed-length entry's 8-byte value field into its real type.
+/// `base_type` must be one [`is_fixed_length_base_type`] accepts; anything
+/// else returns `None` rather than guessing.
+fn decode_fixed_value(base_type: u16, tail: &[u8; 8]) -> Option<DecodedFixedValue> {
+    match base_type {
+        0x0002 => Some(DecodedFixedValue::Short(i16::from_le_bytes([
+            tail[0], tail[1],
+        ]))),
+        0x0003 => Some(DecodedFixedValue::Long(i32::from_le_bytes([
+            tail[0], tail[1], tail[2], tail[3],
+        ]))),
+        0x0004 => Some(DecodedFixedValue::Float(f32::from_le_bytes([
+            tail[0], tail[1], tail[2], tail[3],
+        ]))),
+        0x0005 => Some(DecodedFixedValue::Double(f64::from_le_bytes(*tail))),
+        0x0006 => Some(DecodedFixedValue::Currency(i64::from_le_bytes(*tail))),
+        0x0007 => Some(DecodedFixedValue::AppTime(f64::from_le_bytes(*tail))),
+        0x000A => Some(DecodedFixedValue::Error(u32::from_le_bytes([
+            tail[0], tail[1], tail[2], tail[3],
+        ]))),
+        0x000B => Some(DecodedFixedValue::Boolean(tail[0] != 0)),
+        0x0014 => Some(DecodedFixedValue::I8(i64::from_le_bytes(*tail))),
+        0x0040 => Some(DecodedFixedValue::SysTime(u64::from_le_bytes(*tail))),
+        _ => None,
+    }
 }
 
 // --- Variable-length value stream cross-check (never read as content) ----
@@ -1972,6 +2039,20 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
                         && !is_valid_boolean_encoding(&prop_entry.tail)
                     {
                         totals.fixed_boolean_invalid_encoding_total += 1;
+                    }
+                    if let Some(value) =
+                        decode_fixed_value(prop_entry.property_type, &prop_entry.tail)
+                    {
+                        let non_finite = match value {
+                            DecodedFixedValue::Float(f) => !f.is_finite(),
+                            DecodedFixedValue::Double(d) | DecodedFixedValue::AppTime(d) => {
+                                !d.is_finite()
+                            }
+                            _ => false,
+                        };
+                        if non_finite {
+                            totals.fixed_float_non_finite_total += 1;
+                        }
                     }
                 }
                 PropertyEntryShape::VariableSingle => {
@@ -3105,5 +3186,83 @@ mod tests {
         let entry = map.lookup(0x8001).expect("entry at index 1");
         assert_eq!(entry.name_id_or_offset, 0x2A);
         assert!(map.lookup(0x7FFF).is_none()); // below 0x8000
+    }
+
+    #[test]
+    fn oxmsg_decode_fixed_value_covers_every_fixed_base_type() {
+        fn tail_from(bytes: &[u8]) -> [u8; 8] {
+            let mut t = [0u8; 8];
+            t[..bytes.len()].copy_from_slice(bytes);
+            t
+        }
+
+        assert_eq!(
+            decode_fixed_value(0x0002, &tail_from(&(-5i16).to_le_bytes())),
+            Some(DecodedFixedValue::Short(-5))
+        );
+        assert_eq!(
+            decode_fixed_value(0x0003, &tail_from(&42i32.to_le_bytes())),
+            Some(DecodedFixedValue::Long(42))
+        );
+        assert_eq!(
+            decode_fixed_value(0x0004, &tail_from(&1.5f32.to_le_bytes())),
+            Some(DecodedFixedValue::Float(1.5))
+        );
+        assert_eq!(
+            decode_fixed_value(0x0005, &2.5f64.to_le_bytes()),
+            Some(DecodedFixedValue::Double(2.5))
+        );
+        assert_eq!(
+            decode_fixed_value(0x0006, &12345i64.to_le_bytes()),
+            Some(DecodedFixedValue::Currency(12345))
+        );
+        assert_eq!(
+            decode_fixed_value(0x0007, &3.75f64.to_le_bytes()),
+            Some(DecodedFixedValue::AppTime(3.75))
+        );
+        assert_eq!(
+            decode_fixed_value(0x000A, &tail_from(&99u32.to_le_bytes())),
+            Some(DecodedFixedValue::Error(99))
+        );
+        assert_eq!(
+            decode_fixed_value(0x000B, &tail_from(&1u16.to_le_bytes())),
+            Some(DecodedFixedValue::Boolean(true))
+        );
+        assert_eq!(
+            decode_fixed_value(0x0014, &123456789i64.to_le_bytes()),
+            Some(DecodedFixedValue::I8(123456789))
+        );
+        assert_eq!(
+            decode_fixed_value(0x0040, &99u64.to_le_bytes()),
+            Some(DecodedFixedValue::SysTime(99))
+        );
+        assert_eq!(decode_fixed_value(0x001F, &[0u8; 8]), None); // PT_UNICODE isn't fixed
+    }
+
+    #[test]
+    fn oxmsg_decode_fixed_value_boolean_treats_any_nonzero_low_byte_as_true() {
+        // is_valid_boolean_encoding flags anything other than exactly 0/1
+        // as an anomaly, but decode_fixed_value still needs a defined
+        // answer for a malformed encoding rather than panicking.
+        let mut tail = [0u8; 8];
+        tail[0] = 2;
+        assert_eq!(
+            decode_fixed_value(0x000B, &tail),
+            Some(DecodedFixedValue::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn oxmsg_non_finite_float_or_double_is_detected() {
+        match decode_fixed_value(0x0005, &f64::NAN.to_le_bytes()) {
+            Some(DecodedFixedValue::Double(d)) => assert!(!d.is_finite()),
+            _ => panic!("expected Double"),
+        }
+        let mut inf_tail = [0u8; 8];
+        inf_tail[..4].copy_from_slice(&f32::INFINITY.to_le_bytes());
+        match decode_fixed_value(0x0004, &inf_tail) {
+            Some(DecodedFixedValue::Float(f)) => assert!(!f.is_finite()),
+            _ => panic!("expected Float"),
+        }
     }
 }
