@@ -1653,6 +1653,13 @@ const PSETID_NOTE: [u8; 16] = [
 const PSETID_TASK: [u8; 16] = [
     0x03, 0x20, 0x06, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
 ];
+/// {00020386-0000-0000-C000-000000000046}, MS-OXPROPS 1.3.2 -- named
+/// properties synthesized from MIME/internet-header fields. Confirmed
+/// present in real fixture data (file 0's GUID stream) during the
+/// bit-layout investigation; added now that resolution is fixed.
+const PS_INTERNET_HEADERS: [u8; 16] = [
+    0x86, 0x03, 0x02, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
+];
 
 fn classify_well_known_property_set(guid: &[u8; 16]) -> Option<&'static str> {
     match *guid {
@@ -1662,6 +1669,7 @@ fn classify_well_known_property_set(guid: &[u8; 16]) -> Option<&'static str> {
         PSETID_LOG => Some("PSETID_Log"),
         PSETID_NOTE => Some("PSETID_Note"),
         PSETID_TASK => Some("PSETID_Task"),
+        PS_INTERNET_HEADERS => Some("PS_INTERNET_HEADERS"),
         _ => None,
     }
 }

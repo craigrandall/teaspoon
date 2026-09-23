@@ -280,7 +280,7 @@ GUID) is correctly classified as variable — GUIDs don't fit the entry's
 8-byte inline value field even though MAPI treats the type as "fixed" in
 the conceptual sense.
 
-### Variable-value reading and named-property resolution: mixed results
+### Variable-value reading and named-property resolution: both verified
 
 The 29-file corpus confirms variable-length value reading is clean:
 
@@ -316,10 +316,30 @@ The earlier "138 resolved" entries under the old code were not real
 matches -- `guid_index` was being read from Property Index, so any entry
 at array position 1 or 2 spuriously resolved as PS_MAPI/PS_PUBLIC_STRINGS
 purely because those sentinel values coincide with common early array
-positions. Named-property set resolution is fixed as of this entry and
-should be considered verified once the next corpus run shows
-`named_properties_guid_out_of_range_total=0` and the new
-`named_properties_index_mismatch_total=0`.
+positions.
+
+**The fix is confirmed on the full 29-file corpus:**
+
+```text
+named_properties_seen_total=436
+named_properties_guid_out_of_range_total=0
+named_properties_index_mismatch_total=0
+named_properties_string_kind_total=315
+named_properties_numeric_kind_total=121
+named_property_set set=PSETID_Common count=183
+named_property_set set=PSETID_Task count=3
+named_property_set set=custom count=250
+```
+
+Both gates the fix targeted read 0. Set-membership counts (183+3+250) and
+kind counts (315+121) each sum to `named_properties_seen_total` exactly --
+every occurrence lands in one set bucket and one kind bucket, nothing
+double-counted or dropped. The large jump in string-kind properties (0 to
+315) is expected, not a regression: the dominant `custom`-bucketed GUID is
+very likely `PS_INTERNET_HEADERS` (confirmed present in file 0's GUID
+stream during the investigation, not yet added to the well-known-set
+table), whose named properties are string-named by construction (each is a
+MIME header name). Named-property set resolution is verified.
 
 ## Current scope (replacement)
 
@@ -335,8 +355,13 @@ The verified implementation now establishes that:
   named-property scopes;
 - every `__properties_version1.0` entry array is decoded (type, ID, flags,
   and variable-length size/reserved), with an independent property-level
-  confirmation of the M2.x message-shaped/custom classification.
+  confirmation of the M2.x message-shaped/custom classification;
+- variable-length value streams are located and structurally validated
+  (declared size vs. actual length, UTF-16 byte-parity) without reading
+  their content;
+- named properties are resolved to their GUID set and numeric/string
+  identity, verified against real fixture bytes byte-by-byte.
 
-It still does **not** establish: fixed-property value interpretation,
-variable-property value reading, named-property mapping resolution,
-embedded-message decoding, or production replacement of `msg_parser`.
+It still does **not** establish: fixed- or variable-property *value*
+content (only structural shape and validity), embedded-message decoding,
+or production replacement of `msg_parser`.
