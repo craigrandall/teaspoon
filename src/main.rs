@@ -2004,6 +2004,75 @@ fn extract_message_class(comp: &mut cfb::CompoundFile<std::fs::File>) -> Option<
     decode_unicode_value(&bytes).ok()
 }
 
+struct BodyFlags {
+    has_plain: bool,
+    has_html_native: bool,
+    has_html_via_rtf: bool,
+    has_rtf: bool,
+    /// Mirrors `check_rtf_for_encapsulated_html`'s `DecompressionFailed`
+    /// case -- too short to be valid MS-OXRTFCP, or the crate itself
+    /// returned an error.
+    decompression_failed: bool,
+}
+
+/// Reads PidTagBody, PidTagBodyHtml, and PidTagRtfCompressed directly by
+/// name, the custom-path equivalent of what `msg_parser`'s `Outlook`
+/// struct exposes as `body`/`html`/`rtf_compressed`. Real content is read
+/// into memory to run the HTML-in-RTF check, but nothing here is ever
+/// printed -- only booleans derived from it, via `run_msg_verify`.
+fn extract_body_flags(comp: &mut cfb::CompoundFile<std::fs::File>) -> BodyFlags {
+    let root = Path::new("/");
+    let has_plain = read_stream_bytes(
+        comp,
+        &expected_variable_stream_path(root, PROP_BODY, 0x001F),
+    )
+    .or_else(|| {
+        read_stream_bytes(
+            comp,
+            &expected_variable_stream_path(root, PROP_BODY, 0x001E),
+        )
+    })
+    .is_some();
+    let has_html_native = read_stream_bytes(
+        comp,
+        &expected_variable_stream_path(root, PROP_BODY_HTML, 0x0102),
+    )
+    .is_some();
+    let rtf_bytes = read_stream_bytes(
+        comp,
+        &expected_variable_stream_path(root, PROP_RTF_COMPRESSED, 0x0102),
+    );
+    let has_rtf = rtf_bytes.is_some();
+
+    let mut decompression_failed = false;
+    let has_html_via_rtf = if has_html_native {
+        false
+    } else if let Some(compressed) = &rtf_bytes {
+        if compressed.len() < 16 {
+            decompression_failed = true;
+            false
+        } else {
+            match compressed_rtf::decompress_rtf(compressed) {
+                Ok(rtf) => rtf_bytes_contain_fromhtml(rtf.as_bytes()),
+                Err(_) => {
+                    decompression_failed = true;
+                    false
+                }
+            }
+        }
+    } else {
+        false
+    };
+
+    BodyFlags {
+        has_plain,
+        has_html_native,
+        has_html_via_rtf,
+        has_rtf,
+        decompression_failed,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MessageClassComparison {
     BothPresentMatch,
@@ -2022,6 +2091,44 @@ fn compare_message_class(msg_parser: Option<&str>, custom: Option<&str>) -> Mess
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BoolFieldComparison {
+    BothTrue,
+    BothFalse,
+    Mismatch,
+}
+
+fn compare_bool_field(msg_parser: bool, custom: bool) -> BoolFieldComparison {
+    match (msg_parser, custom) {
+        (true, true) => BoolFieldComparison::BothTrue,
+        (false, false) => BoolFieldComparison::BothFalse,
+        _ => BoolFieldComparison::Mismatch,
+    }
+}
+
+#[derive(Default)]
+struct BoolFieldTally {
+    both_true: u64,
+    both_false: u64,
+    mismatch: u64,
+}
+
+impl BoolFieldTally {
+    fn record(&mut self, comparison: BoolFieldComparison) {
+        match comparison {
+            BoolFieldComparison::BothTrue => self.both_true += 1,
+            BoolFieldComparison::BothFalse => self.both_false += 1,
+            BoolFieldComparison::Mismatch => self.mismatch += 1,
+        }
+    }
+}
+
+fn print_bool_field_tally(name: &str, tally: &BoolFieldTally) {
+    println!("{name}_both_true={}", tally.both_true);
+    println!("{name}_both_false={}", tally.both_false);
+    println!("{name}_mismatch={}", tally.mismatch);
+}
+
 #[derive(Default)]
 struct MsgVerifyTotals {
     open_errors_msg_parser: u64,
@@ -2030,6 +2137,12 @@ struct MsgVerifyTotals {
     message_class_both_present_mismatch: u64,
     message_class_presence_mismatch: u64,
     message_class_both_absent: u64,
+    body_plain: BoolFieldTally,
+    body_html_native: BoolFieldTally,
+    body_html_via_rtf: BoolFieldTally,
+    body_rtf: BoolFieldTally,
+    msg_parser_rtf_decompression_errors: u64,
+    custom_rtf_decompression_errors: u64,
 }
 
 /// M3e differential verification: runs both the custom extraction path
@@ -2046,24 +2159,25 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
     println!("subdirectories_skipped={subdirectories_skipped}");
 
     for file in files {
-        let msg_parser_class = match Outlook::from_path(file) {
-            Ok(outlook) if !outlook.message_class.is_empty() => Some(outlook.message_class),
-            Ok(_) => None,
+        let outlook = match Outlook::from_path(file) {
+            Ok(outlook) => outlook,
             Err(_) => {
                 totals.open_errors_msg_parser += 1;
                 continue;
             }
         };
-
-        let custom_class = match cfb::open(file) {
-            Ok(mut comp) => extract_message_class(&mut comp),
+        let mut comp = match cfb::open(file) {
+            Ok(comp) => comp,
             Err(_) => {
                 totals.open_errors_custom += 1;
                 continue;
             }
         };
 
-        match compare_message_class(msg_parser_class.as_deref(), custom_class.as_deref()) {
+        let msg_parser_class =
+            (!outlook.message_class.is_empty()).then_some(outlook.message_class.as_str());
+        let custom_class = extract_message_class(&mut comp);
+        match compare_message_class(msg_parser_class, custom_class.as_deref()) {
             MessageClassComparison::BothPresentMatch => {
                 totals.message_class_both_present_match += 1;
             }
@@ -2077,6 +2191,43 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
                 totals.message_class_both_absent += 1;
             }
         }
+
+        let mp_has_plain = !outlook.body.is_empty();
+        let mp_has_html_native = !outlook.html.is_empty();
+        let mp_has_rtf = !outlook.rtf_compressed.is_empty();
+        let mp_has_html_via_rtf = if mp_has_html_native {
+            false
+        } else if mp_has_rtf {
+            match outlook.rtf_decompressed() {
+                Some(bytes) => rtf_bytes_contain_fromhtml(&bytes),
+                None => {
+                    totals.msg_parser_rtf_decompression_errors += 1;
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        let custom_body = extract_body_flags(&mut comp);
+        if custom_body.decompression_failed {
+            totals.custom_rtf_decompression_errors += 1;
+        }
+
+        totals
+            .body_plain
+            .record(compare_bool_field(mp_has_plain, custom_body.has_plain));
+        totals.body_html_native.record(compare_bool_field(
+            mp_has_html_native,
+            custom_body.has_html_native,
+        ));
+        totals.body_html_via_rtf.record(compare_bool_field(
+            mp_has_html_via_rtf,
+            custom_body.has_html_via_rtf,
+        ));
+        totals
+            .body_rtf
+            .record(compare_bool_field(mp_has_rtf, custom_body.has_rtf));
     }
 
     println!("open_errors_msg_parser={}", totals.open_errors_msg_parser);
@@ -2096,6 +2247,18 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
     println!(
         "message_class_both_absent={}",
         totals.message_class_both_absent
+    );
+    print_bool_field_tally("body_plain", &totals.body_plain);
+    print_bool_field_tally("body_html_native", &totals.body_html_native);
+    print_bool_field_tally("body_html_via_rtf", &totals.body_html_via_rtf);
+    print_bool_field_tally("body_rtf", &totals.body_rtf);
+    println!(
+        "msg_parser_rtf_decompression_errors={}",
+        totals.msg_parser_rtf_decompression_errors
+    );
+    println!(
+        "custom_rtf_decompression_errors={}",
+        totals.custom_rtf_decompression_errors
     );
 
     Ok(())
@@ -3598,6 +3761,26 @@ mod tests {
         assert_eq!(
             compare_message_class(None, None),
             MessageClassComparison::BothAbsent
+        );
+    }
+
+    #[test]
+    fn oxmsg_compare_bool_field_covers_all_three_outcomes() {
+        assert_eq!(
+            compare_bool_field(true, true),
+            BoolFieldComparison::BothTrue
+        );
+        assert_eq!(
+            compare_bool_field(false, false),
+            BoolFieldComparison::BothFalse
+        );
+        assert_eq!(
+            compare_bool_field(true, false),
+            BoolFieldComparison::Mismatch
+        );
+        assert_eq!(
+            compare_bool_field(false, true),
+            BoolFieldComparison::Mismatch
         );
     }
 }
