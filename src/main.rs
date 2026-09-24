@@ -1368,6 +1368,10 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
         println!("named_property_numeric_lid lid=0x{lid:04X} count={count}");
     }
     println!(
+        "named_properties_string_decode_errors_total={}",
+        totals.named_properties_string_decode_errors_total
+    );
+    println!(
         "named_properties_index_mismatch_total={}",
         totals.named_properties_index_mismatch_total
     );
@@ -1507,6 +1511,9 @@ struct OxmsgTotals {
     /// Numeric LIDs are small application-defined integers, not content --
     /// same footing as a property ID.
     named_property_numeric_lids: BTreeMap<u32, u64>,
+    /// Whether a string-kind named property's name decoded successfully --
+    /// never the name itself. See M3c.
+    named_properties_string_decode_errors_total: u64,
     /// A resolved entry whose own claimed Property Index doesn't match the
     /// array position it was looked up by. Per MS-OXMSG this MUST always
     /// match; a real permanent cross-check now that the bit layout is
@@ -1759,6 +1766,27 @@ fn decode_string8_cp1252(bytes: &[u8]) -> (String, u32) {
     (s, undefined)
 }
 
+/// Decodes one entry of the Named Property String Stream
+/// (`__substg1.0_00040102`, MS-OXMSG 2.2.3.1.4): a 4-byte length (the byte
+/// count of the UTF-16 string that follows, not including this length
+/// prefix or any padding), then the string itself. Reuses
+/// [`decode_unicode_value`] for the actual UTF-16 decode; its result is
+/// deliberately treated here only as present-or-absent -- see the M3c
+/// note in `docs/verification/oxmsg-results.md` for why this diagnostic
+/// never uses the decoded string itself.
+fn decode_named_property_string(string_stream: &[u8], offset: u32) -> Option<String> {
+    let offset = offset as usize;
+    let length_bytes = string_stream.get(offset..offset + 4)?;
+    let length = u32::from_le_bytes([
+        length_bytes[0],
+        length_bytes[1],
+        length_bytes[2],
+        length_bytes[3],
+    ]) as usize;
+    let string_bytes = string_stream.get(offset + 4..offset + 4 + length)?;
+    decode_unicode_value(string_bytes).ok()
+}
+
 // --- Variable-length value stream cross-check (never read as content) ----
 
 fn expected_variable_stream_path(parent: &Path, property_id: u16, property_type: u16) -> PathBuf {
@@ -1868,6 +1896,7 @@ enum NamedPropertySet {
 struct NamedPropertyMap {
     guid_stream: Vec<u8>,
     entry_stream: Vec<u8>,
+    string_stream: Vec<u8>,
 }
 
 impl NamedPropertyMap {
@@ -1914,9 +1943,12 @@ fn read_named_property_map(
         read_stream_bytes(comp, Path::new("/__nameid_version1.0/__substg1.0_00020102"))?;
     let entry_stream =
         read_stream_bytes(comp, Path::new("/__nameid_version1.0/__substg1.0_00030102"))?;
+    let string_stream =
+        read_stream_bytes(comp, Path::new("/__nameid_version1.0/__substg1.0_00040102"))?;
     Some(NamedPropertyMap {
         guid_stream,
         entry_stream,
+        string_stream,
     })
 }
 
@@ -2225,6 +2257,14 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
                             }
                             if raw.is_string {
                                 totals.named_properties_string_kind_total += 1;
+                                if decode_named_property_string(
+                                    &map.string_stream,
+                                    raw.name_id_or_offset,
+                                )
+                                .is_none()
+                                {
+                                    totals.named_properties_string_decode_errors_total += 1;
+                                }
                             } else {
                                 totals.named_properties_numeric_kind_total += 1;
                                 *totals
@@ -3254,6 +3294,7 @@ mod tests {
         let map = NamedPropertyMap {
             guid_stream: PSETID_COMMON.to_vec(),
             entry_stream: Vec::new(),
+            string_stream: Vec::new(),
         };
         assert!(matches!(map.resolve_set(1), NamedPropertySet::PsMapi));
         assert!(matches!(
@@ -3275,6 +3316,7 @@ mod tests {
         let map = NamedPropertyMap {
             guid_stream: Vec::new(),
             entry_stream,
+            string_stream: Vec::new(),
         };
         let entry = map.lookup(0x8001).expect("entry at index 1");
         assert_eq!(entry.name_id_or_offset, 0x2A);
@@ -3390,5 +3432,26 @@ mod tests {
         assert_eq!(cp1252_to_char(0xE9), Some('\u{00E9}')); // e-acute
         assert_eq!(cp1252_to_char(0x80), Some('\u{20AC}')); // euro sign
         assert_eq!(cp1252_to_char(0x81), None); // genuinely undefined
+    }
+
+    #[test]
+    fn oxmsg_decode_named_property_string_reads_length_prefixed_utf16() {
+        // "Hi" (4-byte length prefix = 4 bytes of UTF-16, then the bytes).
+        let mut stream = vec![0u8; 4];
+        stream[0..4].copy_from_slice(&4u32.to_le_bytes());
+        stream.extend_from_slice(&[0x48, 0x00, 0x69, 0x00]);
+        assert_eq!(
+            decode_named_property_string(&stream, 0).as_deref(),
+            Some("Hi")
+        );
+    }
+
+    #[test]
+    fn oxmsg_decode_named_property_string_rejects_out_of_bounds_length() {
+        let mut stream = vec![0u8; 4];
+        // Claims 100 bytes follow; the stream doesn't have them.
+        stream[0..4].copy_from_slice(&100u32.to_le_bytes());
+        assert!(decode_named_property_string(&stream, 0).is_none());
+        assert!(decode_named_property_string(&stream, 4).is_none()); // offset past the stream
     }
 }

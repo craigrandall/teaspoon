@@ -364,6 +364,23 @@ just plausibility, that internet-header named properties (string-named by
 construction) were the dominant contributor to what had looked like a
 large "unknown" bucket.
 
+### M3b — variable-length value reading
+
+PT_UNICODE decodes as UTF-16LE and PT_STRING8 as hand-implemented
+Windows-1252 (no new dependency), with PT_CLSID validated at exactly 16
+bytes. Confirmed clean on the corpus:
+
+```text
+variable_unicode_decode_errors_total=0
+variable_string8_undefined_byte_total=0
+variable_clsid_wrong_length_total=0
+```
+
+The PT_STRING8 result confirms nothing on its own -- the 29-file corpus
+has no PT_STRING8 property at all (every text property uses PT_UNICODE),
+so the Windows-1252 decoder remains implemented but unverified against
+real data.
+
 ## Current scope (replacement)
 
 The verified implementation now establishes that:
