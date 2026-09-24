@@ -1326,6 +1326,18 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
         totals.variable_value_odd_utf16_length_total
     );
     println!(
+        "variable_unicode_decode_errors_total={}",
+        totals.variable_unicode_decode_errors_total
+    );
+    println!(
+        "variable_string8_undefined_byte_total={}",
+        totals.variable_string8_undefined_byte_total
+    );
+    println!(
+        "variable_clsid_wrong_length_total={}",
+        totals.variable_clsid_wrong_length_total
+    );
+    println!(
         "named_properties_seen_total={}",
         totals.named_properties_seen_total
     );
@@ -1473,7 +1485,15 @@ struct OxmsgTotals {
     variable_value_stream_missing_total: u64,
     variable_value_size_mismatch_total: u64,
     variable_value_odd_utf16_length_total: u64,
-
+    /// PT_UNICODE bytes (already confirmed even-length) that still fail to
+    /// decode as valid UTF-16 -- e.g. an unpaired surrogate.
+    variable_unicode_decode_errors_total: u64,
+    /// Bytes replaced with U+FFFD while decoding a PT_STRING8 value as
+    /// Windows-1252 -- unverified against real data; see M3b.
+    variable_string8_undefined_byte_total: u64,
+    /// A PT_CLSID (0x0048) value stream whose length isn't exactly the 16
+    /// bytes a GUID requires.
+    variable_clsid_wrong_length_total: u64,
     // --- Named-property resolution -----------------------------------------
     named_properties_seen_total: u64,
     named_properties_map_missing_total: u64,
@@ -1682,6 +1702,61 @@ fn decode_fixed_value(base_type: u16, tail: &[u8; 8]) -> Option<DecodedFixedValu
     }
 }
 
+/// Decodes PT_UNICODE (PtypString) bytes as UTF-16LE. The stream itself
+/// does not include a null terminator -- MS-OXMSG's declared Size field
+/// accounts for one that isn't actually present in the stream (confirmed
+/// against the corpus via `expected_size_field_value`), so no terminator
+/// handling is needed here. Caller is expected to have already confirmed
+/// an even byte length.
+fn decode_unicode_value(bytes: &[u8]) -> Result<String, std::string::FromUtf16Error> {
+    let code_units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    String::from_utf16(&code_units)
+}
+
+/// Windows-1252, per the WHATWG Encoding Standard's windows-1252 index --
+/// identical to ISO-8859-1/Latin-1 outside 0x80-0x9F. UNVERIFIED against
+/// real fixture data: the 29-file corpus has no PT_STRING8 property at
+/// all to check this against, and `PidTagMessageCodepage` isn't consulted
+/// here -- this is the conventional default, not a codepage-aware decode.
+fn cp1252_to_char(byte: u8) -> Option<char> {
+    // Index 0 = 0x80. A 0 entry marks one of the five byte values
+    // Windows-1252 leaves genuinely undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D).
+    const UPPER: [u16; 32] = [
+        0x20AC, 0x0000, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+        0x2039, 0x0152, 0x0000, 0x017D, 0x0000, 0x0000, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+        0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x0000, 0x017E, 0x0178,
+    ];
+    if (0x80..=0x9F).contains(&byte) {
+        match UPPER[(byte - 0x80) as usize] {
+            0x0000 => None,
+            code => char::from_u32(code as u32),
+        }
+    } else {
+        Some(byte as char) // identical to Latin-1 for every other byte
+    }
+}
+
+/// Decodes PT_STRING8 bytes as Windows-1252, replacing any of the five
+/// undefined byte values with U+FFFD and reporting how many were replaced
+/// -- the same loss-is-explicit pattern as `String::from_utf8_lossy`.
+fn decode_string8_cp1252(bytes: &[u8]) -> (String, u32) {
+    let mut s = String::with_capacity(bytes.len());
+    let mut undefined = 0u32;
+    for &b in bytes {
+        match cp1252_to_char(b) {
+            Some(c) => s.push(c),
+            None => {
+                undefined += 1;
+                s.push('\u{FFFD}');
+            }
+        }
+    }
+    (s, undefined)
+}
+
 // --- Variable-length value stream cross-check (never read as content) ----
 
 fn expected_variable_stream_path(parent: &Path, property_id: u16, property_type: u16) -> PathBuf {
@@ -1699,6 +1774,7 @@ fn expected_size_field_value(property_type: u16, actual_stream_len: u64) -> u64 
 }
 
 // --- Named-property resolution (MS-OXMSG 2.2.3) ---------------------------
+
 // Well-known property-set GUIDs, MS-OXPROPS 1.3.2 (little-endian byte
 // order). A deliberately small set for this slice; anything else is
 // reported as "custom" -- never by its raw GUID bytes.
@@ -2084,9 +2160,26 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
                                 if expected != declared_size as u64 {
                                     totals.variable_value_size_mismatch_total += 1;
                                 }
-                                if prop_entry.property_type == 0x001F && value_bytes.len() % 2 != 0
-                                {
-                                    totals.variable_value_odd_utf16_length_total += 1;
+                                match prop_entry.property_type {
+                                    0x001F => {
+                                        if value_bytes.len() % 2 != 0 {
+                                            totals.variable_value_odd_utf16_length_total += 1;
+                                        } else if decode_unicode_value(&value_bytes).is_err() {
+                                            totals.variable_unicode_decode_errors_total += 1;
+                                        }
+                                    }
+                                    0x001E => {
+                                        let (_, undefined_count) =
+                                            decode_string8_cp1252(&value_bytes);
+                                        totals.variable_string8_undefined_byte_total +=
+                                            undefined_count as u64;
+                                    }
+                                    0x0048 => {
+                                        if value_bytes.len() != 16 {
+                                            totals.variable_clsid_wrong_length_total += 1;
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -3264,5 +3357,38 @@ mod tests {
             Some(DecodedFixedValue::Float(f)) => assert!(!f.is_finite()),
             _ => panic!("expected Float"),
         }
+    }
+
+    #[test]
+    fn oxmsg_decode_unicode_value_handles_valid_and_invalid_utf16() {
+        // "Hi" in UTF-16LE.
+        let hi: Vec<u8> = vec![0x48, 0x00, 0x69, 0x00];
+        assert_eq!(decode_unicode_value(&hi).unwrap(), "Hi");
+
+        // An unpaired low surrogate (0xDC00) is not valid UTF-16.
+        let bad: Vec<u8> = vec![0x00, 0xDC];
+        assert!(decode_unicode_value(&bad).is_err());
+    }
+
+    #[test]
+    fn oxmsg_decode_string8_cp1252_maps_latin1_and_flags_undefined_bytes() {
+        // 'A' (ASCII), 0xE9 (Latin-1 'e-acute'), 0x93 (left double quote
+        // U+201C), 0x81 (undefined in Windows-1252).
+        let bytes = [b'A', 0xE9, 0x93, 0x81];
+        let (decoded, undefined_count) = decode_string8_cp1252(&bytes);
+        let mut chars = decoded.chars();
+        assert_eq!(chars.next(), Some('A'));
+        assert_eq!(chars.next(), Some('\u{00E9}'));
+        assert_eq!(chars.next(), Some('\u{201C}'));
+        assert_eq!(chars.next(), Some('\u{FFFD}'));
+        assert_eq!(undefined_count, 1);
+    }
+
+    #[test]
+    fn oxmsg_cp1252_is_latin1_outside_the_defined_upper_range() {
+        assert_eq!(cp1252_to_char(b'Z'), Some('Z'));
+        assert_eq!(cp1252_to_char(0xE9), Some('\u{00E9}')); // e-acute
+        assert_eq!(cp1252_to_char(0x80), Some('\u{20AC}')); // euro sign
+        assert_eq!(cp1252_to_char(0x81), None); // genuinely undefined
     }
 }

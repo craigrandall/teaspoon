@@ -341,6 +341,29 @@ stream during the investigation, not yet added to the well-known-set
 table), whose named properties are string-named by construction (each is a
 MIME header name). Named-property set resolution is verified.
 
+### M3a — fixed-value interpretation
+
+`decode_fixed_value` decodes every fixed-length entry's 8-byte value field
+into its real type (`DecodedFixedValue`). Kept as a lossless, in-memory
+intermediate representation only — nothing from it is printed by the
+`--oxmsg` diagnostic, which stays exactly as content-free as every earlier
+slice. Wired in as two structural checks: the existing boolean-encoding
+validity check, and a new NaN/infinite check for `PT_FLOAT`/`PT_DOUBLE`/
+`PT_APPTIME`. Both read 0 on the full corpus.
+
+A `PT_SYSTIME` plausibility check (flagging implausible calendar dates)
+was considered and deliberately not added — MS-OXOCAL's legitimate "no
+end date" convention for recurring calendar items lands around the year
+4500, so a naive range check would misfire on real, correct data.
+
+Separately, adding `PS_INTERNET_HEADERS` (`{00020386-0000-0000-C000-000000000046}`)
+to the well-known property-set table split the `custom` bucket exactly as
+predicted: `custom` dropped from 250 to 143, with the other 107 now
+correctly labeled `PS_INTERNET_HEADERS` — confirming with real data, not
+just plausibility, that internet-header named properties (string-named by
+construction) were the dominant contributor to what had looked like a
+large "unknown" bucket.
+
 ## Current scope (replacement)
 
 The verified implementation now establishes that:
