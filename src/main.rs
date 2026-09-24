@@ -30,6 +30,14 @@ struct Args {
     /// does not yet decode any property value.
     #[arg(long)]
     oxmsg: bool,
+
+    /// Compare the custom MS-OXMSG extraction path against `msg_parser`
+    /// for the same .msg input (M3e differential verification). Reads
+    /// real property content internally to do the comparison, but prints
+    /// only match/mismatch counts -- never the values compared. Takes
+    /// precedence over --oxmsg if both are given. PST input is unaffected.
+    #[arg(long)]
+    verify: bool,
 }
 
 enum InputKind {
@@ -109,7 +117,9 @@ fn main() -> Result<()> {
             files,
             subdirectories_skipped,
         } => {
-            if args.oxmsg {
+            if args.verify {
+                run_msg_verify(&files, subdirectories_skipped)
+            } else if args.oxmsg {
                 run_oxmsg_diagnostic(&files, subdirectories_skipped)
             } else {
                 run_msg_diagnostic(&files, subdirectories_skipped)
@@ -1979,6 +1989,118 @@ struct CollectedOxmsgEntry {
     clsid: String,
 }
 
+/// Reads PidTagMessageClass (0x001A, PT_UNICODE) directly from a
+/// message's own `__substg1.0_001A001F` stream at the CFB root. The first
+/// function in the real (non-diagnostic) extraction layer M3d begins:
+/// unlike everything `--oxmsg` prints, its return value is real content.
+/// Used only by `run_msg_verify`, which never prints it -- only whether
+/// it matched `msg_parser`'s. Not independently unit-tested: it's a thin
+/// composition of `read_stream_bytes` (no logic of its own to test in
+/// isolation) and `decode_unicode_value` (already tested) -- its real
+/// verification is `run_msg_verify` producing a clean run against the
+/// fixture corpus.
+fn extract_message_class(comp: &mut cfb::CompoundFile<std::fs::File>) -> Option<String> {
+    let bytes = read_stream_bytes(comp, Path::new("/__substg1.0_001A001F"))?;
+    decode_unicode_value(&bytes).ok()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MessageClassComparison {
+    BothPresentMatch,
+    BothPresentMismatch,
+    /// One path found a message class and the other didn't.
+    PresenceMismatch,
+    BothAbsent,
+}
+
+fn compare_message_class(msg_parser: Option<&str>, custom: Option<&str>) -> MessageClassComparison {
+    match (msg_parser, custom) {
+        (Some(a), Some(b)) if a == b => MessageClassComparison::BothPresentMatch,
+        (Some(_), Some(_)) => MessageClassComparison::BothPresentMismatch,
+        (None, None) => MessageClassComparison::BothAbsent,
+        _ => MessageClassComparison::PresenceMismatch,
+    }
+}
+
+#[derive(Default)]
+struct MsgVerifyTotals {
+    open_errors_msg_parser: u64,
+    open_errors_custom: u64,
+    message_class_both_present_match: u64,
+    message_class_both_present_mismatch: u64,
+    message_class_presence_mismatch: u64,
+    message_class_both_absent: u64,
+}
+
+/// M3e differential verification: runs both the custom extraction path
+/// and `msg_parser` over the same files and compares their output field
+/// by field. Prints only match/mismatch counts -- never the differing
+/// values -- so this mode's output stays exactly as safe to share as
+/// every other diagnostic here, even though it reads real content
+/// internally to make the comparison.
+fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
+    let mut totals = MsgVerifyTotals::default();
+    println!("inventory=privacy_safe");
+    println!("input_kind=msg_verify");
+    println!("files_scanned={}", files.len());
+    println!("subdirectories_skipped={subdirectories_skipped}");
+
+    for file in files {
+        let msg_parser_class = match Outlook::from_path(file) {
+            Ok(outlook) if !outlook.message_class.is_empty() => Some(outlook.message_class),
+            Ok(_) => None,
+            Err(_) => {
+                totals.open_errors_msg_parser += 1;
+                continue;
+            }
+        };
+
+        let custom_class = match cfb::open(file) {
+            Ok(mut comp) => extract_message_class(&mut comp),
+            Err(_) => {
+                totals.open_errors_custom += 1;
+                continue;
+            }
+        };
+
+        match compare_message_class(msg_parser_class.as_deref(), custom_class.as_deref()) {
+            MessageClassComparison::BothPresentMatch => {
+                totals.message_class_both_present_match += 1;
+            }
+            MessageClassComparison::BothPresentMismatch => {
+                totals.message_class_both_present_mismatch += 1;
+            }
+            MessageClassComparison::PresenceMismatch => {
+                totals.message_class_presence_mismatch += 1;
+            }
+            MessageClassComparison::BothAbsent => {
+                totals.message_class_both_absent += 1;
+            }
+        }
+    }
+
+    println!("open_errors_msg_parser={}", totals.open_errors_msg_parser);
+    println!("open_errors_custom={}", totals.open_errors_custom);
+    println!(
+        "message_class_both_present_match={}",
+        totals.message_class_both_present_match
+    );
+    println!(
+        "message_class_both_present_mismatch={}",
+        totals.message_class_both_present_mismatch
+    );
+    println!(
+        "message_class_presence_mismatch={}",
+        totals.message_class_presence_mismatch
+    );
+    println!(
+        "message_class_both_absent={}",
+        totals.message_class_both_absent
+    );
+
+    Ok(())
+}
+
 fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTotals) {
     let mut saw_properties_stream = false;
     let message_shaped_parents = message_shaped_parent_paths(&*comp);
@@ -3453,5 +3575,29 @@ mod tests {
         stream[0..4].copy_from_slice(&100u32.to_le_bytes());
         assert!(decode_named_property_string(&stream, 0).is_none());
         assert!(decode_named_property_string(&stream, 4).is_none()); // offset past the stream
+    }
+
+    #[test]
+    fn oxmsg_compare_message_class_covers_all_four_outcomes() {
+        assert_eq!(
+            compare_message_class(Some("IPM.Note"), Some("IPM.Note")),
+            MessageClassComparison::BothPresentMatch
+        );
+        assert_eq!(
+            compare_message_class(Some("IPM.Note"), Some("IPM.Task")),
+            MessageClassComparison::BothPresentMismatch
+        );
+        assert_eq!(
+            compare_message_class(Some("IPM.Note"), None),
+            MessageClassComparison::PresenceMismatch
+        );
+        assert_eq!(
+            compare_message_class(None, Some("IPM.Note")),
+            MessageClassComparison::PresenceMismatch
+        );
+        assert_eq!(
+            compare_message_class(None, None),
+            MessageClassComparison::BothAbsent
+        );
     }
 }
