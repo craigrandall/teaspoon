@@ -1710,8 +1710,10 @@ fn decode_fixed_value(base_type: u16, tail: &[u8; 8]) -> Option<DecodedFixedValu
 /// an even byte length.
 fn decode_unicode_value(bytes: &[u8]) -> Result<String, std::string::FromUtf16Error> {
     let code_units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     String::from_utf16(&code_units)
 }
@@ -2174,10 +2176,8 @@ fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut Oxmsg
                                         totals.variable_string8_undefined_byte_total +=
                                             undefined_count as u64;
                                     }
-                                    0x0048 => {
-                                        if value_bytes.len() != 16 {
-                                            totals.variable_clsid_wrong_length_total += 1;
-                                        }
+                                    0x0048 if value_bytes.len() != 16 => {
+                                        totals.variable_clsid_wrong_length_total += 1;
                                     }
                                     _ => {}
                                 }
