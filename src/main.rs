@@ -598,6 +598,40 @@ fn record_recipients(totals: &mut PstTotals, count: u64) {
     totals.max_recipients = totals.max_recipients.max(count);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CountComparison {
+    Match,
+    Mismatch,
+}
+
+fn compare_count(msg_parser: u64, custom: u64) -> CountComparison {
+    if msg_parser == custom {
+        CountComparison::Match
+    } else {
+        CountComparison::Mismatch
+    }
+}
+
+#[derive(Default)]
+struct CountTally {
+    matched: u64,
+    mismatched: u64,
+}
+
+impl CountTally {
+    fn record(&mut self, comparison: CountComparison) {
+        match comparison {
+            CountComparison::Match => self.matched += 1,
+            CountComparison::Mismatch => self.mismatched += 1,
+        }
+    }
+}
+
+fn print_count_tally(name: &str, tally: &CountTally) {
+    println!("{name}_match={}", tally.matched);
+    println!("{name}_mismatch={}", tally.mismatched);
+}
+
 fn record_attachments(totals: &mut PstTotals, count: u64) {
     if count > 0 {
         totals.messages_with_attachments += 1;
@@ -2073,6 +2107,77 @@ fn extract_body_flags(comp: &mut cfb::CompoundFile<std::fs::File>) -> BodyFlags 
     }
 }
 
+#[derive(Default)]
+struct RecipientTypeCounts {
+    /// MS-OXOMSG value 0 -- the sender, recorded as a recipient.
+    /// `msg_parser`'s `Outlook` has no field for this at all; there is
+    /// nothing to compare it against, only to report.
+    orig: u64,
+    to: u64,
+    cc: u64,
+    bcc: u64,
+    /// A `PidTagRecipientType` value outside the four defined ones.
+    other: u64,
+    /// A recipient storage whose type couldn't be read at all (missing
+    /// properties stream, or no `0x0C15` entry in it).
+    unresolved: u64,
+}
+
+/// Walks every `__recip_version1.0_#*` storage and classifies each by its
+/// own `PidTagRecipientType` (0x0C15, PT_LONG) fixed-length entry. Real
+/// content stays in memory only as counts by category -- never a
+/// recipient's actual address or name, which this function never reads at
+/// all.
+fn extract_recipient_type_counts(
+    comp: &mut cfb::CompoundFile<std::fs::File>,
+) -> RecipientTypeCounts {
+    let mut counts = RecipientTypeCounts::default();
+
+    // Pass 1 (immutable): find every recipient storage's path.
+    let recipient_paths: Vec<PathBuf> = comp
+        .walk()
+        .filter(|e| {
+            matches!(
+                classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
+                OxmsgEntryKind::RecipientStorage
+            )
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    // Pass 2 (mutable): read each one's own properties stream.
+    for recip_path in recipient_paths {
+        let properties_path = recip_path.join("__properties_version1.0");
+        let Some(bytes) = read_stream_bytes(comp, &properties_path) else {
+            counts.unresolved += 1;
+            continue;
+        };
+        let Some(decoded) = decode_properties_stream(&bytes, 8) else {
+            counts.unresolved += 1;
+            continue;
+        };
+        let recipient_type = decoded.entries.iter().find_map(|entry| {
+            if entry.property_id != PROP_RECIPIENT_TYPE || entry.property_type != 0x0003 {
+                return None;
+            }
+            match decode_fixed_value(entry.property_type, &entry.tail) {
+                Some(DecodedFixedValue::Long(value)) => Some(value),
+                _ => None,
+            }
+        });
+        match recipient_type {
+            Some(0) => counts.orig += 1,
+            Some(1) => counts.to += 1,
+            Some(2) => counts.cc += 1,
+            Some(3) => counts.bcc += 1,
+            Some(_) => counts.other += 1,
+            None => counts.unresolved += 1,
+        }
+    }
+
+    counts
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MessageClassComparison {
     BothPresentMatch,
@@ -2143,6 +2248,14 @@ struct MsgVerifyTotals {
     body_rtf: BoolFieldTally,
     msg_parser_rtf_decompression_errors: u64,
     custom_rtf_decompression_errors: u64,
+    recipients_to: CountTally,
+    recipients_cc: CountTally,
+    recipients_bcc: CountTally,
+    /// Custom-path-only: `msg_parser` has nothing to compare this against.
+    /// This is the direct test of the M2.x "37 vs 36" hypothesis.
+    recipient_orig_total: u64,
+    recipient_other_type_total: u64,
+    recipient_unresolved_total: u64,
 }
 
 /// M3e differential verification: runs both the custom extraction path
@@ -2228,6 +2341,21 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
         totals
             .body_rtf
             .record(compare_bool_field(mp_has_rtf, custom_body.has_rtf));
+
+        let recipient_counts = extract_recipient_type_counts(&mut comp);
+        totals
+            .recipients_to
+            .record(compare_count(outlook.to.len() as u64, recipient_counts.to));
+        totals
+            .recipients_cc
+            .record(compare_count(outlook.cc.len() as u64, recipient_counts.cc));
+        totals.recipients_bcc.record(compare_count(
+            outlook.bcc.len() as u64,
+            recipient_counts.bcc,
+        ));
+        totals.recipient_orig_total += recipient_counts.orig;
+        totals.recipient_other_type_total += recipient_counts.other;
+        totals.recipient_unresolved_total += recipient_counts.unresolved;
     }
 
     println!("open_errors_msg_parser={}", totals.open_errors_msg_parser);
@@ -2259,6 +2387,18 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
     println!(
         "custom_rtf_decompression_errors={}",
         totals.custom_rtf_decompression_errors
+    );
+    print_count_tally("recipients_to", &totals.recipients_to);
+    print_count_tally("recipients_cc", &totals.recipients_cc);
+    print_count_tally("recipients_bcc", &totals.recipients_bcc);
+    println!("recipient_orig_total={}", totals.recipient_orig_total);
+    println!(
+        "recipient_other_type_total={}",
+        totals.recipient_other_type_total
+    );
+    println!(
+        "recipient_unresolved_total={}",
+        totals.recipient_unresolved_total
     );
 
     Ok(())
@@ -3782,5 +3922,11 @@ mod tests {
             compare_bool_field(false, true),
             BoolFieldComparison::Mismatch
         );
+    }
+
+    #[test]
+    fn oxmsg_compare_count_matches_and_mismatches() {
+        assert_eq!(compare_count(3, 3), CountComparison::Match);
+        assert_eq!(compare_count(3, 4), CountComparison::Mismatch);
     }
 }
