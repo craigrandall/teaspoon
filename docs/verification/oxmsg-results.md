@@ -217,11 +217,20 @@ embedded-message attachment, consistent with the M2c finding.
 | recipient storages vs `to+cc+bcc` | 37 | 36 | 1 |
 | attachment storages vs `total_attachments` | 30 | 29 | 1 |
 
-Both differences fit the embedded message's own contents (one recipient, one
-attachment) being visible to `--oxmsg` but not to `msg_parser`. The recipient
-difference cannot yet be told apart from a recipient that `msg_parser` cannot
-represent (its `ORIG` limitation, see `record_msg_recipients`). Neither
-difference is explained until properties are decoded.
+Both differences are confirmed, via `--verify`'s per-recipient
+classification (M3e), to be the embedded message's own recipient
+storage — not, as originally speculated, an `ORIG`-type recipient
+`msg_parser` cannot represent (`recipient_orig_total=0` ruled that out
+directly). The mechanism is scope: a full-tree CFB walk with no depth
+boundary counts a storage nested inside the embedded message's own
+subtree as if it belonged to the outer message. Fixed in
+`extract_recipient_type_counts` by restricting to storages whose parent
+is the CFB root. The original M2.x diagnostic counters
+(`recipient_storages_total`, `attachment_storages_total`) still include
+the embedded message's contents by the same mechanism — accurate for
+what they were built to prove (every entry in the file is classified),
+but not directly comparable to `msg_parser`'s outer-message-only counts
+without this scoping.
 
 ### Internal consistency
 

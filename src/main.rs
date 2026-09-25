@@ -2133,14 +2133,21 @@ fn extract_recipient_type_counts(
 ) -> RecipientTypeCounts {
     let mut counts = RecipientTypeCounts::default();
 
-    // Pass 1 (immutable): find every recipient storage's path.
+    // Pass 1 (immutable): find every TOP-LEVEL recipient storage's path.
+    // `comp.walk()` traverses the whole tree, including any recipient
+    // storage nested inside an embedded message's own subtree -- which
+    // has the same `__recip_version1.0_#*` name shape but belongs to the
+    // inner message, not this one. `msg_parser` never opens embedded
+    // messages, so `outlook.to/cc/bcc` only ever reflect the outer
+    // message; this filter keeps the two paths comparing the same scope.
     let recipient_paths: Vec<PathBuf> = comp
         .walk()
         .filter(|e| {
-            matches!(
-                classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
-                OxmsgEntryKind::RecipientStorage
-            )
+            e.path().parent() == Some(Path::new("/"))
+                && matches!(
+                    classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
+                    OxmsgEntryKind::RecipientStorage
+                )
         })
         .map(|e| e.path().to_path_buf())
         .collect();
@@ -2176,6 +2183,22 @@ fn extract_recipient_type_counts(
     }
 
     counts
+}
+
+/// Counts top-level attachment storages only -- the same scoping fix as
+/// `extract_recipient_type_counts`, applied from the start this time.
+/// `msg_parser` never opens an embedded message, so its `outlook.attachments`
+/// never includes that message's own attachments either.
+fn extract_attachment_count(comp: &cfb::CompoundFile<std::fs::File>) -> u64 {
+    comp.walk()
+        .filter(|e| {
+            e.path().parent() == Some(Path::new("/"))
+                && matches!(
+                    classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
+                    OxmsgEntryKind::AttachmentStorage
+                )
+        })
+        .count() as u64
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2256,6 +2279,7 @@ struct MsgVerifyTotals {
     recipient_orig_total: u64,
     recipient_other_type_total: u64,
     recipient_unresolved_total: u64,
+    attachments_total: CountTally,
 }
 
 /// M3e differential verification: runs both the custom extraction path
@@ -2356,6 +2380,11 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
         totals.recipient_orig_total += recipient_counts.orig;
         totals.recipient_other_type_total += recipient_counts.other;
         totals.recipient_unresolved_total += recipient_counts.unresolved;
+
+        totals.attachments_total.record(compare_count(
+            outlook.attachments.len() as u64,
+            extract_attachment_count(&comp),
+        ));
     }
 
     println!("open_errors_msg_parser={}", totals.open_errors_msg_parser);
@@ -2400,6 +2429,7 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
         "recipient_unresolved_total={}",
         totals.recipient_unresolved_total
     );
+    print_count_tally("attachments_total", &totals.attachments_total);
 
     Ok(())
 }
