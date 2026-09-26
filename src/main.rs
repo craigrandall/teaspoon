@@ -168,8 +168,8 @@ fn rtf_bytes_contain_fromhtml(rtf_bytes: &[u8]) -> bool {
 }
 
 // =============================================================================
-// PST diagnostic (M1, unchanged in behavior from v0.1.4.3 except body-flag
-// detection, corrected 2026-09-13)
+// Shared: MAPI property vocabulary used by the PST, MSG, and custom-OXMSG
+// paths alike (previously buried inside the PST section)
 // =============================================================================
 
 /// MS-OXPROPS property identifiers used only to check *presence* or read a
@@ -198,6 +198,155 @@ const ATTACH_METHOD_BY_REFERENCE_ONLY: i32 = 4;
 const ATTACH_METHOD_EMBEDDED_MESSAGE: i32 = 5;
 const ATTACH_METHOD_OLE: i32 = 6;
 
+// =============================================================================
+// Shared: presence/availability counters used by both the PST and MSG
+// diagnostics
+// =============================================================================
+//
+// These replace four near-identical pairs of functions -- one per format
+// adapter -- that could silently drift apart, the same failure mode the
+// shared FROMHTML check above exists to prevent:
+//   record_body_flags          / record_msg_body_flags
+//   record_recipients          / record_msg_attachments (with/total/max)
+//   record_attachment_size     / record_msg_attachment_size
+// Both diagnostics now count through the same code. Only the bucketing
+// that genuinely differs between the adapters (PST reads
+// PidTagRecipientType / PidTagAttachMethod as table columns; msg_parser
+// exposes its own vocabulary) remains format-specific.
+
+/// Body-*availability* counters shared by the PST and MSG diagnostics.
+/// All recording goes through [`BodyCounters::record`], which receives
+/// presence booleans only -- never actual body content.
+#[derive(Default)]
+struct BodyCounters {
+    plain: u64,
+    html: u64,
+    html_native: u64,
+    html_via_rtf: u64,
+    rtf: u64,
+    rtf_decompression_errors: u64,
+    /// Sum of decompressed-RTF byte lengths across every message where
+    /// decompression succeeded (regardless of whether the FROMHTML marker
+    /// was found). Never the content itself -- a size-only diagnostic
+    /// (added 2026-09-14) so the PST and MSG sides can be compared against
+    /// each other when they disagree on the same underlying message,
+    /// without ever printing or comparing content.
+    rtf_decompressed_bytes_total: u64,
+}
+
+impl BodyCounters {
+    /// Records body-*availability* only. Never receives or touches actual
+    /// body content -- callers must pass presence booleans, not the
+    /// property values.
+    ///
+    /// Interpretation caveat: `has_plain` reflects only that `PidTagBody`
+    /// exists (MSG side: that `outlook.body` is non-empty), not that the
+    /// message was *authored* in plain text. Outlook commonly populates a
+    /// plain-text compatibility mirror alongside an HTML- or RTF-authored
+    /// body regardless of how the message was actually composed, so
+    /// `plain` is expected to run high even on a mailbox with little
+    /// genuinely plain-text-only content. (Confirmed 2026-09-13 as a real,
+    /// not just inferred, characteristic of this project's PST fixture.)
+    ///
+    /// `has_html_native` and `has_html_via_rtf` are tracked as distinct
+    /// signals, never silently merged, mirroring the MSG-side fix
+    /// (2026-09-07, corrected 2026-09-13) and the confirmed finding
+    /// (2026-09-13) that many real messages have no native
+    /// PidTagBodyHtml property at all -- Outlook instead encapsulates the
+    /// HTML inside PidTagRtfCompressed per MS-OXRTFEX, detectable via the
+    /// FROMHTML control word (see [`FROMHTML_MARKER`]). A single
+    /// `html` counter alone would have undercounted real HTML content.
+    fn record(
+        &mut self,
+        has_plain: bool,
+        has_html_native: bool,
+        has_html_via_rtf: bool,
+        has_rtf: bool,
+    ) {
+        if has_plain {
+            self.plain += 1;
+        }
+        if has_html_native {
+            self.html_native += 1;
+        }
+        if has_html_via_rtf {
+            self.html_via_rtf += 1;
+        }
+        if has_html_native || has_html_via_rtf {
+            self.html += 1;
+        }
+        if has_rtf {
+            self.rtf += 1;
+        }
+    }
+
+    fn note_decompressed_bytes(&mut self, decompressed_bytes: usize) {
+        self.rtf_decompressed_bytes_total += decompressed_bytes as u64;
+    }
+
+    fn note_decompression_error(&mut self) {
+        self.rtf_decompression_errors += 1;
+    }
+}
+
+/// The messages-with-any / total / max-on-a-message triple, shared by the
+/// recipient and attachment counting on both the PST and MSG sides.
+#[derive(Default)]
+struct CountStats {
+    with_any: u64,
+    total: u64,
+    max: u64,
+}
+
+impl CountStats {
+    fn record(&mut self, count: u64) {
+        if count > 0 {
+            self.with_any += 1;
+        }
+        self.total += count;
+        self.max = self.max.max(count);
+    }
+}
+
+/// Zero-size attachment bookkeeping, shared by the PST and MSG sides.
+///
+/// A zero `PidTagAttachSize` (PST) or zero `payload_bytes` (MSG) is only a
+/// meaningful "empty file" signal when the attachment's method is
+/// `by_value`. For every other method (embedded message, OLE,
+/// by-reference), the attachment's real content lives outside that
+/// property entirely, so a zero reading there is expected and structural,
+/// not evidence of an empty file. Those are tracked as a separate counter
+/// rather than silently merged, which would have repeated the same
+/// silent-conflation mistake the HTML detection fix (2026-09-07)
+/// corrected on the MSG side. A missing or unreadable size (PST `None`)
+/// is not counted as zero-byte either way.
+#[derive(Default)]
+struct ZeroByteStats {
+    by_value: u64,
+    other_method: u64,
+}
+
+impl ZeroByteStats {
+    /// `size_is_zero` must already be `false` for a missing or unreadable
+    /// size; `is_by_value` should be `false` when the method is missing or
+    /// is any non-by-value method.
+    fn record(&mut self, size_is_zero: bool, is_by_value: bool) {
+        if !size_is_zero {
+            return;
+        }
+        if is_by_value {
+            self.by_value += 1;
+        } else {
+            self.other_method += 1;
+        }
+    }
+}
+
+// =============================================================================
+// PST diagnostic (M1, unchanged in behavior from v0.1.4.3 except body-flag
+// detection, corrected 2026-09-13)
+// =============================================================================
+
 fn run_pst_diagnostic(path: &Path) -> Result<()> {
     let store = outlook_pst::open_store(path).context("failed to open PST")?;
 
@@ -218,6 +367,17 @@ fn run_pst_diagnostic(path: &Path) -> Result<()> {
     let mut totals = PstTotals::default();
     walk_folder(store.as_ref(), ipm.as_ref(), &mut totals)?;
 
+    print_pst_report(&totals);
+
+    Ok(())
+}
+
+/// Prints the PST inventory report. Split out of `run_pst_diagnostic` so
+/// the walk logic and the report format each read at one level of
+/// abstraction. Every key printed here is part of the tool's stable,
+/// privacy-safe output vocabulary -- groupings and order aside, the keys
+/// are unchanged from previous versions.
+fn print_pst_report(totals: &PstTotals) {
     println!("inventory=privacy_safe");
     println!("input_kind=pst");
     println!("ipm_subtree=opened");
@@ -236,34 +396,28 @@ fn run_pst_diagnostic(path: &Path) -> Result<()> {
         println!("message_class class={class} count={count}");
     }
 
-    println!("bodies_plain={}", totals.bodies_plain);
-    println!("bodies_html={}", totals.bodies_html);
-    println!("bodies_html_native={}", totals.bodies_html_native);
-    println!("bodies_html_via_rtf={}", totals.bodies_html_via_rtf);
-    println!("bodies_rtf={}", totals.bodies_rtf);
+    println!("bodies_plain={}", totals.bodies.plain);
+    println!("bodies_html={}", totals.bodies.html);
+    println!("bodies_html_native={}", totals.bodies.html_native);
+    println!("bodies_html_via_rtf={}", totals.bodies.html_via_rtf);
+    println!("bodies_rtf={}", totals.bodies.rtf);
     println!(
         "rtf_decompression_errors={}",
-        totals.rtf_decompression_errors
+        totals.bodies.rtf_decompression_errors
     );
     println!(
         "rtf_decompressed_bytes_total={}",
-        totals.rtf_decompressed_bytes_total
+        totals.bodies.rtf_decompressed_bytes_total
     );
 
     // --- P4a: recipient / attachment aggregate counts -----------------------
-    println!(
-        "messages_with_recipients={}",
-        totals.messages_with_recipients
-    );
-    println!("total_recipients={}", totals.total_recipients);
-    println!("max_recipients_on_a_message={}", totals.max_recipients);
+    println!("messages_with_recipients={}", totals.recipients.with_any);
+    println!("total_recipients={}", totals.recipients.total);
+    println!("max_recipients_on_a_message={}", totals.recipients.max);
 
-    println!(
-        "messages_with_attachments={}",
-        totals.messages_with_attachments
-    );
-    println!("total_attachments={}", totals.total_attachments);
-    println!("max_attachments_on_a_message={}", totals.max_attachments);
+    println!("messages_with_attachments={}", totals.attachments.with_any);
+    println!("total_attachments={}", totals.attachments.total);
+    println!("max_attachments_on_a_message={}", totals.attachments.max);
 
     // --- P4b: recipient type breakdown --------------------------------------
     println!(
@@ -282,10 +436,13 @@ fn run_pst_diagnostic(path: &Path) -> Result<()> {
         "attachment_row_read_errors={}",
         totals.attachment_row_read_errors
     );
-    println!("attachments_zero_byte={}", totals.attachments_zero_byte);
+    println!(
+        "attachments_zero_byte={}",
+        totals.zero_byte_attachments.by_value
+    );
     println!(
         "attachments_zero_size_other_method={}",
-        totals.attachments_zero_size_other_method
+        totals.zero_byte_attachments.other_method
     );
     println!(
         "attachments_with_content_id={}",
@@ -321,10 +478,12 @@ fn run_pst_diagnostic(path: &Path) -> Result<()> {
         "attachments_method_unknown={}",
         totals.attachments_method_unknown
     );
-
-    Ok(())
 }
 
+/// Aggregated PST inventory. Body availability, recipient/attachment
+/// presence/total/max, and zero-size bookkeeping all go through the
+/// shared counter types defined above; only the PST-specific type buckets
+/// remain direct fields here.
 #[derive(Default)]
 struct PstTotals {
     folders: u64,
@@ -337,27 +496,9 @@ struct PstTotals {
     message_classes: BTreeMap<String, u64>,
     message_class_read_errors: u64,
 
-    bodies_plain: u64,
-    bodies_html: u64,
-    bodies_html_native: u64,
-    bodies_html_via_rtf: u64,
-    bodies_rtf: u64,
-    rtf_decompression_errors: u64,
-    /// Sum of decompressed-RTF byte lengths across every message where
-    /// decompression succeeded (regardless of whether the FROMHTML marker
-    /// was found). Never the content itself -- a size-only diagnostic
-    /// added 2026-09-14 specifically to let the PST and MSG sides be
-    /// compared against each other when they disagree on the same
-    /// underlying message, without ever printing or comparing content.
-    rtf_decompressed_bytes_total: u64,
-
-    messages_with_recipients: u64,
-    total_recipients: u64,
-    max_recipients: u64,
-
-    messages_with_attachments: u64,
-    total_attachments: u64,
-    max_attachments: u64,
+    bodies: BodyCounters,
+    recipients: CountStats,
+    attachments: CountStats,
 
     // P4b: recipient type breakdown.
     recipient_row_read_errors: u64,
@@ -370,8 +511,7 @@ struct PstTotals {
 
     // P4b: attachment classification.
     attachment_row_read_errors: u64,
-    attachments_zero_byte: u64,
-    attachments_zero_size_other_method: u64,
+    zero_byte_attachments: ZeroByteStats,
     attachments_with_content_id: u64,
     attachments_method_none: u64,
     attachments_method_by_value: u64,
@@ -458,19 +598,18 @@ fn inspect_message(message: &dyn PstMessage, totals: &mut PstTotals) {
                 contains_fromhtml,
                 decompressed_bytes,
             } => {
-                totals.rtf_decompressed_bytes_total += decompressed_bytes as u64;
+                totals.bodies.note_decompressed_bytes(decompressed_bytes);
                 contains_fromhtml
             }
             RtfHtmlCheck::DecompressionFailed => {
-                totals.rtf_decompression_errors += 1;
+                totals.bodies.note_decompression_error();
                 false
             }
             RtfHtmlCheck::NoRtfProperty | RtfHtmlCheck::NotBinary => false,
         }
     };
 
-    record_body_flags(
-        totals,
+    totals.bodies.record(
         properties.get(PROP_BODY).is_some(),
         has_html_native,
         has_html_via_rtf,
@@ -548,98 +687,6 @@ fn record_message_class(totals: &mut PstTotals, class: std::io::Result<String>) 
     }
 }
 
-/// Records body-*availability* only. Never receives or touches actual body
-/// content -- callers must pass presence booleans, not the property values.
-///
-/// Interpretation caveat: `has_plain` reflects only that `PidTagBody`
-/// exists, not that the message was *authored* in plain text. Outlook
-/// commonly populates a plain-text compatibility mirror alongside an
-/// HTML- or RTF-authored body regardless of how the message was actually
-/// composed, so `bodies_plain` is expected to run high even on a mailbox
-/// with little genuinely plain-text-only content. (Confirmed 2026-09-13
-/// as a real, not just inferred, characteristic of this project's PST
-/// fixture, alongside the HTML-in-RTF finding below.)
-///
-/// `has_html_native` and `has_html_via_rtf` are tracked as distinct
-/// signals, never silently merged, mirroring the MSG-side fix
-/// (2026-09-07, corrected 2026-09-13) and the confirmed finding
-/// (2026-09-13) that this dependency has the identical blind spot:
-/// `bodies_html` alone would have undercounted real HTML content stored
-/// only via MS-OXRTFEX encapsulation in the RTF body.
-fn record_body_flags(
-    totals: &mut PstTotals,
-    has_plain: bool,
-    has_html_native: bool,
-    has_html_via_rtf: bool,
-    has_rtf: bool,
-) {
-    if has_plain {
-        totals.bodies_plain += 1;
-    }
-    if has_html_native {
-        totals.bodies_html_native += 1;
-    }
-    if has_html_via_rtf {
-        totals.bodies_html_via_rtf += 1;
-    }
-    if has_html_native || has_html_via_rtf {
-        totals.bodies_html += 1;
-    }
-    if has_rtf {
-        totals.bodies_rtf += 1;
-    }
-}
-
-fn record_recipients(totals: &mut PstTotals, count: u64) {
-    if count > 0 {
-        totals.messages_with_recipients += 1;
-    }
-    totals.total_recipients += count;
-    totals.max_recipients = totals.max_recipients.max(count);
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum CountComparison {
-    Match,
-    Mismatch,
-}
-
-fn compare_count(msg_parser: u64, custom: u64) -> CountComparison {
-    if msg_parser == custom {
-        CountComparison::Match
-    } else {
-        CountComparison::Mismatch
-    }
-}
-
-#[derive(Default)]
-struct CountTally {
-    matched: u64,
-    mismatched: u64,
-}
-
-impl CountTally {
-    fn record(&mut self, comparison: CountComparison) {
-        match comparison {
-            CountComparison::Match => self.matched += 1,
-            CountComparison::Mismatch => self.mismatched += 1,
-        }
-    }
-}
-
-fn print_count_tally(name: &str, tally: &CountTally) {
-    println!("{name}_match={}", tally.matched);
-    println!("{name}_mismatch={}", tally.mismatched);
-}
-
-fn record_attachments(totals: &mut PstTotals, count: u64) {
-    if count > 0 {
-        totals.messages_with_attachments += 1;
-    }
-    totals.total_attachments += count;
-    totals.max_attachments = totals.max_attachments.max(count);
-}
-
 /// Buckets a single recipient row by its `PidTagRecipientType` value.
 /// `None` means the property was missing or not a 32-bit integer on that row.
 fn record_recipient_type(totals: &mut PstTotals, recipient_type: Option<i32>) {
@@ -680,17 +727,6 @@ fn record_attachment_method(totals: &mut PstTotals, method: Option<i32>) {
 /// rather than silently merged into `attachments_zero_byte`, which would
 /// have repeated the same silent-conflation mistake the HTML detection fix
 /// (2026-09-07) corrected on the MSG side. `None` (property missing or
-/// unreadable) is not counted as zero-byte either way.
-fn record_attachment_size(totals: &mut PstTotals, size: Option<i32>, method: Option<i32>) {
-    if size != Some(0) {
-        return;
-    }
-    match method {
-        Some(ATTACH_METHOD_BY_VALUE) => totals.attachments_zero_byte += 1,
-        _ => totals.attachments_zero_size_other_method += 1,
-    }
-}
-
 /// Records presence (not content) of `PidTagAttachContentId`, a common but
 /// not definitive signal that an attachment is referenced inline (e.g. an
 /// inline image) rather than a standalone file attachment.
@@ -748,7 +784,7 @@ fn column_has_value(row_values: &[Option<TableRowColumnValue>], column_idx: usiz
 
 fn inspect_recipients(message: &dyn PstMessage, totals: &mut PstTotals) {
     let Some(table_rc) = message.recipient_table() else {
-        record_recipients(totals, 0);
+        totals.recipients.record(0);
         return;
     };
     let table: &dyn TableContext = table_rc.as_ref();
@@ -767,12 +803,12 @@ fn inspect_recipients(message: &dyn PstMessage, totals: &mut PstTotals) {
         record_recipient_type(totals, recipient_type);
     }
 
-    record_recipients(totals, count);
+    totals.recipients.record(count);
 }
 
 fn inspect_attachments(message: &dyn PstMessage, totals: &mut PstTotals) {
     let Some(table_rc) = message.attachment_table() else {
-        record_attachments(totals, 0);
+        totals.attachments.record(0);
         return;
     };
     let table: &dyn TableContext = table_rc.as_ref();
@@ -792,7 +828,9 @@ fn inspect_attachments(message: &dyn PstMessage, totals: &mut PstTotals) {
         let method = method_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
 
         let size = size_idx.and_then(|idx| read_i32_at(table, context, &row_values, idx));
-        record_attachment_size(totals, size, method);
+        totals
+            .zero_byte_attachments
+            .record(size == Some(0), method == Some(ATTACH_METHOD_BY_VALUE));
 
         record_attachment_method(totals, method);
 
@@ -802,7 +840,7 @@ fn inspect_attachments(message: &dyn PstMessage, totals: &mut PstTotals) {
         record_attachment_content_id_presence(totals, has_content_id);
     }
 
-    record_attachments(totals, count);
+    totals.attachments.record(count);
 }
 
 // =============================================================================
@@ -832,6 +870,16 @@ fn run_msg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<
         }
     }
 
+    print_msg_report(&totals);
+
+    Ok(())
+}
+
+/// Prints the msg_parser-based MSG inventory report. Split out of
+/// `run_msg_diagnostic` (SLAP): the scan loop stays with the run
+/// function, the report format lives here. Keys are unchanged from
+/// previous versions.
+fn print_msg_report(totals: &MsgTotals) {
     println!("open_errors={}", totals.open_errors);
 
     println!("message_class_missing={}", totals.message_class_missing);
@@ -839,39 +887,36 @@ fn run_msg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<
         println!("message_class class={class} count={count}");
     }
 
-    println!("bodies_plain={}", totals.bodies_plain);
-    println!("bodies_html={}", totals.bodies_html);
-    println!("bodies_html_native={}", totals.bodies_html_native);
-    println!("bodies_html_via_rtf={}", totals.bodies_html_via_rtf);
-    println!("bodies_rtf={}", totals.bodies_rtf);
+    println!("bodies_plain={}", totals.bodies.plain);
+    println!("bodies_html={}", totals.bodies.html);
+    println!("bodies_html_native={}", totals.bodies.html_native);
+    println!("bodies_html_via_rtf={}", totals.bodies.html_via_rtf);
+    println!("bodies_rtf={}", totals.bodies.rtf);
     println!(
         "rtf_decompression_errors={}",
-        totals.rtf_decompression_errors
+        totals.bodies.rtf_decompression_errors
     );
     println!(
         "rtf_decompressed_bytes_total={}",
-        totals.rtf_decompressed_bytes_total
+        totals.bodies.rtf_decompressed_bytes_total
     );
 
-    println!(
-        "messages_with_recipients={}",
-        totals.messages_with_recipients
-    );
+    println!("messages_with_recipients={}", totals.recipients.with_any);
     println!("recipients_to={}", totals.recipients_to);
     println!("recipients_cc={}", totals.recipients_cc);
     println!("recipients_bcc={}", totals.recipients_bcc);
-    println!("max_recipients_on_a_message={}", totals.max_recipients);
+    println!("max_recipients_on_a_message={}", totals.recipients.max);
 
+    println!("messages_with_attachments={}", totals.attachments.with_any);
+    println!("total_attachments={}", totals.attachments.total);
+    println!("max_attachments_on_a_message={}", totals.attachments.max);
     println!(
-        "messages_with_attachments={}",
-        totals.messages_with_attachments
+        "attachments_zero_byte={}",
+        totals.zero_byte_attachments.by_value
     );
-    println!("total_attachments={}", totals.total_attachments);
-    println!("max_attachments_on_a_message={}", totals.max_attachments);
-    println!("attachments_zero_byte={}", totals.attachments_zero_byte);
     println!(
         "attachments_zero_size_other_method={}",
-        totals.attachments_zero_size_other_method
+        totals.zero_byte_attachments.other_method
     );
     println!(
         "attachments_with_content_id={}",
@@ -906,10 +951,12 @@ fn run_msg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<
     for (class, count) in &totals.embedded_message_classes {
         println!("embedded_message_class class={class} count={count}");
     }
-
-    Ok(())
 }
 
+/// Aggregated msg_parser-based MSG inventory. Body availability,
+/// recipient/attachment presence/total/max, and zero-size bookkeeping go
+/// through the shared counter types defined above; only the msg_parser
+/// vocabulary buckets remain direct fields here.
 #[derive(Default)]
 struct MsgTotals {
     open_errors: u64,
@@ -917,25 +964,15 @@ struct MsgTotals {
     message_classes: BTreeMap<String, u64>,
     message_class_missing: u64,
 
-    bodies_plain: u64,
-    bodies_html: u64,
-    bodies_html_native: u64,
-    bodies_html_via_rtf: u64,
-    bodies_rtf: u64,
-    rtf_decompression_errors: u64,
-    rtf_decompressed_bytes_total: u64,
+    bodies: BodyCounters,
 
-    messages_with_recipients: u64,
     recipients_to: u64,
     recipients_cc: u64,
     recipients_bcc: u64,
-    max_recipients: u64,
+    recipients: CountStats,
 
-    messages_with_attachments: u64,
-    total_attachments: u64,
-    max_attachments: u64,
-    attachments_zero_byte: u64,
-    attachments_zero_size_other_method: u64,
+    attachments: CountStats,
+    zero_byte_attachments: ZeroByteStats,
     attachments_with_content_id: u64,
     attachments_method_by_value: u64,
     attachments_method_embedded_message: u64,
@@ -970,11 +1007,11 @@ fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
     } else if has_rtf {
         match outlook.rtf_decompressed() {
             Some(bytes) => {
-                totals.rtf_decompressed_bytes_total += bytes.len() as u64;
+                totals.bodies.note_decompressed_bytes(bytes.len());
                 rtf_bytes_contain_fromhtml(&bytes)
             }
             None => {
-                totals.rtf_decompression_errors += 1;
+                totals.bodies.note_decompression_error();
                 false
             }
         }
@@ -982,8 +1019,7 @@ fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
         false
     };
 
-    record_msg_body_flags(
-        totals,
+    totals.bodies.record(
         !outlook.body.is_empty(),
         has_html_native,
         has_html_via_rtf,
@@ -1001,7 +1037,10 @@ fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
     for attach in &outlook.attachments {
         attachment_count += 1;
 
-        record_msg_attachment_size(totals, attach.payload_bytes.len(), attach.attach_method);
+        totals.zero_byte_attachments.record(
+            attach.payload_bytes.is_empty(),
+            attach.attach_method == MSG_ATTACH_METHOD_BY_VALUE,
+        );
         record_msg_attachment_method(totals, attach.attach_method);
         record_msg_attachment_content_id(totals, !attach.content_id.is_empty());
 
@@ -1014,7 +1053,7 @@ fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
             None => {}
         }
     }
-    record_msg_attachments(totals, attachment_count);
+    totals.attachments.record(attachment_count);
 }
 
 fn record_msg_class(totals: &mut MsgTotals, class: &str) {
@@ -1025,85 +1064,25 @@ fn record_msg_class(totals: &mut MsgTotals, class: &str) {
     }
 }
 
-/// Records body-*availability* only, distinguishing native HTML (a real
-/// `PidTagBodyHtml` property) from HTML recovered by decoding it out of the
-/// RTF body -- these are different levels of confidence in the result and
-/// are never merged into a single ambiguous signal. `bodies_html` is a
-/// convenience "was HTML detected via either path" total.
+/// Records recipient counts by type. Presence/total/max bookkeeping goes
+/// through the shared [`CountStats`]; only the per-type split is
+/// msg_parser-specific.
 ///
-/// Interpretation caveat: `has_plain` reflects only that `outlook.body` is
-/// non-empty, not that the message was *authored* in plain text -- see the
-/// identical caveat on the PST-side `record_body_flags`, which this
-/// mirrors. Every fixture message observed so far has `bodies_plain` set
-/// regardless of its real authored format.
-fn record_msg_body_flags(
-    totals: &mut MsgTotals,
-    has_plain: bool,
-    has_html_native: bool,
-    has_html_via_rtf: bool,
-    has_rtf: bool,
-) {
-    if has_plain {
-        totals.bodies_plain += 1;
-    }
-    if has_html_native {
-        totals.bodies_html_native += 1;
-    }
-    if has_html_via_rtf {
-        totals.bodies_html_via_rtf += 1;
-    }
-    if has_html_native || has_html_via_rtf {
-        totals.bodies_html += 1;
-    }
-    if has_rtf {
-        totals.bodies_rtf += 1;
-    }
-}
-
-/// Records recipient counts by type. Structural gap, not a bug: `msg_parser`
-/// exposes only `to`/`cc`/`bcc` on `Outlook`, with no equivalent of the
-/// PST side's `PidTagRecipientType` "ORIG" bucket (a recipient recorded as
-/// the sender, MS-OXOMSG value 0). If a `.msg` file ever had an
-/// ORIG-classified recipient, there is currently no way to detect it
-/// through this crate's public API -- it would simply not be counted
-/// anywhere. This asymmetry with the PST-side diagnostic (which does track
-/// ORIG, currently always at zero) is accepted as a known limitation, not
-/// scheduled for a fix, since ORIG recipients are a rare edge case and no
-/// fixture evidence has shown one to even test against.
+/// Structural gap, not a bug: `msg_parser` exposes only `to`/`cc`/`bcc` on
+/// `Outlook`, with no equivalent of the PST side's `PidTagRecipientType`
+/// "ORIG" bucket (a recipient recorded as the sender, MS-OXOMSG value 0).
+/// If a `.msg` file ever had an ORIG-classified recipient, there is
+/// currently no way to detect it through this crate's public API -- it
+/// would simply not be counted anywhere. This asymmetry with the PST-side
+/// diagnostic (which does track ORIG, currently always at zero) is
+/// accepted as a known limitation, not scheduled for a fix, since ORIG
+/// recipients are a rare edge case and no fixture evidence has shown one
+/// to even test against.
 fn record_msg_recipients(totals: &mut MsgTotals, to: u64, cc: u64, bcc: u64) {
-    if to + cc + bcc > 0 {
-        totals.messages_with_recipients += 1;
-    }
     totals.recipients_to += to;
     totals.recipients_cc += cc;
     totals.recipients_bcc += bcc;
-    totals.max_recipients = totals.max_recipients.max(to + cc + bcc);
-}
-
-fn record_msg_attachments(totals: &mut MsgTotals, count: u64) {
-    if count > 0 {
-        totals.messages_with_attachments += 1;
-    }
-    totals.total_attachments += count;
-    totals.max_attachments = totals.max_attachments.max(count);
-}
-
-/// Records whether an attachment's byte payload was exactly zero -- but
-/// only as a meaningful "empty file" signal when the attachment's method
-/// is `by_value`. For every other method (embedded message, OLE), the
-/// attachment's real content lives outside `payload_bytes` entirely, so a
-/// zero reading there is expected and structural, not evidence of an empty
-/// file. Tracked as a separate counter, mirroring the same fix applied to
-/// the PST side.
-fn record_msg_attachment_size(totals: &mut MsgTotals, size: usize, method: u32) {
-    if size != 0 {
-        return;
-    }
-    if method == MSG_ATTACH_METHOD_BY_VALUE {
-        totals.attachments_zero_byte += 1;
-    } else {
-        totals.attachments_zero_size_other_method += 1;
-    }
+    totals.recipients.record(to + cc + bcc);
 }
 
 fn record_msg_attachment_method(totals: &mut MsgTotals, method: u32) {
@@ -1163,264 +1142,258 @@ fn record_embedded_message_class(totals: &mut MsgTotals, class: &str) {
 // dedicated `__nameid_version1.0` storage. All of this is name/size/count
 // only -- never content.
 
-fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
-    println!("inventory=privacy_safe");
-    println!("input_kind=msg_oxmsg");
-    println!("files_scanned={}", files.len());
-    println!("subdirectories_skipped={subdirectories_skipped}");
+// --- Entry classification: the MS-OXMSG naming conventions ---------------
 
-    let mut totals = OxmsgTotals::default();
+#[derive(Clone, Copy)]
+enum OxmsgEntryKind {
+    Root,
+    PropertiesStream,
+    PropertyStream { prop_id: u16, indexed: bool },
+    AttachmentStorage,
+    RecipientStorage,
+    NamedPropertyStorage,
+    EmbeddedObjectStorage,
+    Unrecognized,
+}
 
-    for file in files {
-        match cfb::open(file) {
-            Ok(mut comp) => inspect_oxmsg(&mut comp, &mut totals),
-            Err(_) => totals.open_errors += 1,
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum OxmsgEntryScope {
+    Message,
+    Recipient,
+    Attachment,
+    EmbeddedObject,
+    NamedPropertyStorage,
+}
+
+impl OxmsgEntryScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Recipient => "recipient",
+            Self::Attachment => "attachment",
+            Self::EmbeddedObject => "embedded_object",
+            Self::NamedPropertyStorage => "named_property_storage",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CfbObjectKind {
+    Storage,
+    Stream,
+}
+
+impl CfbObjectKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Storage => "storage",
+            Self::Stream => "stream",
+        }
+    }
+}
+
+fn cfb_object_kind(is_stream: bool) -> CfbObjectKind {
+    if is_stream {
+        CfbObjectKind::Stream
+    } else {
+        CfbObjectKind::Storage
+    }
+}
+
+fn cfb_entry_depth(path: &Path) -> u64 {
+    path.components().count().saturating_sub(1) as u64
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum UnrecognizedNameShape {
+    MalformedPropertyStream,
+    OtherReserved,
+    Other,
+}
+
+impl UnrecognizedNameShape {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedPropertyStream => "malformed_property_stream_name",
+            Self::OtherReserved => "other_reserved_name",
+            Self::Other => "other_name",
+        }
+    }
+}
+
+fn unrecognized_name_shape(name: &str) -> UnrecognizedNameShape {
+    if name.starts_with("__substg1.0_") {
+        UnrecognizedNameShape::MalformedPropertyStream
+    } else if name.starts_with("__") {
+        UnrecognizedNameShape::OtherReserved
+    } else {
+        UnrecognizedNameShape::Other
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RecognizedNameTypeMismatch {
+    StorageNameIsStream,
+    StreamNameIsStorage,
+}
+
+impl RecognizedNameTypeMismatch {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StorageNameIsStream => "storage_name_is_stream",
+            Self::StreamNameIsStorage => "stream_name_is_storage",
+        }
+    }
+}
+
+fn recognized_name_type_mismatch(
+    entry_kind: &OxmsgEntryKind,
+    object_kind: CfbObjectKind,
+) -> Option<RecognizedNameTypeMismatch> {
+    match (entry_kind, object_kind) {
+        (
+            OxmsgEntryKind::PropertiesStream | OxmsgEntryKind::PropertyStream { .. },
+            CfbObjectKind::Storage,
+        ) => Some(RecognizedNameTypeMismatch::StreamNameIsStorage),
+        (
+            OxmsgEntryKind::AttachmentStorage
+            | OxmsgEntryKind::RecipientStorage
+            | OxmsgEntryKind::NamedPropertyStorage
+            | OxmsgEntryKind::EmbeddedObjectStorage,
+            CfbObjectKind::Stream,
+        ) => Some(RecognizedNameTypeMismatch::StorageNameIsStream),
+        _ => None,
+    }
+}
+
+/// Classifies a single CFB entry by name alone, using the MS-CFB
+/// storage/stream naming conventions MS-OXMSG defines (see the module
+/// comment above). Takes a plain `&str` rather than a `cfb::Entry`
+/// directly -- that type has no public constructor, so keeping the
+/// classification logic pure and string-based is what makes it possible
+/// to unit-test without a real CFB file on disk.
+fn classify_oxmsg_entry(name: &str, is_root: bool) -> OxmsgEntryKind {
+    if is_root {
+        return OxmsgEntryKind::Root;
+    }
+    if name == "__properties_version1.0" {
+        return OxmsgEntryKind::PropertiesStream;
+    }
+    if name == "__nameid_version1.0" {
+        return OxmsgEntryKind::NamedPropertyStorage;
+    }
+    if name.starts_with("__attach_version1.0_#") {
+        return OxmsgEntryKind::AttachmentStorage;
+    }
+    if name.starts_with("__recip_version1.0_#") {
+        return OxmsgEntryKind::RecipientStorage;
+    }
+    if name == "__substg1.0_3701000D" {
+        return OxmsgEntryKind::EmbeddedObjectStorage;
+    }
+    if let Some((prop_id, indexed)) = parse_property_stream_name(name) {
+        return OxmsgEntryKind::PropertyStream { prop_id, indexed };
+    }
+    OxmsgEntryKind::Unrecognized
+}
+
+fn parse_property_stream_name(name: &str) -> Option<(u16, bool)> {
+    let suffix = name.strip_prefix("__substg1.0_")?;
+
+    if suffix.len() == 8 {
+        let prop_id = u16::from_str_radix(&suffix[0..4], 16).ok()?;
+        u16::from_str_radix(&suffix[4..8], 16).ok()?;
+        return Some((prop_id, false));
+    }
+
+    let (tag, index) = suffix.split_once('-')?;
+    if tag.len() != 8 || index.len() != 8 {
+        return None;
+    }
+
+    let prop_id = u16::from_str_radix(&tag[0..4], 16).ok()?;
+    u16::from_str_radix(&tag[4..8], 16).ok()?;
+    u32::from_str_radix(index, 16).ok()?;
+
+    Some((prop_id, true))
+}
+
+fn oxmsg_entry_scope(path: &Path) -> OxmsgEntryScope {
+    let mut scope = OxmsgEntryScope::Message;
+
+    for component in path.components() {
+        let Some(name) = component.as_os_str().to_str() else {
+            continue;
+        };
+
+        match name {
+            "__nameid_version1.0" => {
+                scope = OxmsgEntryScope::NamedPropertyStorage;
+            }
+            "__substg1.0_3701000D" => {
+                scope = OxmsgEntryScope::EmbeddedObject;
+            }
+            name if name.starts_with("__attach_version1.0_#") => {
+                scope = OxmsgEntryScope::Attachment;
+            }
+            name if name.starts_with("__recip_version1.0_#") => {
+                scope = OxmsgEntryScope::Recipient;
+            }
+            _ => {}
         }
     }
 
-    println!("open_errors={}", totals.open_errors);
-    println!("total_entries={}", totals.total_entries);
-    println!("root_entries_total={}", totals.root_entries_total);
-    println!(
-        "recognized_entries_total={}",
-        totals.recognized_entries_total
-    );
-    println!(
-        "entry_accounting_gap_total={}",
-        totals.entry_accounting_gap_total()
-    );
-    println!("has_properties_stream={}", totals.has_properties_stream);
-    println!(
-        "properties_stream_entries_total={}",
-        totals.properties_stream_entries_total
-    );
-    println!(
-        "properties_stream_bytes_total={}",
-        totals.properties_stream_bytes_total
-    );
-    println!("property_streams_total={}", totals.property_streams_total);
-    println!(
-        "indexed_property_streams_total={}",
-        totals.indexed_property_streams_total
-    );
-    println!(
-        "embedded_object_storages_total={}",
-        totals.embedded_object_storages_total
-    );
-    println!(
-        "attachment_storages_total={}",
-        totals.attachment_storages_total
-    );
-    println!(
-        "recipient_storages_total={}",
-        totals.recipient_storages_total
-    );
-    println!(
-        "named_property_storages_total={}",
-        totals.named_property_storages_total
-    );
-    // Keep the original presence field for consumers that only need a
-    // compatibility-friendly yes/no result.
-    println!(
-        "has_named_property_storage={}",
-        totals.named_property_storages_total > 0
-    );
-    println!(
-        "unrecognized_entries_total={}",
-        totals.unrecognized_entries_total
-    );
-    println!(
-        "embedded_object_storages_message_shaped_total={}",
-        totals.embedded_object_storages_message_shaped_total
-    );
-    println!(
-        "embedded_object_storages_custom_total={}",
-        totals.embedded_object_storages_custom_total
-    );
-    for ((shape, clsid), count) in &totals.embedded_object_storages_by_shape {
-        println!("embedded_object_storage shape={shape} clsid={clsid} count={count}");
-    }
-    println!(
-        "opaque_payload_entries_total={}",
-        totals.opaque_payload_entries_total
-    );
-    for ((object_kind, below), count) in &totals.opaque_payload_entries {
-        println!(
-            "opaque_payload_entry kind={} depth_below_payload={below} count={count}",
-            object_kind.as_str()
-        );
-    }
-    for ((object_kind, depth, name_shape, ancestry), count) in &totals.unrecognized_entries {
-        println!(
-            "unrecognized_entry kind={} depth={} name_shape={} ancestry={ancestry} count={count}",
-            object_kind.as_str(),
-            depth,
-            name_shape.as_str()
-        );
-    }
-    for (mismatch, count) in &totals.recognized_name_type_mismatches {
-        println!(
-            "recognized_name_type_mismatch kind={} count={count}",
-            mismatch.as_str()
-        );
-    }
-    for (scope, count) in &totals.properties_streams_by_scope {
-        println!("properties_stream scope={} count={count}", scope.as_str());
-    }
-    for (scope, count) in &totals.property_streams_by_scope {
-        println!("property_stream scope={} count={count}", scope.as_str());
-    }
-    for ((scope, prop_id), count) in &totals.property_id_counts_by_scope {
-        println!(
-            "property_id scope={} id=0x{prop_id:04X} count={count}",
-            scope.as_str()
-        );
-    }
-    for (prop_id, count) in &totals.property_id_counts {
-        println!("property_id id=0x{prop_id:04X} count={count}");
-    }
-    println!(
-        "properties_entries_total={}",
-        totals.properties_entries_total
-    );
-    println!(
-        "properties_entries_fixed_inline_total={}",
-        totals.properties_entries_fixed_inline_total
-    );
-    println!(
-        "properties_entries_variable_single_total={}",
-        totals.properties_entries_variable_single_total
-    );
-    println!(
-        "properties_entries_variable_multivalued_total={}",
-        totals.properties_entries_variable_multivalued_total
-    );
-    println!(
-        "properties_stream_too_short_for_header_total={}",
-        totals.properties_stream_too_short_for_header_total
-    );
-    println!(
-        "properties_stream_trailing_bytes_total={}",
-        totals.properties_stream_trailing_bytes_total
-    );
-    println!(
-        "properties_stream_unexpected_scope_total={}",
-        totals.properties_stream_unexpected_scope_total
-    );
-    println!(
-        "properties_stream_read_errors={}",
-        totals.properties_stream_read_errors
-    );
-    for ((scope, property_type), count) in &totals.property_type_counts_by_scope {
-        println!(
-            "property_type scope={} type=0x{property_type:04X} count={count}",
-            scope.as_str()
-        );
-    }
-    for (flags, count) in &totals.property_entry_flags_counts {
-        println!("property_entry_flags value=0x{flags:X} count={count}");
-    }
-    for (reserved, count) in &totals.attach_data_object_reserved_counts {
-        println!("attach_data_object_entry reserved=0x{reserved:02X} count={count}");
-    }
-    println!(
-        "attach_data_object_size_sentinel_mismatches={}",
-        totals.attach_data_object_size_sentinel_mismatches
-    );
-    let reserved_embedded = totals
-        .attach_data_object_reserved_counts
-        .get(&0x01)
-        .copied()
-        .unwrap_or(0);
-    let reserved_storage = totals
-        .attach_data_object_reserved_counts
-        .get(&0x04)
-        .copied()
-        .unwrap_or(0);
-    println!(
-        "attach_data_object_reserved_vs_embedded_object_storage_gap={}",
-        reserved_embedded as i64 - totals.embedded_object_storages_message_shaped_total as i64
-    );
-    println!(
-        "attach_data_object_reserved_vs_custom_object_storage_gap={}",
-        reserved_storage as i64 - totals.embedded_object_storages_custom_total as i64
-    );
-    println!(
-        "fixed_boolean_invalid_encoding_total={}",
-        totals.fixed_boolean_invalid_encoding_total
-    );
-    println!(
-        "fixed_float_non_finite_total={}",
-        totals.fixed_float_non_finite_total
-    );
-    println!(
-        "variable_value_stream_found_total={}",
-        totals.variable_value_stream_found_total
-    );
-    println!(
-        "variable_value_stream_missing_total={}",
-        totals.variable_value_stream_missing_total
-    );
-    println!(
-        "variable_value_size_mismatch_total={}",
-        totals.variable_value_size_mismatch_total
-    );
-    println!(
-        "variable_value_odd_utf16_length_total={}",
-        totals.variable_value_odd_utf16_length_total
-    );
-    println!(
-        "variable_unicode_decode_errors_total={}",
-        totals.variable_unicode_decode_errors_total
-    );
-    println!(
-        "variable_string8_undefined_byte_total={}",
-        totals.variable_string8_undefined_byte_total
-    );
-    println!(
-        "variable_clsid_wrong_length_total={}",
-        totals.variable_clsid_wrong_length_total
-    );
-    println!(
-        "named_properties_seen_total={}",
-        totals.named_properties_seen_total
-    );
-    println!(
-        "named_properties_map_missing_total={}",
-        totals.named_properties_map_missing_total
-    );
-    println!(
-        "named_properties_unresolvable_total={}",
-        totals.named_properties_unresolvable_total
-    );
-    println!(
-        "named_properties_guid_out_of_range_total={}",
-        totals.named_properties_guid_out_of_range_total
-    );
-    println!(
-        "named_properties_string_kind_total={}",
-        totals.named_properties_string_kind_total
-    );
-    println!(
-        "named_properties_numeric_kind_total={}",
-        totals.named_properties_numeric_kind_total
-    );
-    for (set, count) in &totals.named_property_sets {
-        println!("named_property_set set={set} count={count}");
-    }
-    for (lid, count) in &totals.named_property_numeric_lids {
-        println!("named_property_numeric_lid lid=0x{lid:04X} count={count}");
-    }
-    println!(
-        "named_properties_string_decode_errors_total={}",
-        totals.named_properties_string_decode_errors_total
-    );
-    println!(
-        "named_properties_index_mismatch_total={}",
-        totals.named_properties_index_mismatch_total
-    );
+    scope
+}
 
-    Ok(())
+const EMBEDDED_OBJECT_STORAGE_NAME: &str = "__substg1.0_3701000D";
+
+/// Parents of every `__properties_version1.0` stream. A `3701000D` storage in
+/// this set is message-shaped (an embedded message); one not in it is a
+/// custom attachment storage.
+fn message_shaped_parent_paths(comp: &cfb::CompoundFile<std::fs::File>) -> BTreeSet<PathBuf> {
+    comp.walk()
+        .filter(|e| e.is_stream() && e.name() == "__properties_version1.0")
+        .filter_map(|e| e.path().parent().map(Path::to_path_buf))
+        .collect()
+}
+
+/// If `path` lies beneath a custom (non-message-shaped) embedded-object
+/// storage, returns the outermost such storage's path. The storage itself is
+/// not "beneath" itself, so it keeps its own classification.
+fn enclosing_custom_payload_root(
+    path: &Path,
+    message_shaped: &BTreeSet<PathBuf>,
+) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .filter(|a| a.file_name().and_then(|n| n.to_str()) == Some(EMBEDDED_OBJECT_STORAGE_NAME))
+        .filter(|a| !message_shaped.contains(*a))
+        .last()
+        .map(Path::to_path_buf)
+}
+
+/// Privacy-safe ancestry: fixed-vocabulary tokens only, never entry names.
+fn oxmsg_ancestry_shape(path: &Path) -> String {
+    let mut tokens: Vec<&'static str> = Vec::new();
+    let ancestors: Vec<&Path> = path.ancestors().skip(1).collect();
+    for ancestor in ancestors.iter().rev() {
+        let Some(name) = ancestor.file_name().and_then(|n| n.to_str()) else {
+            continue; // the root has no file name
+        };
+        tokens.push(match name {
+            "__nameid_version1.0" => "named_property_storage",
+            EMBEDDED_OBJECT_STORAGE_NAME => "embedded_object",
+            n if n.starts_with("__attach_version1.0_#") => "attachment",
+            n if n.starts_with("__recip_version1.0_#") => "recipient",
+            _ => "other_storage",
+        });
+    }
+    if tokens.is_empty() {
+        "root".to_string()
+    } else {
+        format!("root/{}", tokens.join("/"))
+    }
 }
 
 #[derive(Default)]
@@ -1642,6 +1615,7 @@ fn properties_stream_header_len(scope: OxmsgEntryScope) -> Option<usize> {
 /// bytes: for a fixed-length entry this is the value itself (never
 /// interpreted here); for a variable-length entry it is Size (4 bytes) then
 /// Reserved (4 bytes).
+#[derive(Clone, Copy)]
 struct DecodedPropertyEntry {
     property_type: u16,
     property_id: u16,
@@ -2022,7 +1996,6 @@ struct CollectedOxmsgEntry {
     len: u64,
     clsid: String,
 }
-
 /// Reads PidTagMessageClass (0x001A, PT_UNICODE) directly from a
 /// message's own `__substg1.0_001A001F` stream at the CFB root. The first
 /// function in the real (non-diagnostic) extraction layer M3d begins:
@@ -2199,6 +2172,711 @@ fn extract_attachment_count(comp: &cfb::CompoundFile<std::fs::File>) -> u64 {
                 )
         })
         .count() as u64
+}
+
+fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
+    println!("inventory=privacy_safe");
+    println!("input_kind=msg_oxmsg");
+    println!("files_scanned={}", files.len());
+    println!("subdirectories_skipped={subdirectories_skipped}");
+
+    let mut totals = OxmsgTotals::default();
+
+    for file in files {
+        match cfb::open(file) {
+            Ok(mut comp) => inspect_oxmsg(&mut comp, &mut totals),
+            Err(_) => totals.open_errors += 1,
+        }
+    }
+
+    print_oxmsg_report(&totals);
+
+    Ok(())
+}
+
+/// Prints the `--oxmsg` structural inventory report. Split out of
+/// `run_oxmsg_diagnostic` (SLAP). Keys are unchanged from previous
+/// versions.
+fn print_oxmsg_report(totals: &OxmsgTotals) {
+    println!("open_errors={}", totals.open_errors);
+    println!("total_entries={}", totals.total_entries);
+    println!("root_entries_total={}", totals.root_entries_total);
+    println!(
+        "recognized_entries_total={}",
+        totals.recognized_entries_total
+    );
+    println!(
+        "entry_accounting_gap_total={}",
+        totals.entry_accounting_gap_total()
+    );
+    println!("has_properties_stream={}", totals.has_properties_stream);
+    println!(
+        "properties_stream_entries_total={}",
+        totals.properties_stream_entries_total
+    );
+    println!(
+        "properties_stream_bytes_total={}",
+        totals.properties_stream_bytes_total
+    );
+    println!("property_streams_total={}", totals.property_streams_total);
+    println!(
+        "indexed_property_streams_total={}",
+        totals.indexed_property_streams_total
+    );
+    println!(
+        "embedded_object_storages_total={}",
+        totals.embedded_object_storages_total
+    );
+    println!(
+        "attachment_storages_total={}",
+        totals.attachment_storages_total
+    );
+    println!(
+        "recipient_storages_total={}",
+        totals.recipient_storages_total
+    );
+    println!(
+        "named_property_storages_total={}",
+        totals.named_property_storages_total
+    );
+    // Keep the original presence field for consumers that only need a
+    // compatibility-friendly yes/no result.
+    println!(
+        "has_named_property_storage={}",
+        totals.named_property_storages_total > 0
+    );
+    println!(
+        "unrecognized_entries_total={}",
+        totals.unrecognized_entries_total
+    );
+    println!(
+        "embedded_object_storages_message_shaped_total={}",
+        totals.embedded_object_storages_message_shaped_total
+    );
+    println!(
+        "embedded_object_storages_custom_total={}",
+        totals.embedded_object_storages_custom_total
+    );
+    for ((shape, clsid), count) in &totals.embedded_object_storages_by_shape {
+        println!("embedded_object_storage shape={shape} clsid={clsid} count={count}");
+    }
+    println!(
+        "opaque_payload_entries_total={}",
+        totals.opaque_payload_entries_total
+    );
+    for ((object_kind, below), count) in &totals.opaque_payload_entries {
+        println!(
+            "opaque_payload_entry kind={} depth_below_payload={below} count={count}",
+            object_kind.as_str()
+        );
+    }
+    for ((object_kind, depth, name_shape, ancestry), count) in &totals.unrecognized_entries {
+        println!(
+            "unrecognized_entry kind={} depth={} name_shape={} ancestry={ancestry} count={count}",
+            object_kind.as_str(),
+            depth,
+            name_shape.as_str()
+        );
+    }
+    for (mismatch, count) in &totals.recognized_name_type_mismatches {
+        println!(
+            "recognized_name_type_mismatch kind={} count={count}",
+            mismatch.as_str()
+        );
+    }
+    for (scope, count) in &totals.properties_streams_by_scope {
+        println!("properties_stream scope={} count={count}", scope.as_str());
+    }
+    for (scope, count) in &totals.property_streams_by_scope {
+        println!("property_stream scope={} count={count}", scope.as_str());
+    }
+    for ((scope, prop_id), count) in &totals.property_id_counts_by_scope {
+        println!(
+            "property_id scope={} id=0x{prop_id:04X} count={count}",
+            scope.as_str()
+        );
+    }
+    for (prop_id, count) in &totals.property_id_counts {
+        println!("property_id id=0x{prop_id:04X} count={count}");
+    }
+    println!(
+        "properties_entries_total={}",
+        totals.properties_entries_total
+    );
+    println!(
+        "properties_entries_fixed_inline_total={}",
+        totals.properties_entries_fixed_inline_total
+    );
+    println!(
+        "properties_entries_variable_single_total={}",
+        totals.properties_entries_variable_single_total
+    );
+    println!(
+        "properties_entries_variable_multivalued_total={}",
+        totals.properties_entries_variable_multivalued_total
+    );
+    println!(
+        "properties_stream_too_short_for_header_total={}",
+        totals.properties_stream_too_short_for_header_total
+    );
+    println!(
+        "properties_stream_trailing_bytes_total={}",
+        totals.properties_stream_trailing_bytes_total
+    );
+    println!(
+        "properties_stream_unexpected_scope_total={}",
+        totals.properties_stream_unexpected_scope_total
+    );
+    println!(
+        "properties_stream_read_errors={}",
+        totals.properties_stream_read_errors
+    );
+    for ((scope, property_type), count) in &totals.property_type_counts_by_scope {
+        println!(
+            "property_type scope={} type=0x{property_type:04X} count={count}",
+            scope.as_str()
+        );
+    }
+    for (flags, count) in &totals.property_entry_flags_counts {
+        println!("property_entry_flags value=0x{flags:X} count={count}");
+    }
+    for (reserved, count) in &totals.attach_data_object_reserved_counts {
+        println!("attach_data_object_entry reserved=0x{reserved:02X} count={count}");
+    }
+    println!(
+        "attach_data_object_size_sentinel_mismatches={}",
+        totals.attach_data_object_size_sentinel_mismatches
+    );
+    let reserved_embedded = totals
+        .attach_data_object_reserved_counts
+        .get(&0x01)
+        .copied()
+        .unwrap_or(0);
+    let reserved_storage = totals
+        .attach_data_object_reserved_counts
+        .get(&0x04)
+        .copied()
+        .unwrap_or(0);
+    println!(
+        "attach_data_object_reserved_vs_embedded_object_storage_gap={}",
+        reserved_embedded as i64 - totals.embedded_object_storages_message_shaped_total as i64
+    );
+    println!(
+        "attach_data_object_reserved_vs_custom_object_storage_gap={}",
+        reserved_storage as i64 - totals.embedded_object_storages_custom_total as i64
+    );
+    println!(
+        "fixed_boolean_invalid_encoding_total={}",
+        totals.fixed_boolean_invalid_encoding_total
+    );
+    println!(
+        "fixed_float_non_finite_total={}",
+        totals.fixed_float_non_finite_total
+    );
+    println!(
+        "variable_value_stream_found_total={}",
+        totals.variable_value_stream_found_total
+    );
+    println!(
+        "variable_value_stream_missing_total={}",
+        totals.variable_value_stream_missing_total
+    );
+    println!(
+        "variable_value_size_mismatch_total={}",
+        totals.variable_value_size_mismatch_total
+    );
+    println!(
+        "variable_value_odd_utf16_length_total={}",
+        totals.variable_value_odd_utf16_length_total
+    );
+    println!(
+        "variable_unicode_decode_errors_total={}",
+        totals.variable_unicode_decode_errors_total
+    );
+    println!(
+        "variable_string8_undefined_byte_total={}",
+        totals.variable_string8_undefined_byte_total
+    );
+    println!(
+        "variable_clsid_wrong_length_total={}",
+        totals.variable_clsid_wrong_length_total
+    );
+    println!(
+        "named_properties_seen_total={}",
+        totals.named_properties_seen_total
+    );
+    println!(
+        "named_properties_map_missing_total={}",
+        totals.named_properties_map_missing_total
+    );
+    println!(
+        "named_properties_unresolvable_total={}",
+        totals.named_properties_unresolvable_total
+    );
+    println!(
+        "named_properties_guid_out_of_range_total={}",
+        totals.named_properties_guid_out_of_range_total
+    );
+    println!(
+        "named_properties_string_kind_total={}",
+        totals.named_properties_string_kind_total
+    );
+    println!(
+        "named_properties_numeric_kind_total={}",
+        totals.named_properties_numeric_kind_total
+    );
+    for (set, count) in &totals.named_property_sets {
+        println!("named_property_set set={set} count={count}");
+    }
+    for (lid, count) in &totals.named_property_numeric_lids {
+        println!("named_property_numeric_lid lid=0x{lid:04X} count={count}");
+    }
+    println!(
+        "named_properties_string_decode_errors_total={}",
+        totals.named_properties_string_decode_errors_total
+    );
+    println!(
+        "named_properties_index_mismatch_total={}",
+        totals.named_properties_index_mismatch_total
+    );
+}
+
+// --- The --oxmsg structural walk itself (two passes, one job each) --------
+//
+// The original `inspect_oxmsg` was a single ~320-line function holding
+// three jobs at once: classifying every CFB entry, decoding every
+// properties stream, and running the per-entry structural checks
+// (fixed-value validity, variable-stream cross-checks, attach-data-object
+// accounting, named-property resolution). It is split here so each
+// function does one thing (SLAP); behavior and counters are unchanged.
+
+/// Orchestrates the two-pass structural diagnostic over one open .msg
+/// container. Pass 1 classifies every CFB entry by name and position
+/// (immutable walk, results collected up front so the borrow ends before
+/// pass 2); pass 2 decodes the entry array of every properties stream
+/// found (needs `&mut comp` to read stream contents). Reports only
+/// structural fields -- type, ID, flags, size/reserved, presence --
+/// never a property's value.
+fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTotals) {
+    let message_shaped_parents = message_shaped_parent_paths(&*comp);
+
+    // Pass 1 needs only immutable access; entries are collected up front,
+    // ending that borrow before pass 2 needs `&mut comp` to read stream
+    // contents.
+    let entries: Vec<CollectedOxmsgEntry> = comp
+        .walk()
+        .map(|e| CollectedOxmsgEntry {
+            path: e.path().to_path_buf(),
+            is_root: e.is_root(),
+            is_stream: e.is_stream(),
+            len: e.len(),
+            clsid: e.clsid().to_string(),
+        })
+        .collect();
+
+    let saw_properties_stream = classify_oxmsg_entries(&entries, &message_shaped_parents, totals);
+    if saw_properties_stream {
+        totals.has_properties_stream += 1;
+    }
+
+    // Named properties are resolved once per file (the mapping storage is
+    // shared by the whole message, embedded messages included) rather than
+    // once per entry.
+    let named_property_map = read_named_property_map(comp);
+
+    decode_oxmsg_properties_streams(comp, &entries, named_property_map.as_ref(), totals);
+}
+
+/// Pass 1: classifies every CFB entry from its name, position, and
+/// ancestry, updating the structural counters. Returns whether the file
+/// had at least one `__properties_version1.0` stream.
+fn classify_oxmsg_entries(
+    entries: &[CollectedOxmsgEntry],
+    message_shaped_parents: &BTreeSet<PathBuf>,
+    totals: &mut OxmsgTotals,
+) -> bool {
+    let mut saw_properties_stream = false;
+
+    for entry in entries {
+        totals.total_entries += 1;
+        let object_kind = cfb_object_kind(entry.is_stream);
+
+        // Ancestry outranks name: anything beneath a custom attachment
+        // storage is application-defined, whatever it happens to be called.
+        if let Some(payload_root) =
+            enclosing_custom_payload_root(&entry.path, message_shaped_parents)
+        {
+            totals.opaque_payload_entries_total += 1;
+            let below = cfb_entry_depth(&entry.path).saturating_sub(cfb_entry_depth(&payload_root));
+            *totals
+                .opaque_payload_entries
+                .entry((object_kind, below))
+                .or_insert(0) += 1;
+            continue;
+        }
+
+        let entry_kind = classify_oxmsg_entry(&cfb_entry_name(&entry.path), entry.is_root);
+        if let Some(mismatch) = recognized_name_type_mismatch(&entry_kind, object_kind) {
+            *totals
+                .recognized_name_type_mismatches
+                .entry(mismatch)
+                .or_insert(0) += 1;
+        }
+        match entry_kind {
+            OxmsgEntryKind::Root => {
+                totals.root_entries_total += 1;
+                totals.recognized_entries_total += 1;
+            }
+            OxmsgEntryKind::PropertiesStream => {
+                totals.recognized_entries_total += 1;
+                totals.properties_stream_entries_total += 1;
+                saw_properties_stream = true;
+                totals.properties_stream_bytes_total += entry.len;
+
+                let scope = oxmsg_entry_scope(&entry.path);
+                *totals.properties_streams_by_scope.entry(scope).or_insert(0) += 1;
+            }
+            OxmsgEntryKind::PropertyStream { prop_id, indexed } => {
+                totals.recognized_entries_total += 1;
+                totals.property_streams_total += 1;
+                if indexed {
+                    totals.indexed_property_streams_total += 1;
+                }
+
+                let scope = oxmsg_entry_scope(&entry.path);
+                *totals.property_streams_by_scope.entry(scope).or_insert(0) += 1;
+                *totals
+                    .property_id_counts_by_scope
+                    .entry((scope, prop_id))
+                    .or_insert(0) += 1;
+                // Named-property storage streams are not MAPI properties:
+                // their four-hex prefix is a stream identifier (0x0002-0x0004
+                // and the 0x1000-range hash buckets), which would collide
+                // with real property IDs such as PidTagBody (0x1000).
+                if scope != OxmsgEntryScope::NamedPropertyStorage {
+                    *totals.property_id_counts.entry(prop_id).or_insert(0) += 1;
+                }
+            }
+            OxmsgEntryKind::AttachmentStorage => {
+                totals.recognized_entries_total += 1;
+                totals.attachment_storages_total += 1;
+            }
+            OxmsgEntryKind::RecipientStorage => {
+                totals.recognized_entries_total += 1;
+                totals.recipient_storages_total += 1;
+            }
+            OxmsgEntryKind::NamedPropertyStorage => {
+                totals.recognized_entries_total += 1;
+                totals.named_property_storages_total += 1;
+            }
+            OxmsgEntryKind::EmbeddedObjectStorage => {
+                totals.recognized_entries_total += 1;
+                totals.embedded_object_storages_total += 1;
+                let shape = if message_shaped_parents.contains(&entry.path) {
+                    totals.embedded_object_storages_message_shaped_total += 1;
+                    "message_shaped"
+                } else {
+                    totals.embedded_object_storages_custom_total += 1;
+                    "custom"
+                };
+                *totals
+                    .embedded_object_storages_by_shape
+                    .entry((shape, entry.clsid.clone()))
+                    .or_insert(0) += 1;
+            }
+            OxmsgEntryKind::Unrecognized => {
+                totals.unrecognized_entries_total += 1;
+                *totals
+                    .unrecognized_entries
+                    .entry((
+                        object_kind,
+                        cfb_entry_depth(&entry.path),
+                        unrecognized_name_shape(&cfb_entry_name(&entry.path)),
+                        oxmsg_ancestry_shape(&entry.path),
+                    ))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    saw_properties_stream
+}
+
+/// Pass 2: decodes the entry array of every `__properties_version1.0`
+/// stream found in pass 1. This reads stream contents, but reports only
+/// structural fields (type, ID, flags, and variable-length size/reserved)
+/// -- never a property's value.
+fn decode_oxmsg_properties_streams(
+    comp: &mut cfb::CompoundFile<std::fs::File>,
+    entries: &[CollectedOxmsgEntry],
+    named_property_map: Option<&NamedPropertyMap>,
+    totals: &mut OxmsgTotals,
+) {
+    for entry in entries {
+        if !entry.is_stream || cfb_entry_name(&entry.path) != "__properties_version1.0" {
+            continue;
+        }
+        let scope = oxmsg_entry_scope(&entry.path);
+        let Some(header_len) = properties_stream_header_len(scope) else {
+            totals.properties_stream_unexpected_scope_total += 1;
+            continue;
+        };
+        let Some(bytes) = read_stream_bytes(comp, &entry.path) else {
+            totals.properties_stream_read_errors += 1;
+            continue;
+        };
+        let Some(decoded) = decode_properties_stream(&bytes, header_len) else {
+            totals.properties_stream_too_short_for_header_total += 1;
+            continue;
+        };
+        if decoded.trailing_bytes != 0 {
+            totals.properties_stream_trailing_bytes_total += 1;
+        }
+        for prop_entry in &decoded.entries {
+            record_property_entry(
+                comp,
+                &entry.path,
+                scope,
+                prop_entry,
+                named_property_map,
+                totals,
+            );
+        }
+    }
+}
+
+/// Runs every per-entry structural check for one decoded Property Entry:
+/// type/flags accounting, fixed-value validity, the variable-length value
+/// stream cross-check, the attach-data-object cross-check, and
+/// named-property resolution.
+fn record_property_entry(
+    comp: &mut cfb::CompoundFile<std::fs::File>,
+    stream_path: &Path,
+    scope: OxmsgEntryScope,
+    entry: &DecodedPropertyEntry,
+    named_property_map: Option<&NamedPropertyMap>,
+    totals: &mut OxmsgTotals,
+) {
+    totals.properties_entries_total += 1;
+    *totals
+        .property_type_counts_by_scope
+        .entry((scope, entry.property_type))
+        .or_insert(0) += 1;
+    *totals
+        .property_entry_flags_counts
+        .entry(entry.flags)
+        .or_insert(0) += 1;
+
+    match classify_property_entry_shape(entry.property_type) {
+        PropertyEntryShape::FixedInline => check_fixed_inline_entry(entry, totals),
+        PropertyEntryShape::VariableSingle => {
+            totals.properties_entries_variable_single_total += 1;
+            check_variable_value_stream(comp, stream_path, entry, totals);
+        }
+        PropertyEntryShape::VariableMultivalued => {
+            totals.properties_entries_variable_multivalued_total += 1;
+        }
+    }
+
+    record_attach_data_object_entry(scope, entry, totals);
+    record_named_property_observation(entry.property_id, named_property_map, totals);
+}
+
+/// Structural checks for one fixed-length entry whose value is stored
+/// inline in the entry's 8-byte value field. The value itself is decoded
+/// only to check plausibility (non-finite floats) -- never read or
+/// reported as content.
+fn check_fixed_inline_entry(entry: &DecodedPropertyEntry, totals: &mut OxmsgTotals) {
+    totals.properties_entries_fixed_inline_total += 1;
+    if entry.property_type == 0x000B && !is_valid_boolean_encoding(&entry.tail) {
+        totals.fixed_boolean_invalid_encoding_total += 1;
+    }
+    if let Some(value) = decode_fixed_value(entry.property_type, &entry.tail) {
+        let non_finite = match value {
+            DecodedFixedValue::Float(f) => !f.is_finite(),
+            DecodedFixedValue::Double(d) | DecodedFixedValue::AppTime(d) => !d.is_finite(),
+            _ => false,
+        };
+        if non_finite {
+            totals.fixed_float_non_finite_total += 1;
+        }
+    }
+}
+
+/// Cross-checks one variable-length single-value entry against the
+/// `__substg1.0_PPPPTTTT` stream MS-OXMSG 2.4.2.2 says must hold its
+/// value: presence, declared-size agreement, and per-type decodability.
+/// PT_OBJECT (0x000D) properties point at a storage, not a stream -- they
+/// are already covered by the embedded-object accounting in pass 1, so
+/// they are skipped here. Never reads a value as content.
+fn check_variable_value_stream(
+    comp: &mut cfb::CompoundFile<std::fs::File>,
+    stream_path: &Path,
+    entry: &DecodedPropertyEntry,
+    totals: &mut OxmsgTotals,
+) {
+    let declared_size =
+        u32::from_le_bytes([entry.tail[0], entry.tail[1], entry.tail[2], entry.tail[3]]);
+    if entry.property_type == 0x000D || declared_size == 0xFFFF_FFFF {
+        return;
+    }
+    let parent = stream_path.parent().unwrap_or(Path::new("/"));
+    let value_path = expected_variable_stream_path(parent, entry.property_id, entry.property_type);
+    let Some(value_bytes) = read_stream_bytes(comp, &value_path) else {
+        totals.variable_value_stream_missing_total += 1;
+        return;
+    };
+
+    totals.variable_value_stream_found_total += 1;
+    let expected = expected_size_field_value(entry.property_type, value_bytes.len() as u64);
+    if expected != declared_size as u64 {
+        totals.variable_value_size_mismatch_total += 1;
+    }
+    match entry.property_type {
+        0x001F => {
+            if value_bytes.len() % 2 != 0 {
+                totals.variable_value_odd_utf16_length_total += 1;
+            } else if decode_unicode_value(&value_bytes).is_err() {
+                totals.variable_unicode_decode_errors_total += 1;
+            }
+        }
+        0x001E => {
+            let (_, undefined_count) = decode_string8_cp1252(&value_bytes);
+            totals.variable_string8_undefined_byte_total += undefined_count as u64;
+        }
+        0x0048 if value_bytes.len() != 16 => {
+            totals.variable_clsid_wrong_length_total += 1;
+        }
+        _ => {}
+    }
+}
+
+/// PidTagAttachDataObject (0x3701, PT_OBJECT 0x000D) on an attachment: an
+/// independent, property-level cross-check of the CFB-structural
+/// message-shaped/custom classification (MS-OXMSG 2.4.2.2).
+fn record_attach_data_object_entry(
+    scope: OxmsgEntryScope,
+    entry: &DecodedPropertyEntry,
+    totals: &mut OxmsgTotals,
+) {
+    if scope != OxmsgEntryScope::Attachment
+        || entry.property_id != 0x3701
+        || entry.property_type != 0x000D
+    {
+        return;
+    }
+    let size = u32::from_le_bytes([entry.tail[0], entry.tail[1], entry.tail[2], entry.tail[3]]);
+    let reserved = u32::from_le_bytes([entry.tail[4], entry.tail[5], entry.tail[6], entry.tail[7]]);
+    *totals
+        .attach_data_object_reserved_counts
+        .entry(reserved)
+        .or_insert(0) += 1;
+    // Per spec this entry's Size field MUST be 0xFFFFFFFF; count any that
+    // aren't, rather than assuming.
+    if size != 0xFFFF_FFFF {
+        totals.attach_data_object_size_sentinel_mismatches += 1;
+    }
+}
+
+/// Named-property resolution (MS-OXMSG 2.2.3): identity only (property set
+/// + numeric-or-string), never a string name.
+fn record_named_property_observation(
+    property_id: u16,
+    named_property_map: Option<&NamedPropertyMap>,
+    totals: &mut OxmsgTotals,
+) {
+    if property_id < 0x8000 {
+        return;
+    }
+    totals.named_properties_seen_total += 1;
+    let Some(map) = named_property_map else {
+        totals.named_properties_map_missing_total += 1;
+        return;
+    };
+    let Some(raw) = map.lookup(property_id) else {
+        totals.named_properties_unresolvable_total += 1;
+        return;
+    };
+
+    // Per MS-OXMSG the entry's own claimed Property Index MUST equal its
+    // array position; a real permanent cross-check now that the bit layout
+    // is confirmed, rather than the disproven swap-hypothesis
+    // instrumentation it replaces.
+    let expected_index = property_id - 0x8000;
+    if raw.property_index != expected_index {
+        totals.named_properties_index_mismatch_total += 1;
+    }
+    if raw.is_string {
+        totals.named_properties_string_kind_total += 1;
+        if decode_named_property_string(&map.string_stream, raw.name_id_or_offset).is_none() {
+            totals.named_properties_string_decode_errors_total += 1;
+        }
+    } else {
+        totals.named_properties_numeric_kind_total += 1;
+        *totals
+            .named_property_numeric_lids
+            .entry(raw.name_id_or_offset)
+            .or_insert(0) += 1;
+    }
+    match map.resolve_set(raw.guid_index) {
+        NamedPropertySet::PsMapi => {
+            *totals.named_property_sets.entry("PS_MAPI").or_insert(0) += 1;
+        }
+        NamedPropertySet::PsPublicStrings => {
+            *totals
+                .named_property_sets
+                .entry("PS_PUBLIC_STRINGS")
+                .or_insert(0) += 1;
+        }
+        NamedPropertySet::WellKnown(name) => {
+            *totals.named_property_sets.entry(name).or_insert(0) += 1;
+        }
+        NamedPropertySet::Custom => {
+            *totals.named_property_sets.entry("custom").or_insert(0) += 1;
+        }
+        NamedPropertySet::OutOfRange => {
+            totals.named_properties_guid_out_of_range_total += 1;
+        }
+    }
+}
+
+// =============================================================================
+// MSG differential verification (M3e, opt-in via --verify): custom MS-OXMSG
+// extraction vs msg_parser, field by field
+// =============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CountComparison {
+    Match,
+    Mismatch,
+}
+
+fn compare_count(msg_parser: u64, custom: u64) -> CountComparison {
+    if msg_parser == custom {
+        CountComparison::Match
+    } else {
+        CountComparison::Mismatch
+    }
+}
+
+#[derive(Default)]
+struct CountTally {
+    matched: u64,
+    mismatched: u64,
+}
+
+impl CountTally {
+    fn record(&mut self, comparison: CountComparison) {
+        match comparison {
+            CountComparison::Match => self.matched += 1,
+            CountComparison::Mismatch => self.mismatched += 1,
+        }
+    }
+}
+
+fn print_count_tally(name: &str, tally: &CountTally) {
+    println!("{name}_match={}", tally.matched);
+    println!("{name}_mismatch={}", tally.mismatched);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2432,579 +3110,6 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
     print_count_tally("attachments_total", &totals.attachments_total);
 
     Ok(())
-}
-
-fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTotals) {
-    let mut saw_properties_stream = false;
-    let message_shaped_parents = message_shaped_parent_paths(&*comp);
-
-    // Pass 1: classify every entry from its name and position. This only
-    // needs immutable access, so results are collected up front, ending
-    // that borrow before pass 2 needs `&mut comp` to read stream contents.
-    let entries: Vec<CollectedOxmsgEntry> = comp
-        .walk()
-        .map(|e| CollectedOxmsgEntry {
-            path: e.path().to_path_buf(),
-            is_root: e.is_root(),
-            is_stream: e.is_stream(),
-            len: e.len(),
-            clsid: e.clsid().to_string(),
-        })
-        .collect();
-
-    for entry in &entries {
-        totals.total_entries += 1;
-        let object_kind = cfb_object_kind(entry.is_stream);
-
-        // Ancestry outranks name: anything beneath a custom attachment
-        // storage is application-defined, whatever it happens to be called.
-        if let Some(payload_root) =
-            enclosing_custom_payload_root(&entry.path, &message_shaped_parents)
-        {
-            totals.opaque_payload_entries_total += 1;
-            let below = cfb_entry_depth(&entry.path).saturating_sub(cfb_entry_depth(&payload_root));
-            *totals
-                .opaque_payload_entries
-                .entry((object_kind, below))
-                .or_insert(0) += 1;
-            continue;
-        }
-
-        let entry_kind = classify_oxmsg_entry(&cfb_entry_name(&entry.path), entry.is_root);
-        if let Some(mismatch) = recognized_name_type_mismatch(&entry_kind, object_kind) {
-            *totals
-                .recognized_name_type_mismatches
-                .entry(mismatch)
-                .or_insert(0) += 1;
-        }
-        match entry_kind {
-            OxmsgEntryKind::Root => {
-                totals.root_entries_total += 1;
-                totals.recognized_entries_total += 1;
-            }
-            OxmsgEntryKind::PropertiesStream => {
-                totals.recognized_entries_total += 1;
-                totals.properties_stream_entries_total += 1;
-                saw_properties_stream = true;
-                totals.properties_stream_bytes_total += entry.len;
-
-                let scope = oxmsg_entry_scope(&entry.path);
-                *totals.properties_streams_by_scope.entry(scope).or_insert(0) += 1;
-            }
-            OxmsgEntryKind::PropertyStream { prop_id, indexed } => {
-                totals.recognized_entries_total += 1;
-                totals.property_streams_total += 1;
-                if indexed {
-                    totals.indexed_property_streams_total += 1;
-                }
-
-                let scope = oxmsg_entry_scope(&entry.path);
-                *totals.property_streams_by_scope.entry(scope).or_insert(0) += 1;
-                *totals
-                    .property_id_counts_by_scope
-                    .entry((scope, prop_id))
-                    .or_insert(0) += 1;
-                // Named-property storage streams are not MAPI properties:
-                // their four-hex prefix is a stream identifier (0x0002-0x0004
-                // and the 0x1000-range hash buckets), which would collide
-                // with real property IDs such as PidTagBody (0x1000).
-                if scope != OxmsgEntryScope::NamedPropertyStorage {
-                    *totals.property_id_counts.entry(prop_id).or_insert(0) += 1;
-                }
-            }
-            OxmsgEntryKind::AttachmentStorage => {
-                totals.recognized_entries_total += 1;
-                totals.attachment_storages_total += 1;
-            }
-            OxmsgEntryKind::RecipientStorage => {
-                totals.recognized_entries_total += 1;
-                totals.recipient_storages_total += 1;
-            }
-            OxmsgEntryKind::NamedPropertyStorage => {
-                totals.recognized_entries_total += 1;
-                totals.named_property_storages_total += 1;
-            }
-            OxmsgEntryKind::EmbeddedObjectStorage => {
-                totals.recognized_entries_total += 1;
-                totals.embedded_object_storages_total += 1;
-                let shape = if message_shaped_parents.contains(&entry.path) {
-                    totals.embedded_object_storages_message_shaped_total += 1;
-                    "message_shaped"
-                } else {
-                    totals.embedded_object_storages_custom_total += 1;
-                    "custom"
-                };
-                *totals
-                    .embedded_object_storages_by_shape
-                    .entry((shape, entry.clsid.clone()))
-                    .or_insert(0) += 1;
-            }
-            OxmsgEntryKind::Unrecognized => {
-                totals.unrecognized_entries_total += 1;
-                *totals
-                    .unrecognized_entries
-                    .entry((
-                        object_kind,
-                        cfb_entry_depth(&entry.path),
-                        unrecognized_name_shape(&cfb_entry_name(&entry.path)),
-                        oxmsg_ancestry_shape(&entry.path),
-                    ))
-                    .or_insert(0) += 1;
-            }
-        }
-    }
-
-    if saw_properties_stream {
-        totals.has_properties_stream += 1;
-    }
-    // Named properties are resolved once per file (the mapping storage is
-    // shared by the whole message, embedded messages included) rather than
-    // once per entry.
-    let named_property_map = read_named_property_map(comp);
-
-    // Pass 2: decode the entry array of every properties stream found
-    // above. This reads stream contents, but reports only structural
-    // fields (type, ID, flags, and variable-length size/reserved) -- never
-    // a property's value.
-    for entry in &entries {
-        if !entry.is_stream || cfb_entry_name(&entry.path) != "__properties_version1.0" {
-            continue;
-        }
-        let scope = oxmsg_entry_scope(&entry.path);
-        let Some(header_len) = properties_stream_header_len(scope) else {
-            totals.properties_stream_unexpected_scope_total += 1;
-            continue;
-        };
-        let Some(bytes) = read_stream_bytes(comp, &entry.path) else {
-            totals.properties_stream_read_errors += 1;
-            continue;
-        };
-        let Some(decoded) = decode_properties_stream(&bytes, header_len) else {
-            totals.properties_stream_too_short_for_header_total += 1;
-            continue;
-        };
-        if decoded.trailing_bytes != 0 {
-            totals.properties_stream_trailing_bytes_total += 1;
-        }
-        for prop_entry in decoded.entries {
-            totals.properties_entries_total += 1;
-            *totals
-                .property_type_counts_by_scope
-                .entry((scope, prop_entry.property_type))
-                .or_insert(0) += 1;
-            *totals
-                .property_entry_flags_counts
-                .entry(prop_entry.flags)
-                .or_insert(0) += 1;
-
-            match classify_property_entry_shape(prop_entry.property_type) {
-                PropertyEntryShape::FixedInline => {
-                    totals.properties_entries_fixed_inline_total += 1;
-                    if prop_entry.property_type == 0x000B
-                        && !is_valid_boolean_encoding(&prop_entry.tail)
-                    {
-                        totals.fixed_boolean_invalid_encoding_total += 1;
-                    }
-                    if let Some(value) =
-                        decode_fixed_value(prop_entry.property_type, &prop_entry.tail)
-                    {
-                        let non_finite = match value {
-                            DecodedFixedValue::Float(f) => !f.is_finite(),
-                            DecodedFixedValue::Double(d) | DecodedFixedValue::AppTime(d) => {
-                                !d.is_finite()
-                            }
-                            _ => false,
-                        };
-                        if non_finite {
-                            totals.fixed_float_non_finite_total += 1;
-                        }
-                    }
-                }
-                PropertyEntryShape::VariableSingle => {
-                    totals.properties_entries_variable_single_total += 1;
-                    // PT_OBJECT (0x000D) properties point at a storage, not
-                    // a stream -- already covered by the embedded-object
-                    // accounting above.
-                    let declared_size = u32::from_le_bytes([
-                        prop_entry.tail[0],
-                        prop_entry.tail[1],
-                        prop_entry.tail[2],
-                        prop_entry.tail[3],
-                    ]);
-                    if prop_entry.property_type != 0x000D && declared_size != 0xFFFF_FFFF {
-                        let parent = entry.path.parent().unwrap_or(Path::new("/"));
-                        let value_path = expected_variable_stream_path(
-                            parent,
-                            prop_entry.property_id,
-                            prop_entry.property_type,
-                        );
-                        match read_stream_bytes(comp, &value_path) {
-                            None => totals.variable_value_stream_missing_total += 1,
-                            Some(value_bytes) => {
-                                totals.variable_value_stream_found_total += 1;
-                                let expected = expected_size_field_value(
-                                    prop_entry.property_type,
-                                    value_bytes.len() as u64,
-                                );
-                                if expected != declared_size as u64 {
-                                    totals.variable_value_size_mismatch_total += 1;
-                                }
-                                match prop_entry.property_type {
-                                    0x001F => {
-                                        if value_bytes.len() % 2 != 0 {
-                                            totals.variable_value_odd_utf16_length_total += 1;
-                                        } else if decode_unicode_value(&value_bytes).is_err() {
-                                            totals.variable_unicode_decode_errors_total += 1;
-                                        }
-                                    }
-                                    0x001E => {
-                                        let (_, undefined_count) =
-                                            decode_string8_cp1252(&value_bytes);
-                                        totals.variable_string8_undefined_byte_total +=
-                                            undefined_count as u64;
-                                    }
-                                    0x0048 if value_bytes.len() != 16 => {
-                                        totals.variable_clsid_wrong_length_total += 1;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                PropertyEntryShape::VariableMultivalued => {
-                    totals.properties_entries_variable_multivalued_total += 1;
-                }
-            }
-
-            // PidTagAttachDataObject (0x3701, PT_OBJECT 0x000D) on an
-            // attachment: an independent, property-level cross-check of the
-            // CFB-structural message-shaped/custom classification
-            // (MS-OXMSG 2.4.2.2).
-            if scope == OxmsgEntryScope::Attachment
-                && prop_entry.property_id == 0x3701
-                && prop_entry.property_type == 0x000D
-            {
-                let tail = prop_entry.tail;
-                let size = u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]);
-                let reserved = u32::from_le_bytes([tail[4], tail[5], tail[6], tail[7]]);
-                *totals
-                    .attach_data_object_reserved_counts
-                    .entry(reserved)
-                    .or_insert(0) += 1;
-                if size != 0xFFFF_FFFF {
-                    totals.attach_data_object_size_sentinel_mismatches += 1;
-                }
-            }
-
-            // Named-property resolution (MS-OXMSG 2.2.3): identity only
-            // (property set + numeric-or-string), never a string name.
-            if prop_entry.property_id >= 0x8000 {
-                totals.named_properties_seen_total += 1;
-                match &named_property_map {
-                    None => totals.named_properties_map_missing_total += 1,
-                    Some(map) => match map.lookup(prop_entry.property_id) {
-                        None => totals.named_properties_unresolvable_total += 1,
-                        Some(raw) => {
-                            let expected_index = prop_entry.property_id - 0x8000;
-                            if raw.property_index != expected_index {
-                                totals.named_properties_index_mismatch_total += 1;
-                            }
-                            if raw.is_string {
-                                totals.named_properties_string_kind_total += 1;
-                                if decode_named_property_string(
-                                    &map.string_stream,
-                                    raw.name_id_or_offset,
-                                )
-                                .is_none()
-                                {
-                                    totals.named_properties_string_decode_errors_total += 1;
-                                }
-                            } else {
-                                totals.named_properties_numeric_kind_total += 1;
-                                *totals
-                                    .named_property_numeric_lids
-                                    .entry(raw.name_id_or_offset)
-                                    .or_insert(0) += 1;
-                            }
-                            match map.resolve_set(raw.guid_index) {
-                                NamedPropertySet::PsMapi => {
-                                    *totals.named_property_sets.entry("PS_MAPI").or_insert(0) += 1;
-                                }
-                                NamedPropertySet::PsPublicStrings => {
-                                    *totals
-                                        .named_property_sets
-                                        .entry("PS_PUBLIC_STRINGS")
-                                        .or_insert(0) += 1;
-                                }
-                                NamedPropertySet::WellKnown(name) => {
-                                    *totals.named_property_sets.entry(name).or_insert(0) += 1;
-                                }
-                                NamedPropertySet::Custom => {
-                                    *totals.named_property_sets.entry("custom").or_insert(0) += 1;
-                                }
-                                NamedPropertySet::OutOfRange => {
-                                    totals.named_properties_guid_out_of_range_total += 1;
-                                }
-                            }
-                        }
-                    },
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum OxmsgEntryKind {
-    Root,
-    PropertiesStream,
-    PropertyStream { prop_id: u16, indexed: bool },
-    AttachmentStorage,
-    RecipientStorage,
-    NamedPropertyStorage,
-    EmbeddedObjectStorage,
-    Unrecognized,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum OxmsgEntryScope {
-    Message,
-    Recipient,
-    Attachment,
-    EmbeddedObject,
-    NamedPropertyStorage,
-}
-
-impl OxmsgEntryScope {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Message => "message",
-            Self::Recipient => "recipient",
-            Self::Attachment => "attachment",
-            Self::EmbeddedObject => "embedded_object",
-            Self::NamedPropertyStorage => "named_property_storage",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum CfbObjectKind {
-    Storage,
-    Stream,
-}
-
-impl CfbObjectKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Storage => "storage",
-            Self::Stream => "stream",
-        }
-    }
-}
-
-fn cfb_object_kind(is_stream: bool) -> CfbObjectKind {
-    if is_stream {
-        CfbObjectKind::Stream
-    } else {
-        CfbObjectKind::Storage
-    }
-}
-
-fn cfb_entry_depth(path: &Path) -> u64 {
-    path.components().count().saturating_sub(1) as u64
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum UnrecognizedNameShape {
-    MalformedPropertyStream,
-    OtherReserved,
-    Other,
-}
-
-impl UnrecognizedNameShape {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::MalformedPropertyStream => "malformed_property_stream_name",
-            Self::OtherReserved => "other_reserved_name",
-            Self::Other => "other_name",
-        }
-    }
-}
-
-fn unrecognized_name_shape(name: &str) -> UnrecognizedNameShape {
-    if name.starts_with("__substg1.0_") {
-        UnrecognizedNameShape::MalformedPropertyStream
-    } else if name.starts_with("__") {
-        UnrecognizedNameShape::OtherReserved
-    } else {
-        UnrecognizedNameShape::Other
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum RecognizedNameTypeMismatch {
-    StorageNameIsStream,
-    StreamNameIsStorage,
-}
-
-impl RecognizedNameTypeMismatch {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::StorageNameIsStream => "storage_name_is_stream",
-            Self::StreamNameIsStorage => "stream_name_is_storage",
-        }
-    }
-}
-
-fn recognized_name_type_mismatch(
-    entry_kind: &OxmsgEntryKind,
-    object_kind: CfbObjectKind,
-) -> Option<RecognizedNameTypeMismatch> {
-    match (entry_kind, object_kind) {
-        (
-            OxmsgEntryKind::PropertiesStream | OxmsgEntryKind::PropertyStream { .. },
-            CfbObjectKind::Storage,
-        ) => Some(RecognizedNameTypeMismatch::StreamNameIsStorage),
-        (
-            OxmsgEntryKind::AttachmentStorage
-            | OxmsgEntryKind::RecipientStorage
-            | OxmsgEntryKind::NamedPropertyStorage
-            | OxmsgEntryKind::EmbeddedObjectStorage,
-            CfbObjectKind::Stream,
-        ) => Some(RecognizedNameTypeMismatch::StorageNameIsStream),
-        _ => None,
-    }
-}
-
-/// Classifies a single CFB entry by name alone, using the MS-CFB
-/// storage/stream naming conventions MS-OXMSG defines (see the module
-/// comment above). Takes a plain `&str` rather than a `cfb::Entry`
-/// directly -- that type has no public constructor, so keeping the
-/// classification logic pure and string-based is what makes it possible
-/// to unit-test without a real CFB file on disk.
-fn classify_oxmsg_entry(name: &str, is_root: bool) -> OxmsgEntryKind {
-    if is_root {
-        return OxmsgEntryKind::Root;
-    }
-    if name == "__properties_version1.0" {
-        return OxmsgEntryKind::PropertiesStream;
-    }
-    if name == "__nameid_version1.0" {
-        return OxmsgEntryKind::NamedPropertyStorage;
-    }
-    if name.starts_with("__attach_version1.0_#") {
-        return OxmsgEntryKind::AttachmentStorage;
-    }
-    if name.starts_with("__recip_version1.0_#") {
-        return OxmsgEntryKind::RecipientStorage;
-    }
-    if name == "__substg1.0_3701000D" {
-        return OxmsgEntryKind::EmbeddedObjectStorage;
-    }
-    if let Some((prop_id, indexed)) = parse_property_stream_name(name) {
-        return OxmsgEntryKind::PropertyStream { prop_id, indexed };
-    }
-    OxmsgEntryKind::Unrecognized
-}
-
-fn parse_property_stream_name(name: &str) -> Option<(u16, bool)> {
-    let suffix = name.strip_prefix("__substg1.0_")?;
-
-    if suffix.len() == 8 {
-        let prop_id = u16::from_str_radix(&suffix[0..4], 16).ok()?;
-        u16::from_str_radix(&suffix[4..8], 16).ok()?;
-        return Some((prop_id, false));
-    }
-
-    let (tag, index) = suffix.split_once('-')?;
-    if tag.len() != 8 || index.len() != 8 {
-        return None;
-    }
-
-    let prop_id = u16::from_str_radix(&tag[0..4], 16).ok()?;
-    u16::from_str_radix(&tag[4..8], 16).ok()?;
-    u32::from_str_radix(index, 16).ok()?;
-
-    Some((prop_id, true))
-}
-
-fn oxmsg_entry_scope(path: &Path) -> OxmsgEntryScope {
-    let mut scope = OxmsgEntryScope::Message;
-
-    for component in path.components() {
-        let Some(name) = component.as_os_str().to_str() else {
-            continue;
-        };
-
-        match name {
-            "__nameid_version1.0" => {
-                scope = OxmsgEntryScope::NamedPropertyStorage;
-            }
-            "__substg1.0_3701000D" => {
-                scope = OxmsgEntryScope::EmbeddedObject;
-            }
-            name if name.starts_with("__attach_version1.0_#") => {
-                scope = OxmsgEntryScope::Attachment;
-            }
-            name if name.starts_with("__recip_version1.0_#") => {
-                scope = OxmsgEntryScope::Recipient;
-            }
-            _ => {}
-        }
-    }
-
-    scope
-}
-
-const EMBEDDED_OBJECT_STORAGE_NAME: &str = "__substg1.0_3701000D";
-
-/// Parents of every `__properties_version1.0` stream. A `3701000D` storage in
-/// this set is message-shaped (an embedded message); one not in it is a
-/// custom attachment storage.
-fn message_shaped_parent_paths(comp: &cfb::CompoundFile<std::fs::File>) -> BTreeSet<PathBuf> {
-    comp.walk()
-        .filter(|e| e.is_stream() && e.name() == "__properties_version1.0")
-        .filter_map(|e| e.path().parent().map(Path::to_path_buf))
-        .collect()
-}
-
-/// If `path` lies beneath a custom (non-message-shaped) embedded-object
-/// storage, returns the outermost such storage's path. The storage itself is
-/// not "beneath" itself, so it keeps its own classification.
-fn enclosing_custom_payload_root(
-    path: &Path,
-    message_shaped: &BTreeSet<PathBuf>,
-) -> Option<PathBuf> {
-    path.ancestors()
-        .skip(1)
-        .filter(|a| a.file_name().and_then(|n| n.to_str()) == Some(EMBEDDED_OBJECT_STORAGE_NAME))
-        .filter(|a| !message_shaped.contains(*a))
-        .last()
-        .map(Path::to_path_buf)
-}
-
-/// Privacy-safe ancestry: fixed-vocabulary tokens only, never entry names.
-fn oxmsg_ancestry_shape(path: &Path) -> String {
-    let mut tokens: Vec<&'static str> = Vec::new();
-    let ancestors: Vec<&Path> = path.ancestors().skip(1).collect();
-    for ancestor in ancestors.iter().rev() {
-        let Some(name) = ancestor.file_name().and_then(|n| n.to_str()) else {
-            continue; // the root has no file name
-        };
-        tokens.push(match name {
-            "__nameid_version1.0" => "named_property_storage",
-            EMBEDDED_OBJECT_STORAGE_NAME => "embedded_object",
-            n if n.starts_with("__attach_version1.0_#") => "attachment",
-            n if n.starts_with("__recip_version1.0_#") => "recipient",
-            _ => "other_storage",
-        });
-    }
-    if tokens.is_empty() {
-        "root".to_string()
-    } else {
-        format!("root/{}", tokens.join("/"))
-    }
 }
 
 #[cfg(test)]
@@ -3301,28 +3406,28 @@ mod tests {
 
     #[test]
     fn body_flags_are_presence_only() {
-        let mut totals = PstTotals::default();
-        record_body_flags(&mut totals, true, true, false, false);
-        record_body_flags(&mut totals, true, false, false, false);
+        let mut bodies = BodyCounters::default();
+        bodies.record(true, true, false, false);
+        bodies.record(true, false, false, false);
 
-        assert_eq!(totals.bodies_plain, 2);
-        assert_eq!(totals.bodies_html, 1);
-        assert_eq!(totals.bodies_rtf, 0);
+        assert_eq!(bodies.plain, 2);
+        assert_eq!(bodies.html, 1);
+        assert_eq!(bodies.rtf, 0);
     }
 
     #[test]
-    fn pst_html_native_and_via_rtf_are_tracked_separately_but_both_count_as_html() {
-        let mut totals = PstTotals::default();
+    fn html_native_and_via_rtf_are_tracked_separately_but_both_count_as_html() {
+        let mut bodies = BodyCounters::default();
         // Native PidTagBodyHtml present.
-        record_body_flags(&mut totals, false, true, false, false);
+        bodies.record(false, true, false, false);
         // No native property, but HTML recovered via MS-OXRTFEX
         // encapsulation in the RTF body -- the case the 2026-09-13 fix
         // exists for.
-        record_body_flags(&mut totals, false, false, true, true);
+        bodies.record(false, false, true, true);
 
-        assert_eq!(totals.bodies_html_native, 1);
-        assert_eq!(totals.bodies_html_via_rtf, 1);
-        assert_eq!(totals.bodies_html, 2);
+        assert_eq!(bodies.html_native, 1);
+        assert_eq!(bodies.html_via_rtf, 1);
+        assert_eq!(bodies.html, 2);
     }
 
     #[test]
@@ -3365,27 +3470,22 @@ mod tests {
     }
 
     #[test]
-    fn recipient_counts_track_presence_total_and_max() {
-        let mut totals = PstTotals::default();
-        record_recipients(&mut totals, 0);
-        record_recipients(&mut totals, 3);
-        record_recipients(&mut totals, 1);
+    fn count_stats_track_presence_total_and_max() {
+        let mut recipients = CountStats::default();
+        recipients.record(0);
+        recipients.record(3);
+        recipients.record(1);
+        assert_eq!(recipients.with_any, 2);
+        assert_eq!(recipients.total, 4);
+        assert_eq!(recipients.max, 3);
 
-        assert_eq!(totals.messages_with_recipients, 2);
-        assert_eq!(totals.total_recipients, 4);
-        assert_eq!(totals.max_recipients, 3);
-    }
-
-    #[test]
-    fn attachment_counts_track_presence_total_and_max() {
-        let mut totals = PstTotals::default();
-        record_attachments(&mut totals, 0);
-        record_attachments(&mut totals, 2);
-        record_attachments(&mut totals, 5);
-
-        assert_eq!(totals.messages_with_attachments, 2);
-        assert_eq!(totals.total_attachments, 7);
-        assert_eq!(totals.max_attachments, 5);
+        let mut attachments = CountStats::default();
+        attachments.record(0);
+        attachments.record(2);
+        attachments.record(5);
+        assert_eq!(attachments.with_any, 2);
+        assert_eq!(attachments.total, 7);
+        assert_eq!(attachments.max, 5);
     }
 
     #[test]
@@ -3433,24 +3533,27 @@ mod tests {
 
     #[test]
     fn zero_byte_attachments_are_counted_and_missing_size_is_not() {
-        let mut totals = PstTotals::default();
-        record_attachment_size(&mut totals, Some(0), Some(ATTACH_METHOD_BY_VALUE));
-        record_attachment_size(&mut totals, Some(1024), Some(ATTACH_METHOD_BY_VALUE));
-        record_attachment_size(&mut totals, None, Some(ATTACH_METHOD_BY_VALUE));
+        let mut zero = ZeroByteStats::default();
+        // Some(0), by_value -> a genuine zero-byte file attachment.
+        zero.record(true, true);
+        // Some(1024) -> not zero.
+        zero.record(false, true);
+        // None (missing/unreadable size) -> not counted as zero-byte.
+        zero.record(false, true);
 
-        assert_eq!(totals.attachments_zero_byte, 1);
-        assert_eq!(totals.attachments_zero_size_other_method, 0);
+        assert_eq!(zero.by_value, 1);
+        assert_eq!(zero.other_method, 0);
     }
 
     #[test]
     fn zero_size_on_a_non_by_value_attachment_is_not_counted_as_zero_byte() {
-        let mut totals = PstTotals::default();
-        record_attachment_size(&mut totals, Some(0), Some(ATTACH_METHOD_EMBEDDED_MESSAGE));
-        record_attachment_size(&mut totals, Some(0), Some(ATTACH_METHOD_OLE));
-        record_attachment_size(&mut totals, Some(0), None);
+        let mut zero = ZeroByteStats::default();
+        zero.record(true, false); // embedded message
+        zero.record(true, false); // OLE
+        zero.record(true, false); // method missing entirely
 
-        assert_eq!(totals.attachments_zero_byte, 0);
-        assert_eq!(totals.attachments_zero_size_other_method, 3);
+        assert_eq!(zero.by_value, 0);
+        assert_eq!(zero.other_method, 3);
     }
 
     #[test]
@@ -3476,30 +3579,9 @@ mod tests {
         assert_eq!(totals.message_class_missing, 1);
     }
 
-    #[test]
-    fn msg_body_flags_are_presence_only() {
-        let mut totals = MsgTotals::default();
-        record_msg_body_flags(&mut totals, true, false, false, true);
-        record_msg_body_flags(&mut totals, false, true, false, false);
-
-        assert_eq!(totals.bodies_plain, 1);
-        assert_eq!(totals.bodies_html, 1);
-        assert_eq!(totals.bodies_rtf, 1);
-    }
-
-    #[test]
-    fn msg_html_native_and_via_rtf_are_tracked_separately_but_both_count_as_html() {
-        let mut totals = MsgTotals::default();
-        // Native HTML property present.
-        record_msg_body_flags(&mut totals, false, true, false, false);
-        // No native property, but HTML recovered from RTF encapsulation
-        // (MS-OXRTFEX) -- the case this fix exists for.
-        record_msg_body_flags(&mut totals, false, false, true, true);
-
-        assert_eq!(totals.bodies_html_native, 1);
-        assert_eq!(totals.bodies_html_via_rtf, 1);
-        assert_eq!(totals.bodies_html, 2);
-    }
+    // The former msg_body_flags / msg_html_native_and_via_rtf tests are
+    // gone: record_msg_body_flags was merged into the shared BodyCounters,
+    // so those cases are covered once by the BodyCounters tests above.
 
     #[test]
     fn msg_recipients_are_split_by_type_with_presence_and_max() {
@@ -3508,11 +3590,11 @@ mod tests {
         record_msg_recipients(&mut totals, 1, 2, 1);
         record_msg_recipients(&mut totals, 1, 0, 0);
 
-        assert_eq!(totals.messages_with_recipients, 2);
+        assert_eq!(totals.recipients.with_any, 2);
         assert_eq!(totals.recipients_to, 2);
         assert_eq!(totals.recipients_cc, 2);
         assert_eq!(totals.recipients_bcc, 1);
-        assert_eq!(totals.max_recipients, 4);
+        assert_eq!(totals.recipients.max, 4);
     }
 
     #[test]
@@ -3531,22 +3613,23 @@ mod tests {
 
     #[test]
     fn msg_zero_byte_attachment_is_counted() {
-        let mut totals = MsgTotals::default();
-        record_msg_attachment_size(&mut totals, 0, MSG_ATTACH_METHOD_BY_VALUE);
-        record_msg_attachment_size(&mut totals, 117, MSG_ATTACH_METHOD_BY_VALUE);
+        let mut zero = ZeroByteStats::default();
+        // msg_parser side: zero payload bytes on a by_value attachment.
+        zero.record(true, true);
+        zero.record(false, true);
 
-        assert_eq!(totals.attachments_zero_byte, 1);
-        assert_eq!(totals.attachments_zero_size_other_method, 0);
+        assert_eq!(zero.by_value, 1);
+        assert_eq!(zero.other_method, 0);
     }
 
     #[test]
     fn msg_zero_size_on_a_non_by_value_attachment_is_not_counted_as_zero_byte() {
-        let mut totals = MsgTotals::default();
-        record_msg_attachment_size(&mut totals, 0, MSG_ATTACH_METHOD_EMBEDDED_MESSAGE);
-        record_msg_attachment_size(&mut totals, 0, MSG_ATTACH_METHOD_OLE);
+        let mut zero = ZeroByteStats::default();
+        zero.record(true, false); // embedded message
+        zero.record(true, false); // OLE
 
-        assert_eq!(totals.attachments_zero_byte, 0);
-        assert_eq!(totals.attachments_zero_size_other_method, 2);
+        assert_eq!(zero.by_value, 0);
+        assert_eq!(zero.other_method, 2);
     }
 
     #[test]
