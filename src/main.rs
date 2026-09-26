@@ -2020,6 +2020,10 @@ struct BodyFlags {
     /// case -- too short to be valid MS-OXRTFCP, or the crate itself
     /// returned an error.
     decompression_failed: bool,
+    /// Byte length of the successfully-decompressed RTF, if decompression
+    /// ran at all. `None` when there's no RTF or decompression failed --
+    /// distinct from `Some(0)`, an empty-but-valid result.
+    decompressed_rtf_len: Option<u64>,
 }
 
 /// Reads PidTagBody, PidTagBodyHtml, and PidTagRtfCompressed directly by
@@ -2052,6 +2056,7 @@ fn extract_body_flags(comp: &mut cfb::CompoundFile<std::fs::File>) -> BodyFlags 
     let has_rtf = rtf_bytes.is_some();
 
     let mut decompression_failed = false;
+    let mut decompressed_rtf_len = None;
     let has_html_via_rtf = if has_html_native {
         false
     } else if let Some(compressed) = &rtf_bytes {
@@ -2060,7 +2065,10 @@ fn extract_body_flags(comp: &mut cfb::CompoundFile<std::fs::File>) -> BodyFlags 
             false
         } else {
             match compressed_rtf::decompress_rtf(compressed) {
-                Ok(rtf) => rtf_bytes_contain_fromhtml(rtf.as_bytes()),
+                Ok(rtf) => {
+                    decompressed_rtf_len = Some(rtf.as_bytes().len() as u64);
+                    rtf_bytes_contain_fromhtml(rtf.as_bytes())
+                }
                 Err(_) => {
                     decompression_failed = true;
                     false
@@ -2077,6 +2085,7 @@ fn extract_body_flags(comp: &mut cfb::CompoundFile<std::fs::File>) -> BodyFlags 
         has_html_via_rtf,
         has_rtf,
         decompression_failed,
+        decompressed_rtf_len,
     }
 }
 
@@ -3041,6 +3050,7 @@ struct MsgVerifyTotals {
     attachments_other: CountTally,
     attachments_with_content_id: CountTally,
     attachment_unresolved_total: u64,
+    rtf_decompressed_bytes: CountTally,
 }
 
 /// M3e differential verification: runs both the custom extraction path
@@ -3111,6 +3121,12 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
         if custom_body.decompression_failed {
             totals.custom_rtf_decompression_errors += 1;
         }
+
+        let mp_rtf_decompressed_len = outlook.rtf_decompressed().map(|bytes| bytes.len() as u64);
+        totals.rtf_decompressed_bytes.record(compare_count(
+            mp_rtf_decompressed_len.unwrap_or(0),
+            custom_body.decompressed_rtf_len.unwrap_or(0),
+        ));
 
         totals
             .body_plain
@@ -3243,6 +3259,7 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
         "attachment_unresolved_total={}",
         totals.attachment_unresolved_total
     );
+    print_count_tally("rtf_decompressed_bytes", &totals.rtf_decompressed_bytes);
 
     Ok(())
 }
