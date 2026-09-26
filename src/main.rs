@@ -2066,7 +2066,7 @@ fn extract_body_flags(comp: &mut cfb::CompoundFile<std::fs::File>) -> BodyFlags 
         } else {
             match compressed_rtf::decompress_rtf(compressed) {
                 Ok(rtf) => {
-                    decompressed_rtf_len = Some(rtf.as_bytes().len() as u64);
+                    decompressed_rtf_len = Some(rtf.len() as u64);
                     rtf_bytes_contain_fromhtml(rtf.as_bytes())
                 }
                 Err(_) => {
