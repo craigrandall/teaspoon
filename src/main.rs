@@ -2174,6 +2174,83 @@ fn extract_attachment_count(comp: &cfb::CompoundFile<std::fs::File>) -> u64 {
         .count() as u64
 }
 
+#[derive(Default)]
+struct AttachmentMethodCounts {
+    by_value: u64,
+    embedded_message: u64,
+    ole: u64,
+    other: u64,
+    with_content_id: u64,
+    /// An attachment storage whose PidTagAttachMethod couldn't be read at
+    /// all (missing properties stream, or no 0x3705 entry in it).
+    /// `msg_parser` has no equivalent bucket -- it always reports some
+    /// method value -- so this is reported on its own, not folded into
+    /// `other`.
+    unresolved: u64,
+}
+
+/// Walks every top-level attachment storage and classifies it by its own
+/// `PidTagAttachMethod` (0x3705, PT_LONG), plus whether
+/// `PidTagAttachContentId` (0x3712) is present. Real content stays in
+/// memory only as counts by category -- never an attachment's name or
+/// bytes, which this function never reads at all.
+fn extract_attachment_method_counts(
+    comp: &mut cfb::CompoundFile<std::fs::File>,
+) -> AttachmentMethodCounts {
+    let mut counts = AttachmentMethodCounts::default();
+
+    let attachment_paths: Vec<PathBuf> = comp
+        .walk()
+        .filter(|e| {
+            e.path().parent() == Some(Path::new("/"))
+                && matches!(
+                    classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
+                    OxmsgEntryKind::AttachmentStorage
+                )
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    for attach_path in attachment_paths {
+        let properties_path = attach_path.join("__properties_version1.0");
+        let Some(bytes) = read_stream_bytes(comp, &properties_path) else {
+            counts.unresolved += 1;
+            continue;
+        };
+        let Some(decoded) = decode_properties_stream(&bytes, 8) else {
+            counts.unresolved += 1;
+            continue;
+        };
+
+        let mut method = None;
+        let mut has_content_id = false;
+        for entry in &decoded.entries {
+            if entry.property_id == PROP_ATTACH_METHOD && entry.property_type == 0x0003 {
+                if let Some(DecodedFixedValue::Long(value)) =
+                    decode_fixed_value(entry.property_type, &entry.tail)
+                {
+                    method = Some(value);
+                }
+            } else if entry.property_id == PROP_ATTACH_CONTENT_ID {
+                has_content_id = true;
+            }
+        }
+
+        match method {
+            Some(1) => counts.by_value += 1,
+            Some(5) => counts.embedded_message += 1,
+            Some(6) => counts.ole += 1,
+            Some(_) => counts.other += 1,
+            None => counts.unresolved += 1,
+        }
+        if has_content_id {
+            counts.with_content_id += 1;
+        }
+    }
+
+    counts
+}
+
 fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
     println!("inventory=privacy_safe");
     println!("input_kind=msg_oxmsg");
@@ -2958,6 +3035,12 @@ struct MsgVerifyTotals {
     recipient_other_type_total: u64,
     recipient_unresolved_total: u64,
     attachments_total: CountTally,
+    attachments_by_value: CountTally,
+    attachments_embedded_message: CountTally,
+    attachments_ole: CountTally,
+    attachments_other: CountTally,
+    attachments_with_content_id: CountTally,
+    attachment_unresolved_total: u64,
 }
 
 /// M3e differential verification: runs both the custom extraction path
@@ -3063,6 +3146,43 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
             outlook.attachments.len() as u64,
             extract_attachment_count(&comp),
         ));
+
+        let mut mp_by_value = 0u64;
+        let mut mp_embedded_message = 0u64;
+        let mut mp_ole = 0u64;
+        let mut mp_other = 0u64;
+        let mut mp_with_content_id = 0u64;
+        for attach in &outlook.attachments {
+            match attach.attach_method {
+                MSG_ATTACH_METHOD_BY_VALUE => mp_by_value += 1,
+                MSG_ATTACH_METHOD_EMBEDDED_MESSAGE => mp_embedded_message += 1,
+                MSG_ATTACH_METHOD_OLE => mp_ole += 1,
+                _ => mp_other += 1,
+            }
+            if !attach.content_id.is_empty() {
+                mp_with_content_id += 1;
+            }
+        }
+
+        let attachment_methods = extract_attachment_method_counts(&mut comp);
+        totals
+            .attachments_by_value
+            .record(compare_count(mp_by_value, attachment_methods.by_value));
+        totals.attachments_embedded_message.record(compare_count(
+            mp_embedded_message,
+            attachment_methods.embedded_message,
+        ));
+        totals
+            .attachments_ole
+            .record(compare_count(mp_ole, attachment_methods.ole));
+        totals
+            .attachments_other
+            .record(compare_count(mp_other, attachment_methods.other));
+        totals.attachments_with_content_id.record(compare_count(
+            mp_with_content_id,
+            attachment_methods.with_content_id,
+        ));
+        totals.attachment_unresolved_total += attachment_methods.unresolved;
     }
 
     println!("open_errors_msg_parser={}", totals.open_errors_msg_parser);
@@ -3108,6 +3228,21 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
         totals.recipient_unresolved_total
     );
     print_count_tally("attachments_total", &totals.attachments_total);
+    print_count_tally("attachments_by_value", &totals.attachments_by_value);
+    print_count_tally(
+        "attachments_embedded_message",
+        &totals.attachments_embedded_message,
+    );
+    print_count_tally("attachments_ole", &totals.attachments_ole);
+    print_count_tally("attachments_other", &totals.attachments_other);
+    print_count_tally(
+        "attachments_with_content_id",
+        &totals.attachments_with_content_id,
+    );
+    println!(
+        "attachment_unresolved_total={}",
+        totals.attachment_unresolved_total
+    );
 
     Ok(())
 }
