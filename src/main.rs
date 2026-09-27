@@ -2260,6 +2260,19 @@ fn extract_attachment_method_counts(
     counts
 }
 
+/// Attempts to read the one embedded message's own PidTagMessageClass
+/// directly via CFB -- the custom path's answer to whether an embedded
+/// message can be opened at all, the question M2c left unresolved for
+/// `msg_parser`. Reuses `message_shaped_parent_paths` (M2.x) to find the
+/// embedded storage; never prints the class itself, only whether reading
+/// it succeeded.
+fn extract_embedded_message_class(comp: &mut cfb::CompoundFile<std::fs::File>) -> Option<String> {
+    let embedded_path = message_shaped_parent_paths(&*comp).into_iter().next()?;
+    let class_path = embedded_path.join("__substg1.0_001A001F");
+    let bytes = read_stream_bytes(comp, &class_path)?;
+    decode_unicode_value(&bytes).ok()
+}
+
 fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
     println!("inventory=privacy_safe");
     println!("input_kind=msg_oxmsg");
@@ -3051,6 +3064,14 @@ struct MsgVerifyTotals {
     attachments_with_content_id: CountTally,
     attachment_unresolved_total: u64,
     rtf_decompressed_bytes: CountTally,
+    /// Byte deltas (custom minus msg_parser) for the rare case where
+    /// decompressed RTF length disagrees -- not content, just a size
+    /// difference, kept to confirm the magnitude matches what a narrow
+    /// dictionary-region divergence would produce rather than something
+    /// larger and less explicable.
+    rtf_decompressed_byte_mismatch_deltas: Vec<i64>,
+    embedded_message_class_readable_total: u64,
+    embedded_message_class_unreadable_total: u64,
 }
 
 /// M3e differential verification: runs both the custom extraction path
@@ -3123,10 +3144,16 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
         }
 
         let mp_rtf_decompressed_len = outlook.rtf_decompressed().map(|bytes| bytes.len() as u64);
-        totals.rtf_decompressed_bytes.record(compare_count(
-            mp_rtf_decompressed_len.unwrap_or(0),
-            custom_body.decompressed_rtf_len.unwrap_or(0),
-        ));
+        let mp_len = mp_rtf_decompressed_len.unwrap_or(0);
+        let custom_len = custom_body.decompressed_rtf_len.unwrap_or(0);
+        totals
+            .rtf_decompressed_bytes
+            .record(compare_count(mp_len, custom_len));
+        if mp_len != custom_len {
+            totals
+                .rtf_decompressed_byte_mismatch_deltas
+                .push(custom_len as i64 - mp_len as i64);
+        }
 
         totals
             .body_plain
@@ -3199,6 +3226,13 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
             attachment_methods.with_content_id,
         ));
         totals.attachment_unresolved_total += attachment_methods.unresolved;
+
+        if attachment_methods.embedded_message > 0 {
+            match extract_embedded_message_class(&mut comp) {
+                Some(_) => totals.embedded_message_class_readable_total += 1,
+                None => totals.embedded_message_class_unreadable_total += 1,
+            }
+        }
     }
 
     println!("open_errors_msg_parser={}", totals.open_errors_msg_parser);
@@ -3260,6 +3294,17 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
         totals.attachment_unresolved_total
     );
     print_count_tally("rtf_decompressed_bytes", &totals.rtf_decompressed_bytes);
+    for delta in &totals.rtf_decompressed_byte_mismatch_deltas {
+        println!("rtf_decompressed_bytes_mismatch_delta={delta}");
+    }
+    println!(
+        "embedded_message_class_readable_total={}",
+        totals.embedded_message_class_readable_total
+    );
+    println!(
+        "embedded_message_class_unreadable_total={}",
+        totals.embedded_message_class_unreadable_total
+    );
 
     Ok(())
 }
