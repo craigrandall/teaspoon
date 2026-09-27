@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+type CompoundFile = cfb::CompoundFile<std::fs::File>;
+
 use msg_parser::Outlook;
 use outlook_pst::{
     ltp::{
@@ -13,6 +15,10 @@ use outlook_pst::{
     messaging::{folder::Folder as PstFolder, message::Message as PstMessage, store::Store},
     ndb::node_id::NodeId,
 };
+
+// =============================================================================
+// CLI and input classification
+// =============================================================================
 
 #[derive(Debug, Parser)]
 #[command(
@@ -25,26 +31,23 @@ struct Args {
 
     /// Use the experimental custom MS-OXMSG parser (raw CFB structural
     /// enumeration via the `cfb` crate) instead of `msg_parser` for .msg
-    /// input. PST input is unaffected. This is a P1/P2-equivalent spike:
-    /// it proves the container opens and enumerates its structure, and
-    /// does not yet decode any property value.
+    /// input. PST input is unaffected. A structural spike: proves the
+    /// container opens and enumerates, without decoding property values.
     #[arg(long)]
     oxmsg: bool,
 
     /// Compare the custom MS-OXMSG extraction path against `msg_parser`
-    /// for the same .msg input (M3e differential verification). Reads
-    /// real property content internally to do the comparison, but prints
-    /// only match/mismatch counts -- never the values compared. Takes
-    /// precedence over --oxmsg and --extract if both are given. PST input
-    /// is unaffected.
+    /// for the same .msg input. Reads real property content internally to
+    /// do the comparison, but prints only match/mismatch counts -- never
+    /// the values compared. Takes precedence over --oxmsg and --extract.
+    /// PST input is unaffected.
     #[arg(long)]
     verify: bool,
 
     /// Run the custom MS-OXMSG extraction path alone (no `msg_parser`) and
-    /// print the same report shape as the default .msg diagnostic (M3f).
-    /// One known gap: zero-byte-attachment detection isn't populated yet.
-    /// Takes precedence over --oxmsg if both are given. PST input is
-    /// unaffected.
+    /// print the same report shape as the default .msg diagnostic. One
+    /// known gap: zero-byte-attachment detection isn't populated yet.
+    /// Takes precedence over --oxmsg. PST input is unaffected.
     #[arg(long)]
     extract: bool,
 }
@@ -56,17 +59,15 @@ enum InputKind {
         /// Subdirectories found directly inside the scanned directory but
         /// not descended into (the scan is deliberately non-recursive).
         /// Surfaced in diagnostic output so this scoping choice is visible
-        /// to whoever reads the output, not just to whoever reads the
-        /// source -- a silent gap here would be the same kind of loss of
-        /// transparency the zero-byte/HTML fixes exist to avoid.
+        /// in the output, not just in the source.
         subdirectories_skipped: u64,
     },
 }
 
 /// Classifies the input by extension (or, for a directory, by scanning for
 /// `.msg` files directly inside it -- not recursive). Never includes the
-/// input path itself in any error message, consistent with the rest of
-/// this tool's privacy-safe diagnostic output.
+/// input path itself in any error message: paths can disclose information
+/// about the user or their mailbox.
 fn classify_input(path: &Path) -> Result<InputKind> {
     if path.is_dir() {
         let mut files = Vec::new();
@@ -142,45 +143,71 @@ fn main() -> Result<()> {
 // =============================================================================
 // Shared: MS-OXRTFEX "RTF containing encapsulated HTML" detection
 // =============================================================================
+//
+// Both the PST and MSG paths must apply identically strict detection rather
+// than two signals that can silently drift apart. Neither the `msg_parser`
+// nor `outlook_pst` convenience "give me HTML" method gates on this control
+// word (proven against `RTF_message.msg`, a genuinely RTF-authored fixture),
+// so both diagnostics check for the literal control word in the decompressed
+// RTF bytes directly. See README "Change history" for the full narrative.
 
 /// The MS-OXRTFEX control word a de-encapsulating reader uses to recognize
 /// RTF containing encapsulated HTML. Per that specification, a reader
-/// finding this control word "SHOULD conclude the RTF document contains
-/// encapsulated HTML and stop further inspection" -- its presence alone is
+/// finding this control word SHOULD conclude the RTF document contains
+/// encapsulated HTML and stop further inspection -- its presence alone is
 /// the specification-sanctioned signal, not a heuristic.
-///
-/// Shared by both the PST and MSG diagnostics so they apply identically
-/// strict detection, rather than two different signals that can silently
-/// drift apart -- which is exactly what happened here: the MSG side
-/// originally (2026-09-07) trusted `msg_parser::Outlook::html_from_rtf()`'s
-/// mere non-emptiness as "HTML was found," without confirming that method
-/// itself gates on this control word. It turned out not to: tested against
-/// `RTF_message.msg` (confirmed, via Outlook's own View Source feature, to
-/// be genuinely RTF-authored content -- its HTML view carries an explicit
-/// `<!-- Converted from text/rtf format -->` comment and an
-/// `MS Exchange Server` generator tag, meaning Exchange generated that HTML
-/// at render time for display, which is an unrelated mechanism from
-/// MS-OXRTFEX encapsulation), `html_from_rtf()` still returned non-empty
-/// content (2026-09-13). Both diagnostics now check for this literal
-/// control word directly against decompressed RTF bytes instead of
-/// trusting either crate's own higher-level "give me HTML" convenience
-/// method.
 const FROMHTML_MARKER: &[u8] = b"\\fromhtml1";
 
 /// Returns whether decompressed RTF bytes contain the FROMHTML control
 /// word. A plain byte search, not a UTF-8/String conversion: RTF is an
 /// ASCII-based control-word format (non-ASCII text is escaped as `\'XX`
-/// hex sequences), so searching raw bytes avoids any encoding-conversion
-/// question entirely.
+/// hex sequences), so searching raw bytes avoids encoding questions.
 fn rtf_bytes_contain_fromhtml(rtf_bytes: &[u8]) -> bool {
     rtf_bytes
         .windows(FROMHTML_MARKER.len())
         .any(|window| window == FROMHTML_MARKER)
 }
 
+/// The result of checking compressed RTF bytes for MS-OXRTFEX HTML
+/// encapsulation. Distinct variants (rather than a single bool) keep the
+/// common unremarkable cases separate from genuine anomalies, consistent
+/// with the project's no-silent-loss principle.
+enum RtfHtmlCheck {
+    NoRtfProperty,
+    NotBinary,
+    DecompressionFailed,
+    Decompressed {
+        contains_fromhtml: bool,
+        decompressed_bytes: usize,
+    },
+}
+
+/// Checks raw `PidTagRtfCompressed` bytes for MS-OXRTFEX HTML
+/// encapsulation (see [`FROMHTML_MARKER`]). Decompression uses
+/// `compressed-rtf` (MS-OXRTFCP); its magic numbers and dictionary were
+/// independently cross-checked against `msg_parser`'s own implementation
+/// and match. Never returns or exposes the actual RTF or HTML content.
+///
+/// `compressed_rtf::decompress_rtf` unconditionally indexes the first 16
+/// bytes of its input (its MS-OXRTFCP header read) and panics rather than
+/// erroring if given fewer -- confirmed by reading the crate's source, not
+/// assumed. The length guard keeps truncated or corrupt data from
+/// crashing tsp.
+fn check_compressed_rtf_bytes(compressed: &[u8]) -> RtfHtmlCheck {
+    if compressed.len() < 16 {
+        return RtfHtmlCheck::DecompressionFailed;
+    }
+    match compressed_rtf::decompress_rtf(compressed) {
+        Ok(rtf) => RtfHtmlCheck::Decompressed {
+            contains_fromhtml: rtf_bytes_contain_fromhtml(rtf.as_bytes()),
+            decompressed_bytes: rtf.len(),
+        },
+        Err(_) => RtfHtmlCheck::DecompressionFailed,
+    }
+}
+
 // =============================================================================
-// Shared: MAPI property vocabulary used by the PST, MSG, and custom-OXMSG
-// paths alike (previously buried inside the PST section)
+// Shared: MAPI property vocabulary (PST, MSG, and custom-OXMSG paths alike)
 // =============================================================================
 
 /// MS-OXPROPS property identifiers used only to check *presence* or read a
@@ -212,22 +239,29 @@ const ATTACH_METHOD_OLE: i32 = 6;
 // =============================================================================
 // Shared: presence/availability counters used by both the PST and MSG
 // diagnostics
-// =============================================================================
 //
-// These replace four near-identical pairs of functions -- one per format
-// adapter -- that could silently drift apart, the same failure mode the
-// shared FROMHTML check above exists to prevent:
-//   record_body_flags          / record_msg_body_flags
-//   record_recipients          / record_msg_attachments (with/total/max)
-//   record_attachment_size     / record_msg_attachment_size
-// Both diagnostics now count through the same code. Only the bucketing
-// that genuinely differs between the adapters (PST reads
-// PidTagRecipientType / PidTagAttachMethod as table columns; msg_parser
-// exposes its own vocabulary) remains format-specific.
+// Both diagnostics count through the same code so the format adapters
+// cannot silently drift apart. Only the bucketing that genuinely differs
+// (PST reads PidTagRecipientType / PidTagAttachMethod as table columns;
+// msg_parser exposes its own vocabulary) remains format-specific.
+// =============================================================================
 
 /// Body-*availability* counters shared by the PST and MSG diagnostics.
 /// All recording goes through [`BodyCounters::record`], which receives
 /// presence booleans only -- never actual body content.
+///
+/// Interpretation caveat: `plain` reflects only that `PidTagBody` exists,
+/// not that the message was *authored* in plain text. Outlook commonly
+/// populates a plain-text compatibility mirror alongside an HTML- or
+/// RTF-authored body, so `plain` runs high even on mailboxes with little
+/// genuinely plain-text-only content (confirmed against this project's
+/// PST fixture).
+///
+/// `html_native` and `html_via_rtf` are tracked as distinct signals, never
+/// silently merged: many real messages have no native PidTagBodyHtml at
+/// all -- Outlook encapsulates the HTML inside PidTagRtfCompressed per
+/// MS-OXRTFEX, detectable via the FROMHTML control word. A single merged
+/// `html` counter alone would have undercounted real HTML content.
 #[derive(Default)]
 struct BodyCounters {
     plain: u64,
@@ -238,35 +272,14 @@ struct BodyCounters {
     rtf_decompression_errors: u64,
     /// Sum of decompressed-RTF byte lengths across every message where
     /// decompression succeeded (regardless of whether the FROMHTML marker
-    /// was found). Never the content itself -- a size-only diagnostic
-    /// (added 2026-09-14) so the PST and MSG sides can be compared against
-    /// each other when they disagree on the same underlying message,
-    /// without ever printing or comparing content.
+    /// was found) -- a size-only diagnostic so the PST and MSG sides can be
+    /// compared without ever printing content.
     rtf_decompressed_bytes_total: u64,
 }
 
 impl BodyCounters {
     /// Records body-*availability* only. Never receives or touches actual
-    /// body content -- callers must pass presence booleans, not the
-    /// property values.
-    ///
-    /// Interpretation caveat: `has_plain` reflects only that `PidTagBody`
-    /// exists (MSG side: that `outlook.body` is non-empty), not that the
-    /// message was *authored* in plain text. Outlook commonly populates a
-    /// plain-text compatibility mirror alongside an HTML- or RTF-authored
-    /// body regardless of how the message was actually composed, so
-    /// `plain` is expected to run high even on a mailbox with little
-    /// genuinely plain-text-only content. (Confirmed 2026-09-13 as a real,
-    /// not just inferred, characteristic of this project's PST fixture.)
-    ///
-    /// `has_html_native` and `has_html_via_rtf` are tracked as distinct
-    /// signals, never silently merged, mirroring the MSG-side fix
-    /// (2026-09-07, corrected 2026-09-13) and the confirmed finding
-    /// (2026-09-13) that many real messages have no native
-    /// PidTagBodyHtml property at all -- Outlook instead encapsulates the
-    /// HTML inside PidTagRtfCompressed per MS-OXRTFEX, detectable via the
-    /// FROMHTML control word (see [`FROMHTML_MARKER`]). A single
-    /// `html` counter alone would have undercounted real HTML content.
+    /// body content -- callers must pass presence booleans.
     fn record(
         &mut self,
         has_plain: bool,
@@ -300,7 +313,7 @@ impl BodyCounters {
     }
 }
 
-/// The messages-with-any / total / max-on-a-message triple, shared by the
+/// The messages-with-any / total / max-on-a-message triple, shared by
 /// recipient and attachment counting on both the PST and MSG sides.
 #[derive(Default)]
 struct CountStats {
@@ -326,11 +339,9 @@ impl CountStats {
 /// `by_value`. For every other method (embedded message, OLE,
 /// by-reference), the attachment's real content lives outside that
 /// property entirely, so a zero reading there is expected and structural,
-/// not evidence of an empty file. Those are tracked as a separate counter
-/// rather than silently merged, which would have repeated the same
-/// silent-conflation mistake the HTML detection fix (2026-09-07)
-/// corrected on the MSG side. A missing or unreadable size (PST `None`)
-/// is not counted as zero-byte either way.
+/// not evidence of an empty file -- tracked separately rather than
+/// silently merged into `attachments_zero_byte`. A missing or unreadable
+/// size is not counted as zero-byte either way.
 #[derive(Default)]
 struct ZeroByteStats {
     by_value: u64,
@@ -354,8 +365,7 @@ impl ZeroByteStats {
 }
 
 // =============================================================================
-// PST diagnostic (M1, unchanged in behavior from v0.1.4.3 except body-flag
-// detection, corrected 2026-09-13)
+// PST diagnostic (M1)
 // =============================================================================
 
 fn run_pst_diagnostic(path: &Path) -> Result<()> {
@@ -383,11 +393,10 @@ fn run_pst_diagnostic(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Prints the PST inventory report. Split out of `run_pst_diagnostic` so
-/// the walk logic and the report format each read at one level of
-/// abstraction. Every key printed here is part of the tool's stable,
-/// privacy-safe output vocabulary -- groupings and order aside, the keys
-/// are unchanged from previous versions.
+/// Prints the PST inventory report, separated from the walk logic so each
+/// reads at one level of abstraction (SLAP). Every key printed here is
+/// part of the tool's stable, privacy-safe output vocabulary -- keys are
+/// unchanged from previous versions.
 fn print_pst_report(totals: &PstTotals) {
     println!("inventory=privacy_safe");
     println!("input_kind=pst");
@@ -398,7 +407,7 @@ fn print_pst_report(totals: &PstTotals) {
     println!("folder_open_errors={}", totals.folder_open_errors);
     println!("property_values={}", totals.property_values);
 
-    // --- P4a: message class / body-type availability -----------------------
+    // --- message class / body-type availability ------------------------------
     println!(
         "message_class_read_errors={}",
         totals.message_class_read_errors
@@ -421,7 +430,7 @@ fn print_pst_report(totals: &PstTotals) {
         totals.bodies.rtf_decompressed_bytes_total
     );
 
-    // --- P4a: recipient / attachment aggregate counts -----------------------
+    // --- recipient / attachment aggregate counts ----------------------------
     println!("messages_with_recipients={}", totals.recipients.with_any);
     println!("total_recipients={}", totals.recipients.total);
     println!("max_recipients_on_a_message={}", totals.recipients.max);
@@ -430,7 +439,7 @@ fn print_pst_report(totals: &PstTotals) {
     println!("total_attachments={}", totals.attachments.total);
     println!("max_attachments_on_a_message={}", totals.attachments.max);
 
-    // --- P4b: recipient type breakdown --------------------------------------
+    // --- recipient type breakdown -------------------------------------------
     println!(
         "recipient_row_read_errors={}",
         totals.recipient_row_read_errors
@@ -442,7 +451,7 @@ fn print_pst_report(totals: &PstTotals) {
     println!("recipients_type_other={}", totals.recipients_type_other);
     println!("recipients_type_unknown={}", totals.recipients_type_unknown);
 
-    // --- P4b: attachment classification -------------------------------------
+    // --- attachment classification --------------------------------------------
     println!(
         "attachment_row_read_errors={}",
         totals.attachment_row_read_errors
@@ -493,8 +502,8 @@ fn print_pst_report(totals: &PstTotals) {
 
 /// Aggregated PST inventory. Body availability, recipient/attachment
 /// presence/total/max, and zero-size bookkeeping all go through the
-/// shared counter types defined above; only the PST-specific type buckets
-/// remain direct fields here.
+/// shared counter types; only the PST-specific buckets remain direct
+/// fields here.
 #[derive(Default)]
 struct PstTotals {
     folders: u64,
@@ -503,7 +512,6 @@ struct PstTotals {
     folder_open_errors: u64,
     property_values: u64,
 
-    // P4a.
     message_classes: BTreeMap<String, u64>,
     message_class_read_errors: u64,
 
@@ -511,7 +519,7 @@ struct PstTotals {
     recipients: CountStats,
     attachments: CountStats,
 
-    // P4b: recipient type breakdown.
+    // Recipient type breakdown.
     recipient_row_read_errors: u64,
     recipients_orig: u64,
     recipients_to: u64,
@@ -520,7 +528,7 @@ struct PstTotals {
     recipients_type_other: u64,
     recipients_type_unknown: u64,
 
-    // P4b: attachment classification.
+    // Attachment classification.
     attachment_row_read_errors: u64,
     zero_byte_attachments: ZeroByteStats,
     attachments_with_content_id: u64,
@@ -590,15 +598,11 @@ fn inspect_message(message: &dyn PstMessage, totals: &mut PstTotals) {
 
     record_message_class(totals, properties.message_class());
 
-    // HTML detection has two layers, exactly mirroring the MSG-side fix
-    // (2026-09-07, corrected 2026-09-13) and the confirmed finding
-    // (2026-09-13) that this dependency has the identical blind spot:
-    // many real messages have no native PidTagBodyHtml property at all --
-    // Outlook instead encapsulates the HTML inside PidTagRtfCompressed per
-    // MS-OXRTFEX, detectable via the FROMHTML control word (see
-    // [`FROMHTML_MARKER`]). This is a presence-only check: tsp never needs
-    // the extracted HTML/RTF content itself, only whether this marker
-    // exists, so no RTF-to-HTML conversion is implemented here.
+    // HTML detection has two layers, mirroring the MSG side: many real
+    // messages have no native PidTagBodyHtml at all -- Outlook instead
+    // encapsulates the HTML inside PidTagRtfCompressed per MS-OXRTFEX,
+    // detectable via the FROMHTML control word. Presence-only check: tsp
+    // never needs the extracted HTML/RTF content itself.
     let has_html_native = properties.get(PROP_BODY_HTML).is_some();
     let has_rtf = properties.get(PROP_RTF_COMPRESSED).is_some();
     let has_html_via_rtf = if has_html_native {
@@ -631,37 +635,10 @@ fn inspect_message(message: &dyn PstMessage, totals: &mut PstTotals) {
     inspect_attachments(message, totals);
 }
 
-/// The result of checking `PidTagRtfCompressed` for MS-OXRTFEX HTML
-/// encapsulation. Kept as distinct variants rather than a single bool so
-/// "no RTF property at all" (the common, unremarkable case) is never
-/// conflated with "RTF was present but failed to decompress" (a genuine
-/// anomaly worth its own counter), consistent with this project's
-/// no-silent-loss principle.
-enum RtfHtmlCheck {
-    NoRtfProperty,
-    NotBinary,
-    DecompressionFailed,
-    Decompressed {
-        contains_fromhtml: bool,
-        decompressed_bytes: usize,
-    },
-}
-
-/// Checks whether `PidTagRtfCompressed`, if present, contains HTML content
-/// encapsulated per MS-OXRTFEX (see [`FROMHTML_MARKER`] for why presence of
-/// that one control word is the correct signal). Decompression uses
-/// `compressed-rtf` (MS-OXRTFCP), maintained by the same author as
-/// `outlook-pst`; its magic numbers and dictionary were independently
-/// cross-checked against `msg_parser`'s own from-scratch implementation of
-/// the same algorithm and match exactly. Never returns or exposes the
-/// actual RTF or HTML content -- only whether this one marker is present.
-///
-/// `compressed_rtf::decompress_rtf` indexes into the first 16 bytes of its
-/// input unconditionally as part of its own MS-OXRTFCP header read, and
-/// panics rather than erroring if given fewer -- confirmed by reading the
-/// crate's actual source rather than assumed from its signature. This
-/// function guards that case explicitly so a truncated or corrupt
-/// `PidTagRtfCompressed` value cannot crash `tsp`.
+/// PST-side wrapper around [`check_compressed_rtf_bytes`]: extracts the
+/// binary buffer from a `PidTagRtfCompressed` property value, keeping the
+/// "no property at all" and "present but not binary" cases distinct from
+/// genuine decompression failures. Never exposes RTF/HTML content.
 fn check_rtf_for_encapsulated_html(rtf_property: Option<&PropertyValue>) -> RtfHtmlCheck {
     let Some(value) = rtf_property else {
         return RtfHtmlCheck::NoRtfProperty;
@@ -669,28 +646,13 @@ fn check_rtf_for_encapsulated_html(rtf_property: Option<&PropertyValue>) -> RtfH
     let PropertyValue::Binary(binary) = value else {
         return RtfHtmlCheck::NotBinary;
     };
-    let buffer = binary.buffer();
-    // `compressed_rtf::decompress_rtf` indexes into the first 16 bytes of
-    // its input unconditionally (its own MS-OXRTFCP header read) and
-    // panics if given fewer -- confirmed by reading the crate's actual
-    // source, not assumed from its signature. Guarded here rather than
-    // letting a truncated or corrupt property crash tsp outright.
-    if buffer.len() < 16 {
-        return RtfHtmlCheck::DecompressionFailed;
-    }
-    match compressed_rtf::decompress_rtf(buffer) {
-        Ok(rtf) => RtfHtmlCheck::Decompressed {
-            contains_fromhtml: rtf_bytes_contain_fromhtml(rtf.as_bytes()),
-            decompressed_bytes: rtf.len(),
-        },
-        Err(_) => RtfHtmlCheck::DecompressionFailed,
-    }
+    check_compressed_rtf_bytes(binary.buffer())
 }
 
 /// Records a message-class observation. `class` is `Err` when the message
-/// has no readable `PidTagMessageClass` property; that is counted separately
-/// rather than silently dropped, consistent with the project's no-silent-loss
-/// principle (ADR: loss-aware-normalized-representation).
+/// has no readable `PidTagMessageClass` property; that is counted
+/// separately rather than silently dropped, consistent with the project's
+/// no-silent-loss principle.
 fn record_message_class(totals: &mut PstTotals, class: std::io::Result<String>) {
     match class {
         Ok(class) => *totals.message_classes.entry(class).or_insert(0) += 1,
@@ -699,7 +661,8 @@ fn record_message_class(totals: &mut PstTotals, class: std::io::Result<String>) 
 }
 
 /// Buckets a single recipient row by its `PidTagRecipientType` value.
-/// `None` means the property was missing or not a 32-bit integer on that row.
+/// `None` means the property was missing or not a 32-bit integer on that
+/// row.
 fn record_recipient_type(totals: &mut PstTotals, recipient_type: Option<i32>) {
     match recipient_type {
         Some(RECIPIENT_TYPE_ORIG) => totals.recipients_orig += 1,
@@ -712,7 +675,8 @@ fn record_recipient_type(totals: &mut PstTotals, recipient_type: Option<i32>) {
 }
 
 /// Buckets a single attachment row by its `PidTagAttachMethod` value.
-/// `None` means the property was missing or not a 32-bit integer on that row.
+/// `None` means the property was missing or not a 32-bit integer on that
+/// row.
 fn record_attachment_method(totals: &mut PstTotals, method: Option<i32>) {
     match method {
         Some(ATTACH_METHOD_NONE) => totals.attachments_method_none += 1,
@@ -729,27 +693,19 @@ fn record_attachment_method(totals: &mut PstTotals, method: Option<i32>) {
     }
 }
 
-/// Records whether an attachment row's `PidTagAttachSize` was exactly zero
-/// -- but only as a meaningful "empty file" signal when the attachment's
-/// method is `by_value`. For every other method (embedded message, OLE,
-/// by-reference), the attachment's real content lives outside this
-/// property entirely, so a zero reading there is expected and structural,
-/// not evidence of an empty file. These are tracked as a separate counter
-/// rather than silently merged into `attachments_zero_byte`, which would
-/// have repeated the same silent-conflation mistake the HTML detection fix
-/// (2026-09-07) corrected on the MSG side. `None` (property missing or
 /// Records presence (not content) of `PidTagAttachContentId`, a common but
 /// not definitive signal that an attachment is referenced inline (e.g. an
-/// inline image) rather than a standalone file attachment.
+/// inline image) rather than a standalone file attachment. Zero-size
+/// bookkeeping goes through the shared [`ZeroByteStats`] instead.
 fn record_attachment_content_id_presence(totals: &mut PstTotals, has_content_id: bool) {
     if has_content_id {
         totals.attachments_with_content_id += 1;
     }
 }
 
-/// Locates the index of a column by MAPI property ID within a table's column
-/// descriptors, so its value can be looked up per row via [`read_i32_at`] or
-/// a presence check.
+/// Locates the index of a column by MAPI property ID within a table's
+/// column descriptors, so its value can be looked up per row via
+/// [`read_i32_at`] or a presence check.
 fn column_index(context: &TableContextInfo, prop_id: u16) -> Option<usize> {
     context
         .columns()
@@ -757,19 +713,18 @@ fn column_index(context: &TableContextInfo, prop_id: u16) -> Option<usize> {
         .position(|c| c.prop_id() == prop_id)
 }
 
-/// Reads a single row's value at `column_idx` as a 32-bit integer, or `None`
-/// if the property is absent on this row, the column doesn't exist, or the
-/// value isn't a 32-bit integer. Never returns string/binary content.
+/// Reads a single row's value at `column_idx` as a 32-bit integer, or
+/// `None` if the property is absent on this row, the column doesn't exist,
+/// or the value isn't a 32-bit integer. Never returns string/binary
+/// content.
 ///
-/// Untested assumption: this always matches `PropertyValue::Integer32` for
-/// `PidTagRecipientType`, `PidTagAttachMethod`, and `PidTagAttachSize` on
-/// every PST this code has been run against so far -- every fixture
-/// message happened to store these as that type. A PST that stored one of
-/// these differently would fail the match arm below and silently fall
-/// through to `None` (bucketed as "unknown" by callers), rather than
-/// panicking or miscounting into the wrong bucket, so the failure mode is
-/// safe. But the assumption itself has never been falsified because it
-/// has never been tested against data that would break it.
+/// Untested assumption: `PidTagRecipientType`, `PidTagAttachMethod`, and
+/// `PidTagAttachSize` always arrive as `PropertyValue::Integer32` -- every
+/// fixture so far stored them that way. A PST storing one differently would
+/// fall through to `None` (bucketed as "unknown" by callers) rather than
+/// panicking or miscounting, so the failure mode is safe; the assumption
+/// itself has never been falsified because it has never been tested
+/// against data that would break it.
 fn read_i32_at(
     table: &dyn TableContext,
     context: &TableContextInfo,
@@ -855,7 +810,7 @@ fn inspect_attachments(message: &dyn PstMessage, totals: &mut PstTotals) {
 }
 
 // =============================================================================
-// MSG diagnostic (M2-P1/P2 equivalent; HTML detection corrected 2026-09-13)
+// MSG diagnostic (msg_parser adapter)
 // =============================================================================
 
 /// PidTagAttachMethod values as exposed by `msg_parser`'s `attach_method`
@@ -886,10 +841,8 @@ fn run_msg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<
     Ok(())
 }
 
-/// Prints the msg_parser-based MSG inventory report. Split out of
-/// `run_msg_diagnostic` (SLAP): the scan loop stays with the run
-/// function, the report format lives here. Keys are unchanged from
-/// previous versions.
+/// Prints the msg_parser-based MSG inventory report, separated from the
+/// scan loop (SLAP). Keys are unchanged from previous versions.
 fn print_msg_report(totals: &MsgTotals) {
     println!("open_errors={}", totals.open_errors);
 
@@ -949,8 +902,8 @@ fn print_msg_report(totals: &MsgTotals) {
 
     // The actual test of msg_parser's headline capability: does opening an
     // embedded-message attachment as a nested message really work against a
-    // real file, not just per the crate's documentation. One level deep only
-    // -- deeper recursion is explicitly deferred, not attempted here.
+    // real file, not just per the crate's documentation. One level deep
+    // only -- deeper recursion is explicitly deferred, not attempted here.
     println!(
         "embedded_messages_opened={}",
         totals.embedded_messages_opened
@@ -966,8 +919,8 @@ fn print_msg_report(totals: &MsgTotals) {
 
 /// Aggregated msg_parser-based MSG inventory. Body availability,
 /// recipient/attachment presence/total/max, and zero-size bookkeeping go
-/// through the shared counter types defined above; only the msg_parser
-/// vocabulary buckets remain direct fields here.
+/// through the shared counter types; only the msg_parser vocabulary
+/// buckets remain direct fields here.
 #[derive(Default)]
 struct MsgTotals {
     open_errors: u64,
@@ -998,19 +951,10 @@ struct MsgTotals {
 fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
     record_msg_class(totals, &outlook.message_class);
 
-    // HTML detection, corrected 2026-09-13: this used to trust
-    // `Outlook::html_from_rtf()`'s mere non-emptiness as "HTML was found."
-    // That was wrong -- proven wrong by `RTF_message.msg`, a message
-    // confirmed genuinely RTF-authored (via Outlook's own View Source
-    // feature showing an explicit "Converted from text/rtf format" /
-    // "MS Exchange Server" render-time conversion, not authored HTML) for
-    // which `html_from_rtf()` still returned non-empty content. It
-    // evidently does not gate on the FROMHTML control word the way the
-    // specification requires for a real detection signal. This now checks
-    // the decompressed RTF bytes directly for that control word, via the
-    // same shared check the PST side uses (see [`FROMHTML_MARKER`]),
-    // rather than trusting either crate's own higher-level convenience
-    // method.
+    // HTML detection mirrors the PST side: check the decompressed RTF
+    // bytes directly for the FROMHTML control word rather than trusting
+    // `Outlook::html_from_rtf()`, which does not gate on it (see README
+    // "Change history").
     let has_html_native = !outlook.html.is_empty();
     let has_rtf = !outlook.rtf_compressed.is_empty();
     let has_html_via_rtf = if has_html_native {
@@ -1085,10 +1029,8 @@ fn record_msg_class(totals: &mut MsgTotals, class: &str) {
 /// If a `.msg` file ever had an ORIG-classified recipient, there is
 /// currently no way to detect it through this crate's public API -- it
 /// would simply not be counted anywhere. This asymmetry with the PST-side
-/// diagnostic (which does track ORIG, currently always at zero) is
-/// accepted as a known limitation, not scheduled for a fix, since ORIG
-/// recipients are a rare edge case and no fixture evidence has shown one
-/// to even test against.
+/// diagnostic is accepted as a known limitation: ORIG recipients are a
+/// rare edge case and no fixture evidence has shown one to test against.
 fn record_msg_recipients(totals: &mut MsgTotals, to: u64, cc: u64, bcc: u64) {
     totals.recipients_to += to;
     totals.recipients_cc += cc;
@@ -1121,39 +1063,29 @@ fn record_embedded_message_class(totals: &mut MsgTotals, class: &str) {
 }
 
 // =============================================================================
-// Custom MS-OXMSG parser groundwork (experimental, opt-in via --oxmsg)
+// Custom MS-OXMSG parser: container naming conventions and entry
+// classification (experimental, opt-in via --oxmsg)
 // =============================================================================
 //
-// P1/P2-equivalent spike, mirroring the shape M1's PST spike started with:
-// prove a real .msg container opens via a generic, non-Outlook-specific CFB
-// (MS-CFB / Compound File Binary) reader, and enumerate its structure --
-// message class not yet decoded, no property value read, nothing beyond
-// presence/name/size. This exists because msg_parser has no raw/generic
-// property-iteration equivalent to outlook-pst's `.get(id)`/`.iter()`,
-// which is the one structural inconsistency remaining between teaspoon's
-// two format adapters (see the 2026-09-14 comparative analysis in project
-// correspondence). The `cfb` crate (crates.io, MIT) handles the generic
-// container-parsing layer; only the MS-OXMSG-specific naming convention
-// below is teaspoon's own.
-//
-// MS-OXMSG stores every message property as one of two things inside the
-// CFB container:
+// MS-OXMSG stores every message property inside a CFB (MS-CFB) container as
+// one of two things:
 // - fixed-length properties, packed together inside a single stream named
-//   `__properties_version1.0` (not yet decoded here -- its byte length is
-//   reported, not its packed contents);
+//   `__properties_version1.0`;
 // - variable-length properties (strings, binary, and variable-length
-//   multi-valued values) use streams named
-//   `__substg1.0_PPPPTTTT`, where PPPP is the 4-hex-digit property ID and
-//   TTTT is the 4-hex-digit property type. Variable-length multi-valued
-//   values add a zero-based `-NNNNNNNN` value-index suffix.
+//   multi-valued values) in streams named `__substg1.0_PPPPTTTT`, where PPPP
+//   is the 4-hex-digit property ID and TTTT the 4-hex-digit property type.
+//   Variable-length multi-valued values add a zero-based `-NNNNNNNN`
+//   value-index suffix.
 // Recipients and attachments each get their own numbered sub-storage
 // (`__recip_version1.0_#NNNNNNNN`, `__attach_version1.0_#NNNNNNNN`).
 // Embedded/custom-object storage is represented by
 // `__substg1.0_3701000D`, while named (non-standard) properties get a
-// dedicated `__nameid_version1.0` storage. All of this is name/size/count
-// only -- never content.
+// dedicated `__nameid_version1.0` storage. All reporting here is
+// name/size/count only -- never content.
 
-// --- Entry classification: the MS-OXMSG naming conventions ---------------
+/// The CFB storage representing an embedded object (a nested message or a
+/// custom/OLE attachment payload), per MS-OXMSG.
+const EMBEDDED_OBJECT_STORAGE_NAME: &str = "__substg1.0_3701000D";
 
 #[derive(Clone, Copy)]
 enum OxmsgEntryKind {
@@ -1277,12 +1209,12 @@ fn recognized_name_type_mismatch(
     }
 }
 
-/// Classifies a single CFB entry by name alone, using the MS-CFB
-/// storage/stream naming conventions MS-OXMSG defines (see the module
-/// comment above). Takes a plain `&str` rather than a `cfb::Entry`
-/// directly -- that type has no public constructor, so keeping the
-/// classification logic pure and string-based is what makes it possible
-/// to unit-test without a real CFB file on disk.
+/// Classifies a single CFB entry by name alone, using the MS-OXMSG
+/// storage/stream naming conventions (see the section comment above).
+/// Takes a plain `&str` rather than a `cfb::Entry` directly -- that type
+/// has no public constructor, so keeping the classification logic pure and
+/// string-based is what makes it unit-testable without a real CFB file on
+/// disk.
 fn classify_oxmsg_entry(name: &str, is_root: bool) -> OxmsgEntryKind {
     if is_root {
         return OxmsgEntryKind::Root;
@@ -1299,7 +1231,7 @@ fn classify_oxmsg_entry(name: &str, is_root: bool) -> OxmsgEntryKind {
     if name.starts_with("__recip_version1.0_#") {
         return OxmsgEntryKind::RecipientStorage;
     }
-    if name == "__substg1.0_3701000D" {
+    if name == EMBEDDED_OBJECT_STORAGE_NAME {
         return OxmsgEntryKind::EmbeddedObjectStorage;
     }
     if let Some((prop_id, indexed)) = parse_property_stream_name(name) {
@@ -1341,7 +1273,7 @@ fn oxmsg_entry_scope(path: &Path) -> OxmsgEntryScope {
             "__nameid_version1.0" => {
                 scope = OxmsgEntryScope::NamedPropertyStorage;
             }
-            "__substg1.0_3701000D" => {
+            EMBEDDED_OBJECT_STORAGE_NAME => {
                 scope = OxmsgEntryScope::EmbeddedObject;
             }
             name if name.starts_with("__attach_version1.0_#") => {
@@ -1357,12 +1289,10 @@ fn oxmsg_entry_scope(path: &Path) -> OxmsgEntryScope {
     scope
 }
 
-const EMBEDDED_OBJECT_STORAGE_NAME: &str = "__substg1.0_3701000D";
-
-/// Parents of every `__properties_version1.0` stream. A `3701000D` storage in
-/// this set is message-shaped (an embedded message); one not in it is a
+/// Parents of every `__properties_version1.0` stream. A `3701000D` storage
+/// in this set is message-shaped (an embedded message); one not in it is a
 /// custom attachment storage.
-fn message_shaped_parent_paths(comp: &cfb::CompoundFile<std::fs::File>) -> BTreeSet<PathBuf> {
+fn message_shaped_parent_paths(comp: &CompoundFile) -> BTreeSet<PathBuf> {
     comp.walk()
         .filter(|e| e.is_stream() && e.name() == "__properties_version1.0")
         .filter_map(|e| e.path().parent().map(Path::to_path_buf))
@@ -1370,8 +1300,8 @@ fn message_shaped_parent_paths(comp: &cfb::CompoundFile<std::fs::File>) -> BTree
 }
 
 /// If `path` lies beneath a custom (non-message-shaped) embedded-object
-/// storage, returns the outermost such storage's path. The storage itself is
-/// not "beneath" itself, so it keeps its own classification.
+/// storage, returns the outermost such storage's path. The storage itself
+/// is not "beneath" itself, so it keeps its own classification.
 fn enclosing_custom_payload_root(
     path: &Path,
     message_shaped: &BTreeSet<PathBuf>,
@@ -1407,164 +1337,54 @@ fn oxmsg_ancestry_shape(path: &Path) -> String {
     }
 }
 
-#[derive(Default)]
-struct OxmsgTotals {
-    open_errors: u64,
-    total_entries: u64,
-    root_entries_total: u64,
-    recognized_entries_total: u64,
-
-    has_properties_stream: u64,
-    /// Every `__properties_version1.0` entry, including property streams
-    /// inside recipient, attachment, and embedded-message storages.
-    properties_stream_entries_total: u64,
-    properties_stream_bytes_total: u64,
-
-    property_streams_total: u64,
-    /// Property streams whose names include the zero-based value index used
-    /// by variable-length multiple-valued properties.
-    indexed_property_streams_total: u64,
-    /// Aggregate counts by MAPI property ID across every file scanned.
-    /// Property IDs are a bounded, standard MAPI vocabulary (like message
-    /// class names elsewhere in this codebase), not user content, so
-    /// reporting them by ID does not violate the privacy-safe design.
-    /// It excludes named-property-storage streams.
-    property_id_counts: BTreeMap<u16, u64>,
-    /// Property-stream counts separated by the containing MS-OXMSG object
-    /// scope, so message/recipient/attachment/embedded/named-property
-    /// structures are not conflated.
-    property_streams_by_scope: BTreeMap<OxmsgEntryScope, u64>,
-    /// Property ID counts separated by the containing MS-OXMSG object scope.
-    property_id_counts_by_scope: BTreeMap<(OxmsgEntryScope, u16), u64>,
-    /// Property-stream counts separated by the containing MS-OXMSG object
-    /// scope. The named-property mapping storage is intentionally distinct
-    /// from ordinary Message/Recipient/Attachment property scopes.
-    properties_streams_by_scope: BTreeMap<OxmsgEntryScope, u64>,
-
-    attachment_storages_total: u64,
-    recipient_storages_total: u64,
-    named_property_storages_total: u64,
-    embedded_object_storages_total: u64,
-
-    /// Entries whose name matched none of the known MS-OXMSG conventions.
-    /// Counted, never silently dropped, consistent with this project's
-    /// no-silent-loss principle -- a nonzero count here means either an
-    /// MS-OXMSG structure this parser doesn't know about yet, or a real
-    /// anomaly worth a closer look.
-    unrecognized_entries_total: u64,
-    /// Privacy-safe structural breakdown. Names and paths are never emitted.
-    unrecognized_entries: BTreeMap<(CfbObjectKind, u64, UnrecognizedNameShape, String), u64>,
-    /// A recognized MS-OXMSG name whose CFB object type is unexpected.
-    recognized_name_type_mismatches: BTreeMap<RecognizedNameTypeMismatch, u64>,
-
-    /// Entries beneath a custom (non-message-shaped) `__substg1.0_3701000D`
-    /// storage. Their names are defined by the producing application, not
-    /// MS-OXMSG (MS-OXMSG "Custom Attachment Storage"), so they are counted
-    /// as opaque payload rather than matched against MS-OXMSG names.
-    opaque_payload_entries_total: u64,
-    /// (object kind, depth below the payload root) -> count.
-    opaque_payload_entries: BTreeMap<(CfbObjectKind, u64), u64>,
-    embedded_object_storages_message_shaped_total: u64,
-    embedded_object_storages_custom_total: u64,
-    /// (shape, storage CLSID) -> count. CLSIDs are a bounded class-identifier
-    /// vocabulary, not user content.
-    embedded_object_storages_by_shape: BTreeMap<(&'static str, String), u64>,
-
-    // --- Property-type/value decoding (privacy-safe first slice) ---------
-    /// Every fixed-length entry decoded from a `__properties_version1.0`
-    /// stream's entry array. Entry values are never read or reported --
-    /// only structural fields (type, ID, flags, and, for variable-length
-    /// entries, size/reserved).
-    properties_entries_total: u64,
-    properties_entries_fixed_inline_total: u64,
-    properties_entries_variable_single_total: u64,
-    properties_entries_variable_multivalued_total: u64,
-    /// A stream shorter than the header size expected for its scope.
-    properties_stream_too_short_for_header_total: u64,
-    /// A stream whose length past the header isn't an exact multiple of 16.
-    properties_stream_trailing_bytes_total: u64,
-    /// A properties stream in a scope with no defined header size (per
-    /// MS-OXMSG this should never be Named Property Mapping storage).
-    properties_stream_unexpected_scope_total: u64,
-    properties_stream_read_errors: u64,
-    /// (scope, raw property type incl. the 0x1000 multi-value bit) -> count.
-    /// Property types are a bounded MAPI vocabulary (MS-OXCDATA 2.11.1), not
-    /// user content.
-    property_type_counts_by_scope: BTreeMap<(OxmsgEntryScope, u16), u64>,
-    /// Property Entry flags are a 3-bit MS-OXMSG vocabulary (mandatory /
-    /// readable / writable), not user content.
-    property_entry_flags_counts: BTreeMap<u32, u64>,
-    /// Reserved-field values seen on the attachment-scope
-    /// PidTagAttachDataObject (0x3701, PT_OBJECT) entry. Per MS-OXMSG
-    /// 2.4.2.2, this is 0x01 for an embedded-message attachment and 0x04 for
-    /// a storage (OLE/custom) attachment -- an independent, property-level
-    /// cross-check of the CFB-structural message-shaped/custom
-    /// classification established in M2.x.
-    attach_data_object_reserved_counts: BTreeMap<u32, u64>,
-    /// Per spec this entry's Size field MUST be 0xFFFFFFFF; count any that
-    /// aren't, rather than assuming.
-    attach_data_object_size_sentinel_mismatches: u64,
-
-    // --- Fixed-value and variable-value structural checks -----------------
-    fixed_boolean_invalid_encoding_total: u64,
-    /// A decoded PT_FLOAT/PT_DOUBLE/PT_APPTIME value that is NaN or
-    /// infinite. Not necessarily invalid data on its own, but implausible
-    /// for the values these types are normally used for (percentages,
-    /// currency-like amounts, OLE Automation dates) -- worth investigating
-    /// as a possible decode-path bug before assuming it's genuine.
-    fixed_float_non_finite_total: u64,
-    variable_value_stream_found_total: u64,
-    variable_value_stream_missing_total: u64,
-    variable_value_size_mismatch_total: u64,
-    variable_value_odd_utf16_length_total: u64,
-    /// PT_UNICODE bytes (already confirmed even-length) that still fail to
-    /// decode as valid UTF-16 -- e.g. an unpaired surrogate.
-    variable_unicode_decode_errors_total: u64,
-    /// Bytes replaced with U+FFFD while decoding a PT_STRING8 value as
-    /// Windows-1252 -- unverified against real data; see M3b.
-    variable_string8_undefined_byte_total: u64,
-    /// A PT_CLSID (0x0048) value stream whose length isn't exactly the 16
-    /// bytes a GUID requires.
-    variable_clsid_wrong_length_total: u64,
-    // --- Named-property resolution -----------------------------------------
-    named_properties_seen_total: u64,
-    named_properties_map_missing_total: u64,
-    named_properties_unresolvable_total: u64,
-    named_properties_guid_out_of_range_total: u64,
-    named_properties_string_kind_total: u64,
-    named_properties_numeric_kind_total: u64,
-    /// Property-set membership, by bounded label ("PS_MAPI",
-    /// "PS_PUBLIC_STRINGS", a well-known PSETID name, or "custom").
-    named_property_sets: BTreeMap<&'static str, u64>,
-    /// Numeric LIDs are small application-defined integers, not content --
-    /// same footing as a property ID.
-    named_property_numeric_lids: BTreeMap<u32, u64>,
-    /// Whether a string-kind named property's name decoded successfully --
-    /// never the name itself. See M3c.
-    named_properties_string_decode_errors_total: u64,
-    /// A resolved entry whose own claimed Property Index doesn't match the
-    /// array position it was looked up by. Per MS-OXMSG this MUST always
-    /// match; a real permanent cross-check now that the bit layout is
-    /// confirmed, rather than the disproven swap-hypothesis instrumentation
-    /// it replaces.
-    named_properties_index_mismatch_total: u64,
+fn cfb_entry_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string()
 }
 
-impl OxmsgTotals {
-    /// Difference between every enumerated CFB entry and the classified
-    /// categories. This remains signed so a future overcount is visible.
-    fn entry_accounting_gap_total(&self) -> i64 {
-        self.total_entries as i64
-            - self.recognized_entries_total as i64
-            - self.opaque_payload_entries_total as i64
-            - self.unrecognized_entries_total as i64
-    }
+/// Paths of every TOP-LEVEL storage of the given kind. `comp.walk()`
+/// traverses the whole tree, including storages nested inside an embedded
+/// message's own subtree -- those share the `__recip_version1.0_#*` /
+/// `__attach_version1.0_#*` name shape but belong to the inner message.
+/// `msg_parser` never opens embedded messages, so its `to`/`cc`/`bcc`/
+/// `attachments` only ever reflect the outer message; this filter keeps the
+/// custom and msg_parser paths comparing the same scope.
+fn top_level_storage_paths(comp: &CompoundFile, kind: OxmsgEntryKind) -> Vec<PathBuf> {
+    comp.walk()
+        .filter(|e| {
+            e.path().parent() == Some(Path::new("/"))
+                && matches!(
+                    (
+                        classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
+                        kind,
+                    ),
+                    (
+                        OxmsgEntryKind::RecipientStorage,
+                        OxmsgEntryKind::RecipientStorage
+                    ) | (
+                        OxmsgEntryKind::AttachmentStorage,
+                        OxmsgEntryKind::AttachmentStorage
+                    )
+                )
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect()
 }
+
+// =============================================================================
+// Custom MS-OXMSG parser: property-stream and value decoding primitives
+//
+// Pure, CFB-free decoding helpers. Entry values are never read or reported
+// as content -- only structural fields (type, ID, flags, and, for
+// variable-length entries, size/reserved).
+// =============================================================================
 
 /// Decides only whether a property's value fits inline in a Property
 /// Entry's 8-byte value field (MS-OXMSG 2.4.2.1) or lives in a separate
-/// stream (2.4.2.2) -- never reads or reports the value itself. `base_type`
-/// must already have the 0x1000 multi-value bit cleared by the caller.
+/// stream (2.4.2.2). `base_type` must already have the 0x1000 multi-value
+/// bit cleared by the caller.
 fn is_fixed_length_base_type(base_type: u16) -> bool {
     matches!(
         base_type,
@@ -1624,8 +1444,8 @@ fn properties_stream_header_len(scope: OxmsgEntryScope) -> Option<usize> {
 
 /// One decoded Property Entry (MS-OXMSG 2.4.2). `tail` is the raw final 8
 /// bytes: for a fixed-length entry this is the value itself (never
-/// interpreted here); for a variable-length entry it is Size (4 bytes) then
-/// Reserved (4 bytes).
+/// interpreted here); for a variable-length entry it is Size (4 bytes)
+/// then Reserved (4 bytes).
 #[derive(Clone, Copy)]
 struct DecodedPropertyEntry {
     property_type: u16,
@@ -1673,8 +1493,6 @@ fn decode_properties_stream(bytes: &[u8], header_len: usize) -> Option<DecodedPr
     })
 }
 
-// --- Fixed-value structural checks (never print the value itself) --------
-
 /// PT_BOOLEAN's value occupies the first 2 bytes of the entry's value field
 /// (MS-OXCDATA 2.11.1); the only defined encodings are 0x0000 and 0x0001.
 fn is_valid_boolean_encoding(tail: &[u8; 8]) -> bool {
@@ -1683,19 +1501,17 @@ fn is_valid_boolean_encoding(tail: &[u8; 8]) -> bool {
 
 /// A property value that fits inline in a Property Entry's 8-byte value
 /// field, decoded to its real Rust type (MS-OXCDATA 2.11.1). Kept as a
-/// typed, lossless intermediate representation -- not yet formatted for
-/// display or written anywhere -- consistent with design principle 3
-/// (Markdown is a projection, not the canonical representation).
+/// typed, lossless intermediate representation -- not formatted for
+/// display or written anywhere.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DecodedFixedValue {
     Short(i16),
     Long(i32),
     Float(f32),
     Double(f64),
-    /// PtypCurrency: a signed 64-bit integer scaled by 10000 (four decimal
-    /// places). Kept as the raw scaled integer, not divided down to a
-    /// float, to avoid any precision loss -- dividing by 10000 for display
-    /// is a later, presentation-layer concern.
+    /// PtypCurrency: a signed 64-bit integer scaled by 10000. Kept as the
+    /// raw scaled integer, not divided down to a float, to avoid precision
+    /// loss -- dividing by 10000 is a presentation-layer concern.
     Currency(i64),
     /// An OLE Automation date (days since 1899-12-30; the fractional part
     /// is time-of-day). Calendar conversion is deliberately not attempted
@@ -1741,9 +1557,8 @@ fn decode_fixed_value(base_type: u16, tail: &[u8; 8]) -> Option<DecodedFixedValu
 /// Decodes PT_UNICODE (PtypString) bytes as UTF-16LE. The stream itself
 /// does not include a null terminator -- MS-OXMSG's declared Size field
 /// accounts for one that isn't actually present in the stream (confirmed
-/// against the corpus via `expected_size_field_value`), so no terminator
-/// handling is needed here. Caller is expected to have already confirmed
-/// an even byte length.
+/// against the corpus via `expected_size_field_value`). Caller is expected
+/// to have already confirmed an even byte length.
 fn decode_unicode_value(bytes: &[u8]) -> Result<String, std::string::FromUtf16Error> {
     let code_units: Vec<u16> = bytes
         .as_chunks::<2>()
@@ -1756,9 +1571,9 @@ fn decode_unicode_value(bytes: &[u8]) -> Result<String, std::string::FromUtf16Er
 
 /// Windows-1252, per the WHATWG Encoding Standard's windows-1252 index --
 /// identical to ISO-8859-1/Latin-1 outside 0x80-0x9F. UNVERIFIED against
-/// real fixture data: the 29-file corpus has no PT_STRING8 property at
-/// all to check this against, and `PidTagMessageCodepage` isn't consulted
-/// here -- this is the conventional default, not a codepage-aware decode.
+/// real fixture data: the corpus has no PT_STRING8 property to check
+/// against, and `PidTagMessageCodepage` isn't consulted here -- this is
+/// the conventional default, not a codepage-aware decode.
 fn cp1252_to_char(byte: u8) -> Option<char> {
     // Index 0 = 0x80. A 0 entry marks one of the five byte values
     // Windows-1252 leaves genuinely undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D).
@@ -1778,8 +1593,9 @@ fn cp1252_to_char(byte: u8) -> Option<char> {
 }
 
 /// Decodes PT_STRING8 bytes as Windows-1252, replacing any of the five
-/// undefined byte values with U+FFFD and reporting how many were replaced
-/// -- the same loss-is-explicit pattern as `String::from_utf8_lossy`.
+/// undefined byte values with U+FFFD and reporting how many were
+/// replaced -- the same loss-is-explicit pattern as
+/// `String::from_utf8_lossy`.
 fn decode_string8_cp1252(bytes: &[u8]) -> (String, u32) {
     let mut s = String::with_capacity(bytes.len());
     let mut undefined = 0u32;
@@ -1798,11 +1614,9 @@ fn decode_string8_cp1252(bytes: &[u8]) -> (String, u32) {
 /// Decodes one entry of the Named Property String Stream
 /// (`__substg1.0_00040102`, MS-OXMSG 2.2.3.1.4): a 4-byte length (the byte
 /// count of the UTF-16 string that follows, not including this length
-/// prefix or any padding), then the string itself. Reuses
-/// [`decode_unicode_value`] for the actual UTF-16 decode; its result is
-/// deliberately treated here only as present-or-absent -- see the M3c
-/// note in `docs/verification/oxmsg-results.md` for why this diagnostic
-/// never uses the decoded string itself.
+/// prefix or any padding), then the string itself. The decoded string is
+/// deliberately treated by callers as present-or-absent only -- this
+/// diagnostic never uses the name itself.
 fn decode_named_property_string(string_stream: &[u8], offset: u32) -> Option<String> {
     let offset = offset as usize;
     let length_bytes = string_stream.get(offset..offset + 4)?;
@@ -1816,14 +1630,12 @@ fn decode_named_property_string(string_stream: &[u8], offset: u32) -> Option<Str
     decode_unicode_value(string_bytes).ok()
 }
 
-// --- Variable-length value stream cross-check (never read as content) ----
-
 fn expected_variable_stream_path(parent: &Path, property_id: u16, property_type: u16) -> PathBuf {
     parent.join(format!("__substg1.0_{property_id:04X}{property_type:04X}"))
 }
 
-/// MS-OXMSG 2.4.2.2: the declared Size field equals the value stream's byte
-/// length for most types, +2 for PT_UNICODE, +1 for PT_STRING8.
+/// MS-OXMSG 2.4.2.2: the declared Size field equals the value stream's
+/// byte length for most types, +2 for PT_UNICODE, +1 for PT_STRING8.
 fn expected_size_field_value(property_type: u16, actual_stream_len: u64) -> u64 {
     match property_type {
         0x001F => actual_stream_len + 2, // PtypString / PT_UNICODE
@@ -1835,8 +1647,8 @@ fn expected_size_field_value(property_type: u16, actual_stream_len: u64) -> u64 
 // --- Named-property resolution (MS-OXMSG 2.2.3) ---------------------------
 
 // Well-known property-set GUIDs, MS-OXPROPS 1.3.2 (little-endian byte
-// order). A deliberately small set for this slice; anything else is
-// reported as "custom" -- never by its raw GUID bytes.
+// order). A deliberately small set; anything else is reported as
+// "custom" -- never by its raw GUID bytes.
 const PSETID_ADDRESS: [u8; 16] = [
     0x04, 0x20, 0x06, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
 ];
@@ -1855,10 +1667,9 @@ const PSETID_NOTE: [u8; 16] = [
 const PSETID_TASK: [u8; 16] = [
     0x03, 0x20, 0x06, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
 ];
-/// {00020386-0000-0000-C000-000000000046}, MS-OXPROPS 1.3.2 -- named
-/// properties synthesized from MIME/internet-header fields. Confirmed
-/// present in real fixture data (file 0's GUID stream) during the
-/// bit-layout investigation; added now that resolution is fixed.
+/// {00020386-0000-0000-C000-000000000046} -- named properties synthesized
+/// from MIME/internet-header fields. Confirmed present in real fixture
+/// data during the bit-layout investigation.
 const PS_INTERNET_HEADERS: [u8; 16] = [
     0x86, 0x03, 0x02, 0x00, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,
 ];
@@ -1881,15 +1692,12 @@ fn classify_well_known_property_set(guid: &[u8; 16]) -> Option<&'static str> {
 /// content) or a byte offset into the string stream (never followed by
 /// this diagnostic).
 ///
-/// Bit layout, confirmed against real fixture bytes (see
-/// docs/verification/oxmsg-results.md) rather than assumed from the spec
-/// text or a partially-read crate source, both of which turned out wrong
-/// on this point: the HIGH 16 bits of the second u32 are Property Index
-/// (matches the entry's own array position exactly, MS-OXMSG 2.2.3.2.4).
+/// Bit layout, confirmed against real fixture bytes rather than assumed
+/// from the spec text or a partially-read crate source (both of which
+/// turned out wrong on this point): the HIGH 16 bits of the second u32
+/// are Property Index (matches the entry's own array position exactly).
 /// The LOW 16 bits pack GUID Index and Property Kind together, with Kind
-/// as the low-order bit and GUID Index in the bits above it -- not GUID
-/// Index in the low 15 bits with Kind as the top bit, and not in the high
-/// 16 bits at all.
+/// as the low-order bit and GUID Index in the bits above it.
 struct NamedPropertyEntryRaw {
     name_id_or_offset: u32,
     guid_index: u16,
@@ -1961,13 +1769,22 @@ impl NamedPropertyMap {
     }
 }
 
+// --- CFB stream reading ----------------------------------------------------
+
+/// Reads a stream's full contents by path. `comp` must be the same open
+/// container the path came from.
+fn read_stream_bytes(comp: &mut CompoundFile, path: &Path) -> Option<Vec<u8>> {
+    let mut stream = comp.open_stream(path).ok()?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
 /// Reads and parses the named property mapping storage, if present. Per
 /// MS-OXMSG 2.2.3, this always lives at the top level, even for named
 /// properties on an embedded message (Embedded Message objects MUST NOT
 /// have their own).
-fn read_named_property_map(
-    comp: &mut cfb::CompoundFile<std::fs::File>,
-) -> Option<NamedPropertyMap> {
+fn read_named_property_map(comp: &mut CompoundFile) -> Option<NamedPropertyMap> {
     let guid_stream =
         read_stream_bytes(comp, Path::new("/__nameid_version1.0/__substg1.0_00020102"))?;
     let entry_stream =
@@ -1981,335 +1798,177 @@ fn read_named_property_map(
     })
 }
 
-/// Reads a stream's full contents by path. `comp` must be the same open
-/// container the path came from.
-fn read_stream_bytes(comp: &mut cfb::CompoundFile<std::fs::File>, path: &Path) -> Option<Vec<u8>> {
-    let mut stream = comp.open_stream(path).ok()?;
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).ok()?;
-    Some(buf)
+// =============================================================================
+// Custom MS-OXMSG structural diagnostic (--oxmsg): aggregate counters,
+// report, and two-pass walk
+//
+// Pass 1 classifies every CFB entry by name and position (immutable walk);
+// pass 2 decodes the entry array of every properties stream found. The
+// original single ~320-line `inspect_oxmsg` held three jobs at once; it is
+// split so each function does one thing (SLAP). Behavior and counters are
+// unchanged.
+// =============================================================================
+
+#[derive(Default)]
+struct OxmsgTotals {
+    open_errors: u64,
+    total_entries: u64,
+    root_entries_total: u64,
+    recognized_entries_total: u64,
+
+    has_properties_stream: u64,
+    /// Every `__properties_version1.0` entry, including property streams
+    /// inside recipient, attachment, and embedded-message storages.
+    properties_stream_entries_total: u64,
+    properties_stream_bytes_total: u64,
+
+    property_streams_total: u64,
+    /// Property streams whose names include the zero-based value index
+    /// used by variable-length multiple-valued properties.
+    indexed_property_streams_total: u64,
+    /// Aggregate counts by MAPI property ID across every file scanned.
+    /// Property IDs are a bounded, standard MAPI vocabulary, not user
+    /// content. Excludes named-property-storage streams.
+    property_id_counts: BTreeMap<u16, u64>,
+    /// `__properties_version1.0` stream counts separated by the containing
+    /// MS-OXMSG object scope. The named-property mapping storage is
+    /// intentionally distinct from ordinary message/recipient/attachment
+    /// property scopes.
+    properties_streams_by_scope: BTreeMap<OxmsgEntryScope, u64>,
+    /// `__substg1.0_*` property-stream counts separated by scope.
+    property_streams_by_scope: BTreeMap<OxmsgEntryScope, u64>,
+    /// Property ID counts separated by the containing MS-OXMSG object
+    /// scope.
+    property_id_counts_by_scope: BTreeMap<(OxmsgEntryScope, u16), u64>,
+
+    attachment_storages_total: u64,
+    recipient_storages_total: u64,
+    named_property_storages_total: u64,
+    embedded_object_storages_total: u64,
+
+    /// Entries whose name matched none of the known MS-OXMSG conventions.
+    /// Counted, never silently dropped: a nonzero count means either an
+    /// MS-OXMSG structure this parser doesn't know about yet, or a real
+    /// anomaly worth a closer look.
+    unrecognized_entries_total: u64,
+    /// Privacy-safe structural breakdown. Names and paths are never
+    /// emitted.
+    unrecognized_entries: BTreeMap<(CfbObjectKind, u64, UnrecognizedNameShape, String), u64>,
+    /// A recognized MS-OXMSG name whose CFB object type is unexpected.
+    recognized_name_type_mismatches: BTreeMap<RecognizedNameTypeMismatch, u64>,
+
+    /// Entries beneath a custom (non-message-shaped) embedded-object
+    /// storage. Their names are defined by the producing application, not
+    /// MS-OXMSG ("Custom Attachment Storage"), so they are counted as
+    /// opaque payload rather than matched against MS-OXMSG names.
+    opaque_payload_entries_total: u64,
+    /// (object kind, depth below the payload root) -> count.
+    opaque_payload_entries: BTreeMap<(CfbObjectKind, u64), u64>,
+    embedded_object_storages_message_shaped_total: u64,
+    embedded_object_storages_custom_total: u64,
+    /// (shape, storage CLSID) -> count. CLSIDs are a bounded
+    /// class-identifier vocabulary, not user content.
+    embedded_object_storages_by_shape: BTreeMap<(&'static str, String), u64>,
+
+    // --- Property-type/value decoding --------------------------------------
+    /// Every fixed-length entry decoded from a `__properties_version1.0`
+    /// stream's entry array. Entry values are never read or reported --
+    /// only structural fields (type, ID, flags, and, for variable-length
+    /// entries, size/reserved).
+    properties_entries_total: u64,
+    properties_entries_fixed_inline_total: u64,
+    properties_entries_variable_single_total: u64,
+    properties_entries_variable_multivalued_total: u64,
+    /// A stream shorter than the header size expected for its scope.
+    properties_stream_too_short_for_header_total: u64,
+    /// A stream whose length past the header isn't an exact multiple of 16.
+    properties_stream_trailing_bytes_total: u64,
+    /// A properties stream in a scope with no defined header size (per
+    /// MS-OXMSG this should never be Named Property Mapping storage).
+    properties_stream_unexpected_scope_total: u64,
+    properties_stream_read_errors: u64,
+    /// (scope, raw property type incl. the 0x1000 multi-value bit) ->
+    /// count. Property types are a bounded MAPI vocabulary
+    /// (MS-OXCDATA 2.11.1), not user content.
+    property_type_counts_by_scope: BTreeMap<(OxmsgEntryScope, u16), u64>,
+    /// Property Entry flags are a 3-bit MS-OXMSG vocabulary (mandatory /
+    /// readable / writable), not user content.
+    property_entry_flags_counts: BTreeMap<u32, u64>,
+    /// Reserved-field values seen on the attachment-scope
+    /// PidTagAttachDataObject (0x3701, PT_OBJECT) entry. Per MS-OXMSG
+    /// 2.4.2.2, this is 0x01 for an embedded-message attachment and 0x04
+    /// for a storage (OLE/custom) attachment -- an independent,
+    /// property-level cross-check of the CFB-structural
+    /// message-shaped/custom classification.
+    attach_data_object_reserved_counts: BTreeMap<u32, u64>,
+    /// Per spec this entry's Size field MUST be 0xFFFFFFFF; count any
+    /// that aren't, rather than assuming.
+    attach_data_object_size_sentinel_mismatches: u64,
+
+    // --- Fixed-value and variable-value structural checks ------------------
+    fixed_boolean_invalid_encoding_total: u64,
+    /// A decoded PT_FLOAT/PT_DOUBLE/PT_APPTIME value that is NaN or
+    /// infinite. Not necessarily invalid data on its own, but implausible
+    /// for the values these types are normally used for -- worth
+    /// investigating as a possible decode-path bug before assuming it's
+    /// genuine.
+    fixed_float_non_finite_total: u64,
+    variable_value_stream_found_total: u64,
+    variable_value_stream_missing_total: u64,
+    variable_value_size_mismatch_total: u64,
+    variable_value_odd_utf16_length_total: u64,
+    /// PT_UNICODE bytes (already confirmed even-length) that still fail to
+    /// decode as valid UTF-16 -- e.g. an unpaired surrogate.
+    variable_unicode_decode_errors_total: u64,
+    /// Bytes replaced with U+FFFD while decoding a PT_STRING8 value as
+    /// Windows-1252 -- unverified against real data.
+    variable_string8_undefined_byte_total: u64,
+    /// A PT_CLSID (0x0048) value stream whose length isn't exactly the 16
+    /// bytes a GUID requires.
+    variable_clsid_wrong_length_total: u64,
+    // --- Named-property resolution -----------------------------------------
+    named_properties_seen_total: u64,
+    named_properties_map_missing_total: u64,
+    named_properties_unresolvable_total: u64,
+    named_properties_guid_out_of_range_total: u64,
+    named_properties_string_kind_total: u64,
+    named_properties_numeric_kind_total: u64,
+    /// Property-set membership, by bounded label ("PS_MAPI",
+    /// "PS_PUBLIC_STRINGS", a well-known PSETID name, or "custom").
+    named_property_sets: BTreeMap<&'static str, u64>,
+    /// Numeric LIDs are small application-defined integers, not content --
+    /// same footing as a property ID.
+    named_property_numeric_lids: BTreeMap<u32, u64>,
+    /// Whether a string-kind named property's name decoded successfully --
+    /// never the name itself.
+    named_properties_string_decode_errors_total: u64,
+    /// A resolved entry whose own claimed Property Index doesn't match the
+    /// array position it was looked up by. Per MS-OXMSG this MUST always
+    /// match; a permanent cross-check now that the bit layout is
+    /// confirmed.
+    named_properties_index_mismatch_total: u64,
 }
 
-fn cfb_entry_name(path: &Path) -> String {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_string()
+impl OxmsgTotals {
+    /// Difference between every enumerated CFB entry and the classified
+    /// categories. This remains signed so a future overcount is visible.
+    fn entry_accounting_gap_total(&self) -> i64 {
+        self.total_entries as i64
+            - self.recognized_entries_total as i64
+            - self.opaque_payload_entries_total as i64
+            - self.unrecognized_entries_total as i64
+    }
 }
 
 /// Everything `inspect_oxmsg` needs from a CFB entry, captured up front so
-/// the immutable borrow from `comp.walk()` ends before the second pass needs
-/// `&mut comp` to read stream contents.
+/// the immutable borrow from `comp.walk()` ends before the second pass
+/// needs `&mut comp` to read stream contents.
 struct CollectedOxmsgEntry {
     path: PathBuf,
     is_root: bool,
     is_stream: bool,
     len: u64,
     clsid: String,
-}
-/// Reads PidTagMessageClass (0x001A, PT_UNICODE) directly from a
-/// message's own `__substg1.0_001A001F` stream at the CFB root. The first
-/// function in the real (non-diagnostic) extraction layer M3d begins:
-/// unlike everything `--oxmsg` prints, its return value is real content.
-/// Used only by `run_msg_verify`, which never prints it -- only whether
-/// it matched `msg_parser`'s. Not independently unit-tested: it's a thin
-/// composition of `read_stream_bytes` (no logic of its own to test in
-/// isolation) and `decode_unicode_value` (already tested) -- its real
-/// verification is `run_msg_verify` producing a clean run against the
-/// fixture corpus.
-fn extract_message_class(comp: &mut cfb::CompoundFile<std::fs::File>) -> Option<String> {
-    let bytes = read_stream_bytes(comp, Path::new("/__substg1.0_001A001F"))?;
-    decode_unicode_value(&bytes).ok()
-}
-
-struct BodyFlags {
-    has_plain: bool,
-    has_html_native: bool,
-    has_html_via_rtf: bool,
-    has_rtf: bool,
-    /// Mirrors `check_rtf_for_encapsulated_html`'s `DecompressionFailed`
-    /// case -- too short to be valid MS-OXRTFCP, or the crate itself
-    /// returned an error.
-    decompression_failed: bool,
-    /// Byte length of the successfully-decompressed RTF, if decompression
-    /// ran at all. `None` when there's no RTF or decompression failed --
-    /// distinct from `Some(0)`, an empty-but-valid result.
-    decompressed_rtf_len: Option<u64>,
-}
-
-/// Reads PidTagBody, PidTagBodyHtml, and PidTagRtfCompressed directly by
-/// name, the custom-path equivalent of what `msg_parser`'s `Outlook`
-/// struct exposes as `body`/`html`/`rtf_compressed`. Real content is read
-/// into memory to run the HTML-in-RTF check, but nothing here is ever
-/// printed -- only booleans derived from it, via `run_msg_verify`.
-fn extract_body_flags(comp: &mut cfb::CompoundFile<std::fs::File>) -> BodyFlags {
-    let root = Path::new("/");
-    let has_plain = read_stream_bytes(
-        comp,
-        &expected_variable_stream_path(root, PROP_BODY, 0x001F),
-    )
-    .or_else(|| {
-        read_stream_bytes(
-            comp,
-            &expected_variable_stream_path(root, PROP_BODY, 0x001E),
-        )
-    })
-    .is_some();
-    let has_html_native = read_stream_bytes(
-        comp,
-        &expected_variable_stream_path(root, PROP_BODY_HTML, 0x0102),
-    )
-    .is_some();
-    let rtf_bytes = read_stream_bytes(
-        comp,
-        &expected_variable_stream_path(root, PROP_RTF_COMPRESSED, 0x0102),
-    );
-    let has_rtf = rtf_bytes.is_some();
-
-    let mut decompression_failed = false;
-    let mut decompressed_rtf_len = None;
-    let has_html_via_rtf = if has_html_native {
-        false
-    } else if let Some(compressed) = &rtf_bytes {
-        if compressed.len() < 16 {
-            decompression_failed = true;
-            false
-        } else {
-            match compressed_rtf::decompress_rtf(compressed) {
-                Ok(rtf) => {
-                    decompressed_rtf_len = Some(rtf.len() as u64);
-                    rtf_bytes_contain_fromhtml(rtf.as_bytes())
-                }
-                Err(_) => {
-                    decompression_failed = true;
-                    false
-                }
-            }
-        }
-    } else {
-        false
-    };
-
-    BodyFlags {
-        has_plain,
-        has_html_native,
-        has_html_via_rtf,
-        has_rtf,
-        decompression_failed,
-        decompressed_rtf_len,
-    }
-}
-
-#[derive(Default)]
-struct RecipientTypeCounts {
-    /// MS-OXOMSG value 0 -- the sender, recorded as a recipient.
-    /// `msg_parser`'s `Outlook` has no field for this at all; there is
-    /// nothing to compare it against, only to report.
-    orig: u64,
-    to: u64,
-    cc: u64,
-    bcc: u64,
-    /// A `PidTagRecipientType` value outside the four defined ones.
-    other: u64,
-    /// A recipient storage whose type couldn't be read at all (missing
-    /// properties stream, or no `0x0C15` entry in it).
-    unresolved: u64,
-}
-
-/// Walks every `__recip_version1.0_#*` storage and classifies each by its
-/// own `PidTagRecipientType` (0x0C15, PT_LONG) fixed-length entry. Real
-/// content stays in memory only as counts by category -- never a
-/// recipient's actual address or name, which this function never reads at
-/// all.
-fn extract_recipient_type_counts(
-    comp: &mut cfb::CompoundFile<std::fs::File>,
-) -> RecipientTypeCounts {
-    let mut counts = RecipientTypeCounts::default();
-
-    // Pass 1 (immutable): find every TOP-LEVEL recipient storage's path.
-    // `comp.walk()` traverses the whole tree, including any recipient
-    // storage nested inside an embedded message's own subtree -- which
-    // has the same `__recip_version1.0_#*` name shape but belongs to the
-    // inner message, not this one. `msg_parser` never opens embedded
-    // messages, so `outlook.to/cc/bcc` only ever reflect the outer
-    // message; this filter keeps the two paths comparing the same scope.
-    let recipient_paths: Vec<PathBuf> = comp
-        .walk()
-        .filter(|e| {
-            e.path().parent() == Some(Path::new("/"))
-                && matches!(
-                    classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
-                    OxmsgEntryKind::RecipientStorage
-                )
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect();
-
-    // Pass 2 (mutable): read each one's own properties stream.
-    for recip_path in recipient_paths {
-        let properties_path = recip_path.join("__properties_version1.0");
-        let Some(bytes) = read_stream_bytes(comp, &properties_path) else {
-            counts.unresolved += 1;
-            continue;
-        };
-        let Some(decoded) = decode_properties_stream(&bytes, 8) else {
-            counts.unresolved += 1;
-            continue;
-        };
-        let recipient_type = decoded.entries.iter().find_map(|entry| {
-            if entry.property_id != PROP_RECIPIENT_TYPE || entry.property_type != 0x0003 {
-                return None;
-            }
-            match decode_fixed_value(entry.property_type, &entry.tail) {
-                Some(DecodedFixedValue::Long(value)) => Some(value),
-                _ => None,
-            }
-        });
-        match recipient_type {
-            Some(0) => counts.orig += 1,
-            Some(1) => counts.to += 1,
-            Some(2) => counts.cc += 1,
-            Some(3) => counts.bcc += 1,
-            Some(_) => counts.other += 1,
-            None => counts.unresolved += 1,
-        }
-    }
-
-    counts
-}
-
-/// Counts top-level attachment storages only -- the same scoping fix as
-/// `extract_recipient_type_counts`, applied from the start this time.
-/// `msg_parser` never opens an embedded message, so its `outlook.attachments`
-/// never includes that message's own attachments either.
-fn extract_attachment_count(comp: &cfb::CompoundFile<std::fs::File>) -> u64 {
-    comp.walk()
-        .filter(|e| {
-            e.path().parent() == Some(Path::new("/"))
-                && matches!(
-                    classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
-                    OxmsgEntryKind::AttachmentStorage
-                )
-        })
-        .count() as u64
-}
-
-#[derive(Default)]
-struct AttachmentMethodCounts {
-    by_value: u64,
-    embedded_message: u64,
-    ole: u64,
-    other: u64,
-    with_content_id: u64,
-    /// An attachment storage whose PidTagAttachMethod couldn't be read at
-    /// all (missing properties stream, or no 0x3705 entry in it).
-    /// `msg_parser` has no equivalent bucket -- it always reports some
-    /// method value -- so this is reported on its own, not folded into
-    /// `other`.
-    unresolved: u64,
-    /// A by-value attachment whose PidTagAttachDataBinary is empty or
-    /// missing.
-    zero_byte_by_value: u64,
-    /// A non-by-value attachment (or one whose method couldn't be read).
-    /// Mirrors `msg_parser`'s own structural behavior: it leaves
-    /// `payload_bytes` empty for every method other than by-value, since
-    /// OLE and embedded-message content lives in a storage, not a flat
-    /// stream.
-    zero_size_other_method: u64,
-}
-
-/// Walks every top-level attachment storage and classifies it by its own
-/// `PidTagAttachMethod` (0x3705, PT_LONG), plus whether
-/// `PidTagAttachContentId` (0x3712) is present. Real content stays in
-/// memory only as counts by category -- never an attachment's name or
-/// bytes, which this function never reads at all.
-fn extract_attachment_method_counts(
-    comp: &mut cfb::CompoundFile<std::fs::File>,
-) -> AttachmentMethodCounts {
-    let mut counts = AttachmentMethodCounts::default();
-
-    let attachment_paths: Vec<PathBuf> = comp
-        .walk()
-        .filter(|e| {
-            e.path().parent() == Some(Path::new("/"))
-                && matches!(
-                    classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
-                    OxmsgEntryKind::AttachmentStorage
-                )
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect();
-
-    for attach_path in attachment_paths {
-        let properties_path = attach_path.join("__properties_version1.0");
-        let Some(bytes) = read_stream_bytes(comp, &properties_path) else {
-            counts.unresolved += 1;
-            continue;
-        };
-        let Some(decoded) = decode_properties_stream(&bytes, 8) else {
-            counts.unresolved += 1;
-            continue;
-        };
-
-        let mut method = None;
-        let mut has_content_id = false;
-        for entry in &decoded.entries {
-            if entry.property_id == PROP_ATTACH_METHOD && entry.property_type == 0x0003 {
-                if let Some(DecodedFixedValue::Long(value)) =
-                    decode_fixed_value(entry.property_type, &entry.tail)
-                {
-                    method = Some(value);
-                }
-            } else if entry.property_id == PROP_ATTACH_CONTENT_ID {
-                has_content_id = true;
-            }
-        }
-
-        match method {
-            Some(1) => counts.by_value += 1,
-            Some(5) => counts.embedded_message += 1,
-            Some(6) => counts.ole += 1,
-            Some(_) => counts.other += 1,
-            None => counts.unresolved += 1,
-        }
-        if has_content_id {
-            counts.with_content_id += 1;
-        }
-
-        let is_by_value = matches!(method, Some(1));
-        let size_is_zero = if is_by_value {
-            read_stream_bytes(
-                comp,
-                &expected_variable_stream_path(&attach_path, 0x3701, 0x0102),
-            )
-            .map(|data| data.is_empty())
-            .unwrap_or(true)
-        } else {
-            true
-        };
-        if size_is_zero {
-            if is_by_value {
-                counts.zero_byte_by_value += 1;
-            } else {
-                counts.zero_size_other_method += 1;
-            }
-        }
-    }
-
-    counts
-}
-
-/// Attempts to read the one embedded message's own PidTagMessageClass
-/// directly via CFB -- the custom path's answer to whether an embedded
-/// message can be opened at all, the question M2c left unresolved for
-/// `msg_parser`. Reuses `message_shaped_parent_paths` (M2.x) to find the
-/// embedded storage; never prints the class itself, only whether reading
-/// it succeeded.
-fn extract_embedded_message_class(comp: &mut cfb::CompoundFile<std::fs::File>) -> Option<String> {
-    let embedded_path = message_shaped_parent_paths(&*comp).into_iter().next()?;
-    let class_path = embedded_path.join("__substg1.0_001A001F");
-    let bytes = read_stream_bytes(comp, &class_path)?;
-    decode_unicode_value(&bytes).ok()
 }
 
 fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
@@ -2332,9 +1991,8 @@ fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Resul
     Ok(())
 }
 
-/// Prints the `--oxmsg` structural inventory report. Split out of
-/// `run_oxmsg_diagnostic` (SLAP). Keys are unchanged from previous
-/// versions.
+/// Prints the `--oxmsg` structural inventory report, separated from the
+/// scan loop (SLAP). Keys are unchanged from previous versions.
 fn print_oxmsg_report(totals: &OxmsgTotals) {
     println!("open_errors={}", totals.open_errors);
     println!("total_entries={}", totals.total_entries);
@@ -2579,79 +2237,10 @@ fn print_oxmsg_report(totals: &OxmsgTotals) {
     );
 }
 
-/// The custom-path equivalent of `inspect_msg`: populates the exact same
-/// `MsgTotals`, via the exact same shared `BodyCounters`/`CountStats`
-/// types and `record_*` functions, sourced from the extraction primitives
-/// built and `--verify`-checked field by field rather than from
-/// `msg_parser`'s `Outlook`. Reuses `record_msg_class`/
-/// `record_msg_recipients`/`record_embedded_message_class` directly --
-/// this composes already-checked pieces rather than introducing new logic.
-///
-/// Every field here has a corresponding `--verify` result showing zero
-/// mismatches, or, for embedded-message opening, a confirmed improvement
-/// over `msg_parser`'s documented M2c ceiling (see
-/// `docs/verification/oxmsg-results.md`).
-fn inspect_oxmsg_as_msg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut MsgTotals) {
-    record_msg_class(totals, &extract_message_class(comp).unwrap_or_default());
-
-    let body = extract_body_flags(comp);
-    if body.decompression_failed {
-        totals.bodies.note_decompression_error();
-    } else if let Some(len) = body.decompressed_rtf_len {
-        totals.bodies.note_decompressed_bytes(len as usize);
-    }
-    totals.bodies.record(
-        body.has_plain,
-        body.has_html_native,
-        body.has_html_via_rtf,
-        body.has_rtf,
-    );
-
-    let recipients = extract_recipient_type_counts(comp);
-    record_msg_recipients(totals, recipients.to, recipients.cc, recipients.bcc);
-
-    let methods = extract_attachment_method_counts(comp);
-    totals.attachments_method_by_value += methods.by_value;
-    totals.attachments_method_embedded_message += methods.embedded_message;
-    totals.attachments_method_ole += methods.ole;
-    totals.attachments_method_other += methods.other;
-    totals.attachments_with_content_id += methods.with_content_id;
-    for _ in 0..methods.zero_byte_by_value {
-        totals.zero_byte_attachments.record(true, true);
-    }
-    for _ in 0..methods.zero_size_other_method {
-        totals.zero_byte_attachments.record(true, false);
-    }
-    totals.attachments.record(extract_attachment_count(&*comp));
-
-    if methods.embedded_message > 0 {
-        match extract_embedded_message_class(comp) {
-            Some(class) => {
-                totals.embedded_messages_opened += 1;
-                record_embedded_message_class(totals, &class);
-            }
-            None => totals.embedded_message_open_errors += 1,
-        }
-    }
-}
-
-// --- The --oxmsg structural walk itself (two passes, one job each) --------
-//
-// The original `inspect_oxmsg` was a single ~320-line function holding
-// three jobs at once: classifying every CFB entry, decoding every
-// properties stream, and running the per-entry structural checks
-// (fixed-value validity, variable-stream cross-checks, attach-data-object
-// accounting, named-property resolution). It is split here so each
-// function does one thing (SLAP); behavior and counters are unchanged.
-
 /// Orchestrates the two-pass structural diagnostic over one open .msg
-/// container. Pass 1 classifies every CFB entry by name and position
-/// (immutable walk, results collected up front so the borrow ends before
-/// pass 2); pass 2 decodes the entry array of every properties stream
-/// found (needs `&mut comp` to read stream contents). Reports only
-/// structural fields -- type, ID, flags, size/reserved, presence --
-/// never a property's value.
-fn inspect_oxmsg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut OxmsgTotals) {
+/// container. Reports only structural fields -- type, ID, flags,
+/// size/reserved, presence -- never a property's value.
+fn inspect_oxmsg(comp: &mut CompoundFile, totals: &mut OxmsgTotals) {
     let message_shaped_parents = message_shaped_parent_paths(&*comp);
 
     // Pass 1 needs only immutable access; entries are collected up front,
@@ -2798,10 +2387,9 @@ fn classify_oxmsg_entries(
 
 /// Pass 2: decodes the entry array of every `__properties_version1.0`
 /// stream found in pass 1. This reads stream contents, but reports only
-/// structural fields (type, ID, flags, and variable-length size/reserved)
-/// -- never a property's value.
+/// structural fields -- never a property's value.
 fn decode_oxmsg_properties_streams(
-    comp: &mut cfb::CompoundFile<std::fs::File>,
+    comp: &mut CompoundFile,
     entries: &[CollectedOxmsgEntry],
     named_property_map: Option<&NamedPropertyMap>,
     totals: &mut OxmsgTotals,
@@ -2844,7 +2432,7 @@ fn decode_oxmsg_properties_streams(
 /// stream cross-check, the attach-data-object cross-check, and
 /// named-property resolution.
 fn record_property_entry(
-    comp: &mut cfb::CompoundFile<std::fs::File>,
+    comp: &mut CompoundFile,
     stream_path: &Path,
     scope: OxmsgEntryScope,
     entry: &DecodedPropertyEntry,
@@ -2904,7 +2492,7 @@ fn check_fixed_inline_entry(entry: &DecodedPropertyEntry, totals: &mut OxmsgTota
 /// are already covered by the embedded-object accounting in pass 1, so
 /// they are skipped here. Never reads a value as content.
 fn check_variable_value_stream(
-    comp: &mut cfb::CompoundFile<std::fs::File>,
+    comp: &mut CompoundFile,
     stream_path: &Path,
     entry: &DecodedPropertyEntry,
     totals: &mut OxmsgTotals,
@@ -2993,9 +2581,8 @@ fn record_named_property_observation(
     };
 
     // Per MS-OXMSG the entry's own claimed Property Index MUST equal its
-    // array position; a real permanent cross-check now that the bit layout
-    // is confirmed, rather than the disproven swap-hypothesis
-    // instrumentation it replaces.
+    // array position; a permanent cross-check now that the bit layout is
+    // confirmed.
     let expected_index = property_id - 0x8000;
     if raw.property_index != expected_index {
         totals.named_properties_index_mismatch_total += 1;
@@ -3035,8 +2622,362 @@ fn record_named_property_observation(
 }
 
 // =============================================================================
-// MSG differential verification (M3e, opt-in via --verify): custom MS-OXMSG
-// extraction vs msg_parser, field by field
+// Custom MS-OXMSG extraction layer: real property reads used by --verify
+// and --extract
+//
+// Unlike the --oxmsg structural diagnostic, these functions return real
+// content. They are only ever consumed by --verify (which prints only
+// match/mismatch counts) and --extract (which prints only the same
+// counters the msg_parser diagnostic does) -- never printed directly.
+// =============================================================================
+
+/// Reads PidTagMessageClass (0x001A, PT_UNICODE) directly from a message's
+/// own `__substg1.0_001A001F` stream at the CFB root. Not independently
+/// unit-tested: it's a thin composition of `read_stream_bytes` (no logic
+/// of its own) and `decode_unicode_value` (already tested) -- its real
+/// verification is `run_msg_verify` producing a clean run against the
+/// fixture corpus.
+fn extract_message_class(comp: &mut CompoundFile) -> Option<String> {
+    let bytes = read_stream_bytes(comp, Path::new("/__substg1.0_001A001F"))?;
+    decode_unicode_value(&bytes).ok()
+}
+
+struct BodyFlags {
+    has_plain: bool,
+    has_html_native: bool,
+    has_html_via_rtf: bool,
+    has_rtf: bool,
+    /// Mirrors [`RtfHtmlCheck::DecompressionFailed`] -- too short to be
+    /// valid MS-OXRTFCP, or the crate itself returned an error.
+    decompression_failed: bool,
+    /// Byte length of the successfully-decompressed RTF, if decompression
+    /// ran at all. `None` when there's no RTF or decompression failed --
+    /// distinct from `Some(0)`, an empty-but-valid result.
+    decompressed_rtf_len: Option<u64>,
+}
+
+/// Reads PidTagBody, PidTagBodyHtml, and PidTagRtfCompressed directly by
+/// name, the custom-path equivalent of what `msg_parser`'s `Outlook`
+/// exposes as `body`/`html`/`rtf_compressed`. Real content is read into
+/// memory to run the HTML-in-RTF check, but nothing here is ever printed.
+fn extract_body_flags(comp: &mut CompoundFile) -> BodyFlags {
+    let root = Path::new("/");
+    let has_plain = read_stream_bytes(
+        comp,
+        &expected_variable_stream_path(root, PROP_BODY, 0x001F),
+    )
+    .or_else(|| {
+        read_stream_bytes(
+            comp,
+            &expected_variable_stream_path(root, PROP_BODY, 0x001E),
+        )
+    })
+    .is_some();
+    let has_html_native = read_stream_bytes(
+        comp,
+        &expected_variable_stream_path(root, PROP_BODY_HTML, 0x0102),
+    )
+    .is_some();
+    let rtf_bytes = read_stream_bytes(
+        comp,
+        &expected_variable_stream_path(root, PROP_RTF_COMPRESSED, 0x0102),
+    );
+    let has_rtf = rtf_bytes.is_some();
+
+    let mut decompression_failed = false;
+    let mut decompressed_rtf_len = None;
+    let has_html_via_rtf = if has_html_native {
+        false
+    } else if let Some(compressed) = &rtf_bytes {
+        match check_compressed_rtf_bytes(compressed) {
+            RtfHtmlCheck::Decompressed {
+                contains_fromhtml,
+                decompressed_bytes,
+            } => {
+                decompressed_rtf_len = Some(decompressed_bytes as u64);
+                contains_fromhtml
+            }
+            RtfHtmlCheck::DecompressionFailed => {
+                decompression_failed = true;
+                false
+            }
+            RtfHtmlCheck::NoRtfProperty | RtfHtmlCheck::NotBinary => false,
+        }
+    } else {
+        false
+    };
+
+    BodyFlags {
+        has_plain,
+        has_html_native,
+        has_html_via_rtf,
+        has_rtf,
+        decompression_failed,
+        decompressed_rtf_len,
+    }
+}
+
+#[derive(Default)]
+struct RecipientTypeCounts {
+    /// MS-OXOMSG value 0 -- the sender, recorded as a recipient.
+    /// `msg_parser`'s `Outlook` has no field for this at all; there is
+    /// nothing to compare it against, only to report.
+    orig: u64,
+    to: u64,
+    cc: u64,
+    bcc: u64,
+    /// A `PidTagRecipientType` value outside the four defined ones.
+    other: u64,
+    /// A recipient storage whose type couldn't be read at all (missing
+    /// properties stream, or no `0x0C15` entry in it).
+    unresolved: u64,
+}
+
+/// Walks every top-level `__recip_version1.0_#*` storage and classifies
+/// each by its own `PidTagRecipientType` (0x0C15, PT_LONG) fixed-length
+/// entry. Real content stays in memory only as counts by category --
+/// never a recipient's actual address or name, which this function never
+/// reads at all.
+fn extract_recipient_type_counts(comp: &mut CompoundFile) -> RecipientTypeCounts {
+    let mut counts = RecipientTypeCounts::default();
+
+    // Pass 1 (immutable): every TOP-LEVEL recipient storage's path.
+    let recipient_paths = top_level_storage_paths(&*comp, OxmsgEntryKind::RecipientStorage);
+
+    // Pass 2 (mutable): read each one's own properties stream.
+    for recip_path in recipient_paths {
+        let properties_path = recip_path.join("__properties_version1.0");
+        let Some(bytes) = read_stream_bytes(comp, &properties_path) else {
+            counts.unresolved += 1;
+            continue;
+        };
+        let Some(decoded) = decode_properties_stream(&bytes, 8) else {
+            counts.unresolved += 1;
+            continue;
+        };
+        let recipient_type = decoded.entries.iter().find_map(|entry| {
+            if entry.property_id != PROP_RECIPIENT_TYPE || entry.property_type != 0x0003 {
+                return None;
+            }
+            match decode_fixed_value(entry.property_type, &entry.tail) {
+                Some(DecodedFixedValue::Long(value)) => Some(value),
+                _ => None,
+            }
+        });
+        match recipient_type {
+            Some(0) => counts.orig += 1,
+            Some(1) => counts.to += 1,
+            Some(2) => counts.cc += 1,
+            Some(3) => counts.bcc += 1,
+            Some(_) => counts.other += 1,
+            None => counts.unresolved += 1,
+        }
+    }
+
+    counts
+}
+
+/// Counts top-level attachment storages only -- the same scoping as
+/// `extract_recipient_type_counts`. `msg_parser` never opens an embedded
+/// message, so its `outlook.attachments` never includes that message's
+/// own attachments either.
+fn extract_attachment_count(comp: &CompoundFile) -> u64 {
+    top_level_storage_paths(comp, OxmsgEntryKind::AttachmentStorage).len() as u64
+}
+
+#[derive(Default)]
+struct AttachmentMethodCounts {
+    by_value: u64,
+    embedded_message: u64,
+    ole: u64,
+    other: u64,
+    with_content_id: u64,
+    /// An attachment storage whose PidTagAttachMethod couldn't be read at
+    /// all (missing properties stream, or no 0x3705 entry in it).
+    /// `msg_parser` has no equivalent bucket -- it always reports some
+    /// method value -- so this is reported on its own, not folded into
+    /// `other`.
+    unresolved: u64,
+    /// A by-value attachment whose PidTagAttachDataBinary is empty or
+    /// missing.
+    zero_byte_by_value: u64,
+    /// A non-by-value attachment (or one whose method couldn't be read).
+    /// Mirrors `msg_parser`'s own structural behavior: it leaves
+    /// `payload_bytes` empty for every method other than by-value, since
+    /// OLE and embedded-message content lives in a storage, not a flat
+    /// stream.
+    zero_size_other_method: u64,
+}
+
+/// Walks every top-level attachment storage and classifies it by its own
+/// `PidTagAttachMethod` (0x3705, PT_LONG), plus whether
+/// `PidTagAttachContentId` (0x3712) is present. Real content stays in
+/// memory only as counts by category -- never an attachment's name or
+/// bytes, which this function never reads at all.
+fn extract_attachment_method_counts(comp: &mut CompoundFile) -> AttachmentMethodCounts {
+    let mut counts = AttachmentMethodCounts::default();
+
+    let attachment_paths = top_level_storage_paths(&*comp, OxmsgEntryKind::AttachmentStorage);
+
+    for attach_path in attachment_paths {
+        let properties_path = attach_path.join("__properties_version1.0");
+        let Some(bytes) = read_stream_bytes(comp, &properties_path) else {
+            counts.unresolved += 1;
+            continue;
+        };
+        let Some(decoded) = decode_properties_stream(&bytes, 8) else {
+            counts.unresolved += 1;
+            continue;
+        };
+
+        let mut method = None;
+        let mut has_content_id = false;
+        for entry in &decoded.entries {
+            if entry.property_id == PROP_ATTACH_METHOD && entry.property_type == 0x0003 {
+                if let Some(DecodedFixedValue::Long(value)) =
+                    decode_fixed_value(entry.property_type, &entry.tail)
+                {
+                    method = Some(value);
+                }
+            } else if entry.property_id == PROP_ATTACH_CONTENT_ID {
+                has_content_id = true;
+            }
+        }
+
+        match method {
+            Some(1) => counts.by_value += 1,
+            Some(5) => counts.embedded_message += 1,
+            Some(6) => counts.ole += 1,
+            Some(_) => counts.other += 1,
+            None => counts.unresolved += 1,
+        }
+        if has_content_id {
+            counts.with_content_id += 1;
+        }
+
+        let is_by_value = matches!(method, Some(1));
+        let size_is_zero = if is_by_value {
+            read_stream_bytes(
+                comp,
+                &expected_variable_stream_path(&attach_path, 0x3701, 0x0102),
+            )
+            .map(|data| data.is_empty())
+            .unwrap_or(true)
+        } else {
+            true
+        };
+        if size_is_zero {
+            if is_by_value {
+                counts.zero_byte_by_value += 1;
+            } else {
+                counts.zero_size_other_method += 1;
+            }
+        }
+    }
+
+    counts
+}
+
+/// Attempts to read the one embedded message's own PidTagMessageClass
+/// directly via CFB -- the custom path's answer to whether an embedded
+/// message can be opened at all, the question left unresolved for
+/// `msg_parser`. Reuses `message_shaped_parent_paths` to find the embedded
+/// storage; never prints the class itself, only whether reading it
+/// succeeded.
+fn extract_embedded_message_class(comp: &mut CompoundFile) -> Option<String> {
+    let embedded_path = message_shaped_parent_paths(&*comp).into_iter().next()?;
+    let class_path = embedded_path.join("__substg1.0_001A001F");
+    let bytes = read_stream_bytes(comp, &class_path)?;
+    decode_unicode_value(&bytes).ok()
+}
+
+/// Runs the custom extraction path alone -- no `msg_parser` at all -- and
+/// prints the exact same report shape as `run_msg_diagnostic`. Meant to be
+/// diffed textually against `run_msg_diagnostic`'s output for the same
+/// files: identical apart from the one documented gap
+/// (`attachments_zero_byte`/`attachments_zero_size_other_method`) is what
+/// the --extract mode actually requires, not another aggregate
+/// match/mismatch count.
+fn run_msg_extract(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
+    println!("inventory=privacy_safe");
+    println!("input_kind=msg");
+    println!("files_scanned={}", files.len());
+    println!("subdirectories_skipped={subdirectories_skipped}");
+
+    let mut totals = MsgTotals::default();
+
+    for file in files {
+        match cfb::open(file) {
+            Ok(mut comp) => inspect_oxmsg_as_msg(&mut comp, &mut totals),
+            Err(_) => totals.open_errors += 1,
+        }
+    }
+
+    print_msg_report(&totals);
+
+    Ok(())
+}
+
+/// The custom-path equivalent of `inspect_msg`: populates the exact same
+/// `MsgTotals`, via the exact same shared `BodyCounters`/`CountStats` types
+/// and `record_*` functions, sourced from the extraction primitives
+/// verified by --verify field by field rather than from `msg_parser`'s
+/// `Outlook`. Composes already-checked pieces rather than introducing new
+/// logic. Every field here has a corresponding --verify result showing
+/// zero mismatches, or, for embedded-message opening, a confirmed
+/// improvement over `msg_parser`'s documented ceiling.
+fn inspect_oxmsg_as_msg(comp: &mut CompoundFile, totals: &mut MsgTotals) {
+    record_msg_class(totals, &extract_message_class(comp).unwrap_or_default());
+
+    let body = extract_body_flags(comp);
+    if body.decompression_failed {
+        totals.bodies.note_decompression_error();
+    } else if let Some(len) = body.decompressed_rtf_len {
+        totals.bodies.note_decompressed_bytes(len as usize);
+    }
+    totals.bodies.record(
+        body.has_plain,
+        body.has_html_native,
+        body.has_html_via_rtf,
+        body.has_rtf,
+    );
+
+    let recipients = extract_recipient_type_counts(comp);
+    record_msg_recipients(totals, recipients.to, recipients.cc, recipients.bcc);
+
+    let methods = extract_attachment_method_counts(comp);
+    totals.attachments_method_by_value += methods.by_value;
+    totals.attachments_method_embedded_message += methods.embedded_message;
+    totals.attachments_method_ole += methods.ole;
+    totals.attachments_method_other += methods.other;
+    totals.attachments_with_content_id += methods.with_content_id;
+    for _ in 0..methods.zero_byte_by_value {
+        totals.zero_byte_attachments.record(true, true);
+    }
+    for _ in 0..methods.zero_size_other_method {
+        totals.zero_byte_attachments.record(true, false);
+    }
+    totals.attachments.record(extract_attachment_count(&*comp));
+
+    if methods.embedded_message > 0 {
+        match extract_embedded_message_class(comp) {
+            Some(class) => {
+                totals.embedded_messages_opened += 1;
+                record_embedded_message_class(totals, &class);
+            }
+            None => totals.embedded_message_open_errors += 1,
+        }
+    }
+}
+
+// =============================================================================
+// MSG differential verification (--verify): custom MS-OXMSG extraction vs
+// msg_parser, field by field
+//
+// Prints only match/mismatch counts -- never the differing values -- so
+// this mode's output stays exactly as safe to share as every other
+// diagnostic here, even though it reads real content internally to make
+// the comparison.
 // =============================================================================
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -3147,7 +3088,8 @@ struct MsgVerifyTotals {
     recipients_cc: CountTally,
     recipients_bcc: CountTally,
     /// Custom-path-only: `msg_parser` has nothing to compare this against.
-    /// This is the direct test of the M2.x "37 vs 36" hypothesis.
+    /// This is the direct test of the "37 vs 36" recipient-count
+    /// hypothesis.
     recipient_orig_total: u64,
     recipient_other_type_total: u64,
     recipient_unresolved_total: u64,
@@ -3169,12 +3111,8 @@ struct MsgVerifyTotals {
     embedded_message_class_unreadable_total: u64,
 }
 
-/// M3e differential verification: runs both the custom extraction path
-/// and `msg_parser` over the same files and compares their output field
-/// by field. Prints only match/mismatch counts -- never the differing
-/// values -- so this mode's output stays exactly as safe to share as
-/// every other diagnostic here, even though it reads real content
-/// internally to make the comparison.
+/// Runs both the custom extraction path and `msg_parser` over the same
+/// files and compares their output field by field.
 fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
     let mut totals = MsgVerifyTotals::default();
     println!("inventory=privacy_safe");
@@ -3403,33 +3341,6 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
 
     Ok(())
 }
-
-/// Runs the custom extraction path alone -- no `msg_parser` at all -- and
-/// prints the exact same report shape as `run_msg_diagnostic`. Meant to be
-/// diffed textually against `run_msg_diagnostic`'s output for the same
-/// files: identical apart from the one documented gap
-/// (`attachments_zero_byte`/`attachments_zero_size_other_method`) is what
-/// M3f actually requires, not another aggregate match/mismatch count.
-fn run_msg_extract(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
-    println!("inventory=privacy_safe");
-    println!("input_kind=msg");
-    println!("files_scanned={}", files.len());
-    println!("subdirectories_skipped={subdirectories_skipped}");
-
-    let mut totals = MsgTotals::default();
-
-    for file in files {
-        match cfb::open(file) {
-            Ok(mut comp) => inspect_oxmsg_as_msg(&mut comp, &mut totals),
-            Err(_) => totals.open_errors += 1,
-        }
-    }
-
-    print_msg_report(&totals);
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
