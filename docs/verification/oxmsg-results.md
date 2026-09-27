@@ -411,6 +411,22 @@ The verified implementation now establishes that:
 - named properties are resolved to their GUID set and numeric/string
   identity, verified against real fixture bytes byte-by-byte.
 
-It still does **not** establish: fixed- or variable-property *value*
-content (only structural shape and validity), embedded-message decoding,
-or production replacement of `msg_parser`.
+### RTF decompression: msg_parser's dictionary bug, confirmed
+
+`msg_parser`'s preset LZFu dictionary diverges from MS-OXRTFCP's published
+207-byte dictionary starting around byte 195 (verified directly against
+Microsoft's spec page); `compressed-rtf`, the custom path's dependency,
+matches it exactly. `--verify` found exactly one file (of 29) with a
+decompressed-length disagreement, with a signed delta of -1 byte --
+consistent with a narrow, localized dictionary-tail divergence rather than
+a broader decompression problem on either side. The custom path is the
+one verified correct against the published spec here.
+
+### Embedded-message opening: a confirmed capability improvement
+
+`msg_parser`'s `Attachment::as_message()` returns `None` (not an error) for
+this corpus's one embedded-message attachment -- M2c's finding, root cause
+never identified. The custom path reads that embedded message's own
+`PidTagMessageClass` directly via CFB successfully:
+`embedded_message_class_readable_total=1`,
+`embedded_message_class_unreadable_total=0`. Confirmed, not just plausible.

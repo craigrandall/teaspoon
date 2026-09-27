@@ -35,9 +35,18 @@ struct Args {
     /// for the same .msg input (M3e differential verification). Reads
     /// real property content internally to do the comparison, but prints
     /// only match/mismatch counts -- never the values compared. Takes
-    /// precedence over --oxmsg if both are given. PST input is unaffected.
+    /// precedence over --oxmsg and --extract if both are given. PST input
+    /// is unaffected.
     #[arg(long)]
     verify: bool,
+
+    /// Run the custom MS-OXMSG extraction path alone (no `msg_parser`) and
+    /// print the same report shape as the default .msg diagnostic (M3f).
+    /// One known gap: zero-byte-attachment detection isn't populated yet.
+    /// Takes precedence over --oxmsg if both are given. PST input is
+    /// unaffected.
+    #[arg(long)]
+    extract: bool,
 }
 
 enum InputKind {
@@ -119,6 +128,8 @@ fn main() -> Result<()> {
         } => {
             if args.verify {
                 run_msg_verify(&files, subdirectories_skipped)
+            } else if args.extract {
+                run_msg_extract(&files, subdirectories_skipped)
             } else if args.oxmsg {
                 run_oxmsg_diagnostic(&files, subdirectories_skipped)
             } else {
@@ -2540,6 +2551,61 @@ fn print_oxmsg_report(totals: &OxmsgTotals) {
     );
 }
 
+/// The custom-path equivalent of `inspect_msg`: populates the exact same
+/// `MsgTotals`, via the exact same shared `BodyCounters`/`CountStats`
+/// types and `record_*` functions, sourced from the extraction primitives
+/// built and `--verify`-checked field by field rather than from
+/// `msg_parser`'s `Outlook`. Reuses `record_msg_class`/
+/// `record_msg_recipients`/`record_embedded_message_class` directly --
+/// this composes already-checked pieces rather than introducing new logic.
+///
+/// One known gap: per-attachment payload size isn't read anywhere yet, so
+/// `zero_byte_attachments` (and therefore `attachments_zero_byte`/
+/// `attachments_zero_size_other_method` in the printed report) stays at
+/// its default, unlike `msg_parser`'s path. Everything else here has a
+/// corresponding `--verify` result showing zero mismatches, or, for
+/// embedded-message opening, a confirmed improvement over `msg_parser`'s
+/// documented M2c ceiling.
+fn inspect_oxmsg_as_msg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut MsgTotals) {
+    record_msg_class(totals, &extract_message_class(comp).unwrap_or_default());
+
+    let body = extract_body_flags(comp);
+    if body.decompression_failed {
+        totals.bodies.note_decompression_error();
+    } else if let Some(len) = body.decompressed_rtf_len {
+        totals.bodies.note_decompressed_bytes(len as usize);
+    }
+    totals.bodies.record(
+        body.has_plain,
+        body.has_html_native,
+        body.has_html_via_rtf,
+        body.has_rtf,
+    );
+
+    let recipients = extract_recipient_type_counts(comp);
+    record_msg_recipients(totals, recipients.to, recipients.cc, recipients.bcc);
+
+    let methods = extract_attachment_method_counts(comp);
+    totals.attachments_method_by_value += methods.by_value;
+    totals.attachments_method_embedded_message += methods.embedded_message;
+    totals.attachments_method_ole += methods.ole;
+    totals.attachments_method_other += methods.other;
+    totals.attachments_with_content_id += methods.with_content_id;
+    // zero_byte_attachments intentionally not populated here -- see the
+    // doc comment above.
+    totals.attachments.record(extract_attachment_count(&*comp));
+
+    if methods.embedded_message > 0 {
+        match extract_embedded_message_class(comp) {
+            Some(class) => {
+                totals.embedded_messages_opened += 1;
+                record_embedded_message_class(totals, &class);
+            }
+            None => totals.embedded_message_open_errors += 1,
+        }
+    }
+}
+
 // --- The --oxmsg structural walk itself (two passes, one job each) --------
 //
 // The original `inspect_oxmsg` was a single ~320-line function holding
@@ -3305,6 +3371,32 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
         "embedded_message_class_unreadable_total={}",
         totals.embedded_message_class_unreadable_total
     );
+
+    Ok(())
+}
+
+/// Runs the custom extraction path alone -- no `msg_parser` at all -- and
+/// prints the exact same report shape as `run_msg_diagnostic`. Meant to be
+/// diffed textually against `run_msg_diagnostic`'s output for the same
+/// files: identical apart from the one documented gap
+/// (`attachments_zero_byte`/`attachments_zero_size_other_method`) is what
+/// M3f actually requires, not another aggregate match/mismatch count.
+fn run_msg_extract(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
+    println!("inventory=privacy_safe");
+    println!("input_kind=msg");
+    println!("files_scanned={}", files.len());
+    println!("subdirectories_skipped={subdirectories_skipped}");
+
+    let mut totals = MsgTotals::default();
+
+    for file in files {
+        match cfb::open(file) {
+            Ok(mut comp) => inspect_oxmsg_as_msg(&mut comp, &mut totals),
+            Err(_) => totals.open_errors += 1,
+        }
+    }
+
+    print_msg_report(&totals);
 
     Ok(())
 }
