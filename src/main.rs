@@ -2278,9 +2278,12 @@ fn extract_attachment_method_counts(
 
         let is_by_value = matches!(method, Some(1));
         let size_is_zero = if is_by_value {
-            read_stream_bytes(comp, &expected_variable_stream_path(&attach_path, 0x3701, 0x0102))
-                .map(|data| data.is_empty())
-                .unwrap_or(true)
+            read_stream_bytes(
+                comp,
+                &expected_variable_stream_path(&attach_path, 0x3701, 0x0102),
+            )
+            .map(|data| data.is_empty())
+            .unwrap_or(true)
         } else {
             true
         };
