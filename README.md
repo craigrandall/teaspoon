@@ -19,7 +19,23 @@ This is deliberately **not** the production miner and does not yet emit Markdown
 
 **M2 — MSG ingestion spike: body-type detection, recipient/attachment classification, and the zero-byte/subdirectory-visibility fixes are all confirmed correct against real data.** `tsp` dispatches on its input: a `.pst` file uses the unchanged M1 path; a single `.msg` file or a directory of `.msg` files (scanned non-recursively) uses a diagnostic built on the `msg_parser` crate, mirroring M1's structure. Opening an embedded-message attachment as a nested message (M2c) was investigated across two independent real attempts and found not achievable in practice, for a root cause not identified despite repeated research — an accepted ceiling, mirroring P4c on the PST side. See `docs/verification/m2-results.md` for the full evidence trail. `msg_parser` remains a provisional choice, not a final production commitment — see the custom-parser groundwork below.
 
-**Custom MS-OXMSG parser groundwork (experimental, opt-in): structural enumeration and property-entry decoding both verified against real data; value content is deliberately not yet extracted.** `msg_parser` has no raw/generic property-iteration equivalent to `outlook-pst`'s `.get(id)`/`.iter()` — the one structural inconsistency remaining between teaspoon's two format adapters, and directly at odds with the loss-aware-representation principle below. Run with `--oxmsg` against `.msg` input to use a from-scratch structural enumeration built on the `cfb` crate (a generic MS-CFB/Compound File Binary reader) instead of `msg_parser`. It opens a real `.msg` container, enumerates every entry with zero unrecognized (M2.x), decodes every property entry's type/ID/flags, reads variable-length value streams (size and encoding validated, content not extracted), and resolves named properties to their GUID set and numeric/string identity. It does not yet decode a property's actual value, only its structural shape. See `docs/verification/oxmsg-results.md`.
+**Custom MS-OXMSG parser: structural enumeration, property decoding, and
+value extraction all verified against real data; ready to become the
+default MSG path pending the zero-byte-attachment fix below.** Run with
+`--oxmsg` for the original structural diagnostic (types/counts, no values).
+Run with `--verify` to differentially check the extraction path against
+`msg_parser` field by field -- confirmed clean on every comparable field
+(message class, body type, recipients, attachment classification and
+content-ID presence, RTF byte totals), with two real, understood
+differences rather than open questions: `msg_parser`'s LZFu preset
+dictionary diverges from MS-OXRTFCP's published dictionary (confirmed
+against Microsoft's own spec text), and `msg_parser`'s embedded-message
+opening (`Attachment::as_message()`) returns `None` on this corpus's one
+embedded-message attachment for a reason M2c never identified, while the
+custom path reads it successfully. Run with `--extract` to see the custom
+path's own version of the default MSG report, with no `msg_parser`
+involved at all -- see `docs/verification/oxmsg-results.md` for the
+full evidence trail.
 
 ## Design principles
 
@@ -35,9 +51,14 @@ This is deliberately **not** the production miner and does not yet emit Markdown
 
 ```powershell
 cargo run --release -- .\sample.pst
-cargo run --release -- .\sample.msg
 cargo run --release -- .\folder-of-msgs\
-cargo run --release -- --oxmsg .\sample.msg   # experimental custom MS-OXMSG parser
+cargo run --release -- --oxmsg .\folder-of-msgs\     # structural diagnostic
+cargo run --release -- --verify .\folder-of-msgs\    # differential check against msg_parser
+cargo run --release -- --extract .\folder-of-msgs\   # custom path's own default-shaped report
+cargo run --release -- .\sample.msg
+cargo run --release -- --oxmsg .\sample.msg          # structural diagnostic
+cargo run --release -- --verify .\sample.msg         # differential check against msg_parser
+cargo run --release -- --extract .\sample.msg        # custom path's own default-shaped report
 ```
 
 Real PST/MSG fixtures are required to perform the behavioral portion of any milestone. No personal mail data is embedded in this repository.

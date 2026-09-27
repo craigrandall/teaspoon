@@ -422,6 +422,13 @@ consistent with a narrow, localized dictionary-tail divergence rather than
 a broader decompression problem on either side. The custom path is the
 one verified correct against the published spec here.
 
+Corpus-wide, `--extract`'s `rtf_decompressed_bytes_total` (1787065) is
+exactly 1 byte less than the default path's (1787066) -- the same -1-byte
+divergence `--verify` found on the one affected file, now confirmed a
+second way via a completely different computation (full-corpus sum vs.
+single-file comparison). Both point to the same, now-closed, `msg_parser`
+dictionary bug.
+
 ### Embedded-message opening: a confirmed capability improvement
 
 `msg_parser`'s `Attachment::as_message()` returns `None` (not an error) for

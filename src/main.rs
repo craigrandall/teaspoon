@@ -2207,6 +2207,15 @@ struct AttachmentMethodCounts {
     /// method value -- so this is reported on its own, not folded into
     /// `other`.
     unresolved: u64,
+    /// A by-value attachment whose PidTagAttachDataBinary is empty or
+    /// missing.
+    zero_byte_by_value: u64,
+    /// A non-by-value attachment (or one whose method couldn't be read).
+    /// Mirrors `msg_parser`'s own structural behavior: it leaves
+    /// `payload_bytes` empty for every method other than by-value, since
+    /// OLE and embedded-message content lives in a storage, not a flat
+    /// stream.
+    zero_size_other_method: u64,
 }
 
 /// Walks every top-level attachment storage and classifies it by its own
@@ -2265,6 +2274,22 @@ fn extract_attachment_method_counts(
         }
         if has_content_id {
             counts.with_content_id += 1;
+        }
+
+        let is_by_value = matches!(method, Some(1));
+        let size_is_zero = if is_by_value {
+            read_stream_bytes(comp, &expected_variable_stream_path(&attach_path, 0x3701, 0x0102))
+                .map(|data| data.is_empty())
+                .unwrap_or(true)
+        } else {
+            true
+        };
+        if size_is_zero {
+            if is_by_value {
+                counts.zero_byte_by_value += 1;
+            } else {
+                counts.zero_size_other_method += 1;
+            }
         }
     }
 
@@ -2559,13 +2584,10 @@ fn print_oxmsg_report(totals: &OxmsgTotals) {
 /// `record_msg_recipients`/`record_embedded_message_class` directly --
 /// this composes already-checked pieces rather than introducing new logic.
 ///
-/// One known gap: per-attachment payload size isn't read anywhere yet, so
-/// `zero_byte_attachments` (and therefore `attachments_zero_byte`/
-/// `attachments_zero_size_other_method` in the printed report) stays at
-/// its default, unlike `msg_parser`'s path. Everything else here has a
-/// corresponding `--verify` result showing zero mismatches, or, for
-/// embedded-message opening, a confirmed improvement over `msg_parser`'s
-/// documented M2c ceiling.
+/// Every field here has a corresponding `--verify` result showing zero
+/// mismatches, or, for embedded-message opening, a confirmed improvement
+/// over `msg_parser`'s documented M2c ceiling (see
+/// `docs/verification/oxmsg-results.md`).
 fn inspect_oxmsg_as_msg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mut MsgTotals) {
     record_msg_class(totals, &extract_message_class(comp).unwrap_or_default());
 
@@ -2591,8 +2613,12 @@ fn inspect_oxmsg_as_msg(comp: &mut cfb::CompoundFile<std::fs::File>, totals: &mu
     totals.attachments_method_ole += methods.ole;
     totals.attachments_method_other += methods.other;
     totals.attachments_with_content_id += methods.with_content_id;
-    // zero_byte_attachments intentionally not populated here -- see the
-    // doc comment above.
+    for _ in 0..methods.zero_byte_by_value {
+        totals.zero_byte_attachments.record(true, true);
+    }
+    for _ in 0..methods.zero_size_other_method {
+        totals.zero_byte_attachments.record(true, false);
+    }
     totals.attachments.record(extract_attachment_count(&*comp));
 
     if methods.embedded_message > 0 {
