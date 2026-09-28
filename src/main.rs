@@ -45,9 +45,11 @@ struct Args {
     verify: bool,
 
     /// Run the custom MS-OXMSG extraction path alone (no `msg_parser`) and
-    /// print the same report shape as the default .msg diagnostic. One
-    /// known gap: zero-byte-attachment detection isn't populated yet.
-    /// Takes precedence over --oxmsg. PST input is unaffected.
+    /// print the same report shape as the default .msg diagnostic. Zero
+    /// bytes are counted only for confirmed-empty PidTagAttachDataBinary
+    /// streams; an unreadable data stream is reported separately via
+    /// attachments_data_stream_missing. Takes precedence over --oxmsg.
+    /// PST input is unaffected.
     #[arg(long)]
     extract: bool,
 }
@@ -820,6 +822,16 @@ fn inspect_attachments(message: &dyn PstMessage, totals: &mut PstTotals) {
 const MSG_ATTACH_METHOD_BY_VALUE: u32 = 1;
 const MSG_ATTACH_METHOD_EMBEDDED_MESSAGE: u32 = 5;
 const MSG_ATTACH_METHOD_OLE: u32 = 6;
+
+/// PT_ERROR (0x000A): per MS-OXMSG, a property that is *not set* on an
+/// object is still represented in its `__properties_version1.0` entry
+/// array as an entry of this type, carrying PidTagNotFound. Presence
+/// checks that match on property ID alone would count these
+/// placeholders; they must be type-gated out.
+const PROP_TYPE_ERROR: u16 = 0x000A;
+/// PT_UNSPECIFIED (0x0000): excluded from presence checks for the same
+/// reason as [`PROP_TYPE_ERROR`].
+const PROP_TYPE_UNSPECIFIED: u16 = 0x0000;
 
 fn run_msg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
     println!("inventory=privacy_safe");
@@ -2662,6 +2674,14 @@ struct BodyFlags {
 /// memory to run the HTML-in-RTF check, but nothing here is ever printed.
 fn extract_body_flags(comp: &mut CompoundFile) -> BodyFlags {
     let root = Path::new("/");
+    // Non-empty, not merely present: msg_parser's `body`/`html`/
+    // `rtf_compressed` are empty for a zero-length (or absent) value, and
+    // the `!is_empty()` checks this path is diffed against in
+    // --verify/--extract use exactly that definition. A zero-length
+    // stream exists in the CFB but carries no body, so `Some(vec![])`
+    // must count as "no body" -- `.is_some()` alone made the two paths
+    // disagree on any file with an empty body stream, and made an empty
+    // RTF stream additionally report a phantom decompression error.
     let has_plain = read_stream_bytes(
         comp,
         &expected_variable_stream_path(root, PROP_BODY, 0x001F),
@@ -2672,16 +2692,17 @@ fn extract_body_flags(comp: &mut CompoundFile) -> BodyFlags {
             &expected_variable_stream_path(root, PROP_BODY, 0x001E),
         )
     })
-    .is_some();
+    .is_some_and(|bytes| !bytes.is_empty());
     let has_html_native = read_stream_bytes(
         comp,
         &expected_variable_stream_path(root, PROP_BODY_HTML, 0x0102),
     )
-    .is_some();
+    .is_some_and(|bytes| !bytes.is_empty());
     let rtf_bytes = read_stream_bytes(
         comp,
         &expected_variable_stream_path(root, PROP_RTF_COMPRESSED, 0x0102),
-    );
+    )
+    .filter(|bytes| !bytes.is_empty());
     let has_rtf = rtf_bytes.is_some();
 
     let mut decompression_failed = false;
@@ -2798,9 +2819,20 @@ struct AttachmentMethodCounts {
     /// method value -- so this is reported on its own, not folded into
     /// `other`.
     unresolved: u64,
-    /// A by-value attachment whose PidTagAttachDataBinary is empty or
-    /// missing.
+    /// A by-value attachment whose PidTagAttachDataBinary is present but
+    /// empty. A data stream that is absent or unreadable is NOT counted
+    /// here -- see `zero_data_stream_missing` -- consistent with the
+    /// no-silent-loss rule on `ZeroByteStats::record`.
     zero_byte_by_value: u64,
+    /// A by-value attachment whose PidTagAttachDataBinary stream could
+    /// not be read at all (absent, or a CFB read error). Reported on its
+    /// own rather than folded into `zero_byte_by_value`: an unreadable
+    /// stream is an anomaly, not evidence of an empty file.
+    zero_data_stream_missing: u64,
+    /// Paths of the attachment storages confirmed (from their own
+    /// PidTagAttachMethod) to hold embedded messages, so callers can open
+    /// each one rather than just knowing that at least one exists.
+    embedded_paths: Vec<PathBuf>,
     /// A non-by-value attachment (or one whose method couldn't be read).
     /// Mirrors `msg_parser`'s own structural behavior: it leaves
     /// `payload_bytes` empty for every method other than by-value, since
@@ -2810,10 +2842,14 @@ struct AttachmentMethodCounts {
 }
 
 /// Walks every top-level attachment storage and classifies it by its own
-/// `PidTagAttachMethod` (0x3705, PT_LONG), plus whether
-/// `PidTagAttachContentId` (0x3712) is present. Real content stays in
-/// memory only as counts by category -- never an attachment's name or
-/// bytes, which this function never reads at all.
+/// `PidTagAttachMethod` (0x3705, PT_LONG, type-gated so a PT_ERROR
+/// "not set" placeholder can't be misread as a method), plus whether
+/// `PidTagAttachContentId` (0x3712) is present. Also collects the paths
+/// of embedded-message attachments for per-attachment opening, and
+/// distinguishes an empty PidTagAttachDataBinary payload (a genuine
+/// zero-byte file) from one that could not be read at all. Real content
+/// stays in memory only as counts by category -- never an attachment's
+/// name or bytes, which this function never reads at all.
 fn extract_attachment_method_counts(comp: &mut CompoundFile) -> AttachmentMethodCounts {
     let mut counts = AttachmentMethodCounts::default();
 
@@ -2839,14 +2875,28 @@ fn extract_attachment_method_counts(comp: &mut CompoundFile) -> AttachmentMethod
                 {
                     method = Some(value);
                 }
-            } else if entry.property_id == PROP_ATTACH_CONTENT_ID {
+            } else if entry.property_id == PROP_ATTACH_CONTENT_ID
+                && entry.property_type != PROP_TYPE_ERROR
+                && entry.property_type != PROP_TYPE_UNSPECIFIED
+            {
+                // Type-gated, not ID-gated: MS-OXMSG represents a property
+                // that is *not set* on the object as a PT_ERROR (0x000A)
+                // entry carrying PidTagNotFound, so an attachment with no
+                // content ID can still have a 0x3712 entry. Matching the
+                // ID alone (the previous version) counted those
+                // placeholders as "has content ID", inflating the count
+                // relative to msg_parser's non-empty-`content_id` check.
+                // PT_UNSPECIFIED (0x0000) is excluded the same way.
                 has_content_id = true;
             }
         }
 
         match method {
             Some(1) => counts.by_value += 1,
-            Some(5) => counts.embedded_message += 1,
+            Some(5) => {
+                counts.embedded_message += 1;
+                counts.embedded_paths.push(attach_path.clone());
+            }
             Some(6) => counts.ole += 1,
             Some(_) => counts.other += 1,
             None => counts.unresolved += 1,
@@ -2856,47 +2906,106 @@ fn extract_attachment_method_counts(comp: &mut CompoundFile) -> AttachmentMethod
         }
 
         let is_by_value = matches!(method, Some(1));
-        let size_is_zero = if is_by_value {
-            read_stream_bytes(
+        if is_by_value {
+            match read_stream_bytes(
                 comp,
                 &expected_variable_stream_path(&attach_path, 0x3701, 0x0102),
-            )
-            .map(|data| data.is_empty())
-            .unwrap_or(true)
-        } else {
-            true
-        };
-        if size_is_zero {
-            if is_by_value {
-                counts.zero_byte_by_value += 1;
-            } else {
-                counts.zero_size_other_method += 1;
+            ) {
+                Some(data) if data.is_empty() => counts.zero_byte_by_value += 1,
+                Some(_) => {}
+                // Unreadable is not zero: the previous version's
+                // `unwrap_or(true)` silently reported a missing or
+                // corrupt data stream as an empty-file attachment,
+                // violating the documented "a missing or unreadable size
+                // is not counted as zero-byte" invariant.
+                None => counts.zero_data_stream_missing += 1,
             }
+        } else {
+            counts.zero_size_other_method += 1;
         }
     }
 
     counts
 }
 
-/// Attempts to read the one embedded message's own PidTagMessageClass
-/// directly via CFB -- the custom path's answer to whether an embedded
-/// message can be opened at all, the question left unresolved for
-/// `msg_parser`. Reuses `message_shaped_parent_paths` to find the embedded
-/// storage; never prints the class itself, only whether reading it
-/// succeeded.
-fn extract_embedded_message_class(comp: &mut CompoundFile) -> Option<String> {
-    let embedded_path = message_shaped_parent_paths(&*comp).into_iter().next()?;
-    let class_path = embedded_path.join("__substg1.0_001A001F");
-    let bytes = read_stream_bytes(comp, &class_path)?;
-    decode_unicode_value(&bytes).ok()
+/// One embedded message located and opened via CFB: its PidTagMessageClass
+/// as a best-effort read. `class` is `None` when the message-shaped storage
+/// exists but has no readable message-class stream -- which is NOT an open
+/// failure; callers use the storage's presence as the success signal,
+/// mirroring msg_parser, which opens such a message fine and simply
+/// reports an empty class.
+struct OpenedEmbeddedMessage {
+    class: Option<String>,
+}
+
+/// Opens ONE embedded-message attachment, located from the attachment's
+/// own properties rather than from an arbitrary member of
+/// `message_shaped_parent_paths`.
+///
+/// Why not `.next()` on that set: it includes the top-level message
+/// itself (`/`), every recipient storage, and every attachment storage --
+/// all of which have their own `__properties_version1.0` stream. `/`
+/// sorts first in a `BTreeSet<PathBuf>`, so the previous version of this
+/// lookup read `/__substg1.0_001A001F` -- the outer message's own class
+/// -- and reported it as the embedded message's. Instead, this version
+/// confirms from each attachment's own `PidTagAttachMethod`
+/// (type-gated against PT_ERROR placeholders) that it really is an
+/// embedded-message attachment (method 5), checks the `3701000D` storage
+/// under it is message-shaped, and only then reads the nested class
+/// stream. Per-attachment rather than once per file, so a message with
+/// several embedded-message attachments opens each one, matching
+/// msg_parser's per-attachment `embedded_messages_opened` counting.
+/// Never prints the class itself, only whether opening it succeeded.
+fn open_embedded_message(
+    comp: &mut CompoundFile,
+    attach_path: &Path,
+    message_shaped: &BTreeSet<PathBuf>,
+) -> Option<OpenedEmbeddedMessage> {
+    let properties_path = attach_path.join("__properties_version1.0");
+    let bytes = read_stream_bytes(comp, &properties_path)?;
+    let decoded = decode_properties_stream(&bytes, 8)?;
+    let is_embedded_message = decoded.entries.iter().any(|entry| {
+        entry.property_id == PROP_ATTACH_METHOD
+            && entry.property_type == 0x0003
+            // An equality comparison, not `matches!`: `as` casts are
+            // expressions, and `matches!` takes patterns, in which
+            // `MSG_ATTACH_METHOD_EMBEDDED_MESSAGE as i32` is a syntax
+            // error rather than a cast.
+            && decode_fixed_value(entry.property_type, &entry.tail)
+                == Some(DecodedFixedValue::Long(
+                    MSG_ATTACH_METHOD_EMBEDDED_MESSAGE as i32,
+                ))
+    });
+    if !is_embedded_message {
+        return None;
+    }
+
+    let embedded_path = attach_path.join(EMBEDDED_OBJECT_STORAGE_NAME);
+    if !message_shaped.contains(&embedded_path) {
+        // A custom/OLE payload storage, not a nested message: it cannot
+        // be opened as an embedded message. Counted as a genuine open
+        // error by the caller, not silently skipped.
+        return None;
+    }
+
+    // Reaching here means the embedded message was located and its
+    // storage opened. The class stream is best-effort: absent or
+    // undecodable (including a PT_STRING8 variant this path doesn't
+    // decode) still counts as a successfully opened message, just one
+    // with no readable class -- same as msg_parser, which opens the
+    // nested message and exposes an empty `message_class`.
+    let class = read_stream_bytes(comp, &embedded_path.join("__substg1.0_001A001F"))
+        .and_then(|bytes| decode_unicode_value(&bytes).ok());
+
+    Some(OpenedEmbeddedMessage { class })
 }
 
 /// Runs the custom extraction path alone -- no `msg_parser` at all -- and
-/// prints the exact same report shape as `run_msg_diagnostic`. Meant to be
-/// diffed textually against `run_msg_diagnostic`'s output for the same
-/// files: identical apart from the one documented gap
-/// (`attachments_zero_byte`/`attachments_zero_size_other_method`) is what
-/// the --extract mode actually requires, not another aggregate
+/// prints the exact same report shape as `run_msg_diagnostic`, plus one
+/// custom-path-only anomaly key (attachments_data_stream_missing).
+/// Meant to be diffed textually against `run_msg_diagnostic`'s output for
+/// the same files: identical apart from that one extra key is what the
+/// --extract mode actually requires, not another aggregate
 /// match/mismatch count.
 fn run_msg_extract(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
     println!("inventory=privacy_safe");
@@ -2905,15 +3014,24 @@ fn run_msg_extract(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()>
     println!("subdirectories_skipped={subdirectories_skipped}");
 
     let mut totals = MsgTotals::default();
+    // Custom-path-only anomaly, reported alongside the totals rather than
+    // merged into them: a by-value attachment whose data stream could not
+    // be read. There is no MsgTotals field for it (msg_parser has no
+    // equivalent signal), and the no-silent-loss rule forbids folding it
+    // into a zero-byte count.
+    let mut attachments_data_stream_missing = 0u64;
 
     for file in files {
         match cfb::open(file) {
-            Ok(mut comp) => inspect_oxmsg_as_msg(&mut comp, &mut totals),
+            Ok(mut comp) => {
+                inspect_oxmsg_as_msg(&mut comp, &mut totals, &mut attachments_data_stream_missing)
+            }
             Err(_) => totals.open_errors += 1,
         }
     }
 
     print_msg_report(&totals);
+    println!("attachments_data_stream_missing={attachments_data_stream_missing}");
 
     Ok(())
 }
@@ -2926,7 +3044,11 @@ fn run_msg_extract(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()>
 /// logic. Every field here has a corresponding --verify result showing
 /// zero mismatches, or, for embedded-message opening, a confirmed
 /// improvement over `msg_parser`'s documented ceiling.
-fn inspect_oxmsg_as_msg(comp: &mut CompoundFile, totals: &mut MsgTotals) {
+fn inspect_oxmsg_as_msg(
+    comp: &mut CompoundFile,
+    totals: &mut MsgTotals,
+    attachments_data_stream_missing: &mut u64,
+) {
     record_msg_class(totals, &extract_message_class(comp).unwrap_or_default());
 
     let body = extract_body_flags(comp);
@@ -2957,13 +3079,20 @@ fn inspect_oxmsg_as_msg(comp: &mut CompoundFile, totals: &mut MsgTotals) {
     for _ in 0..methods.zero_size_other_method {
         totals.zero_byte_attachments.record(true, false);
     }
+    *attachments_data_stream_missing += methods.zero_data_stream_missing;
     totals.attachments.record(extract_attachment_count(&*comp));
 
-    if methods.embedded_message > 0 {
-        match extract_embedded_message_class(comp) {
-            Some(class) => {
+    // Per embedded-message ATTACHMENT, not once per file: msg_parser's
+    // diagnostic increments `embedded_messages_opened` for every
+    // embedded-message attachment it opens, and --extract promises to be
+    // diffable against that report, so a message with two embedded
+    // messages must report 2 here, not the previous version's 1.
+    let message_shaped = message_shaped_parent_paths(&*comp);
+    for attach_path in &methods.embedded_paths {
+        match open_embedded_message(comp, attach_path, &message_shaped) {
+            Some(opened) => {
                 totals.embedded_messages_opened += 1;
-                record_embedded_message_class(totals, &class);
+                record_embedded_message_class(totals, opened.class.as_deref().unwrap_or(""));
             }
             None => totals.embedded_message_open_errors += 1,
         }
@@ -3100,6 +3229,10 @@ struct MsgVerifyTotals {
     attachments_other: CountTally,
     attachments_with_content_id: CountTally,
     attachment_unresolved_total: u64,
+    /// Custom-path-only: by-value attachments whose PidTagAttachDataBinary
+    /// could not be read at all (absent or a CFB read error). Counted on
+    /// its own -- an unreadable stream is an anomaly, not an empty file.
+    attachment_data_stream_missing_total: u64,
     rtf_decompressed_bytes: CountTally,
     /// Byte deltas (custom minus msg_parser) for the rare case where
     /// decompressed RTF length disagrees -- not content, just a size
@@ -3259,9 +3392,14 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
             attachment_methods.with_content_id,
         ));
         totals.attachment_unresolved_total += attachment_methods.unresolved;
+        totals.attachment_data_stream_missing_total += attachment_methods.zero_data_stream_missing;
 
-        if attachment_methods.embedded_message > 0 {
-            match extract_embedded_message_class(&mut comp) {
+        // Per embedded-message attachment, matching --extract; the
+        // previous once-per-file gate undercounted any message with more
+        // than one embedded-message attachment.
+        let message_shaped = message_shaped_parent_paths(&comp);
+        for attach_path in &attachment_methods.embedded_paths {
+            match open_embedded_message(&mut comp, attach_path, &message_shaped) {
                 Some(_) => totals.embedded_message_class_readable_total += 1,
                 None => totals.embedded_message_class_unreadable_total += 1,
             }
@@ -3325,6 +3463,10 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
     println!(
         "attachment_unresolved_total={}",
         totals.attachment_unresolved_total
+    );
+    println!(
+        "attachment_data_stream_missing_total={}",
+        totals.attachment_data_stream_missing_total
     );
     print_count_tally("rtf_decompressed_bytes", &totals.rtf_decompressed_bytes);
     for delta in &totals.rtf_decompressed_byte_mismatch_deltas {
