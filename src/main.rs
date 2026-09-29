@@ -4879,10 +4879,8 @@ mod tests {
         class_bytes: &[u8],
     ) -> PathBuf {
         use std::io::Write;
-        let path = std::env::temp_dir().join(format!(
-            "tsp-synthetic-{}-{tag}.msg",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("tsp-synthetic-{}-{tag}.msg", std::process::id()));
         let mut props = vec![0u8; 32]; // message-scope header
         for (property_id, value) in [
             (PROP_MESSAGE_CODEPAGE, message_codepage),
@@ -4918,18 +4916,19 @@ mod tests {
         // No codepage properties at all: falls back to Windows-1252.
         let path = write_synthetic_ansi_msg("fallback", None, None, b"IPM.Note");
         let mut comp = cfb::open(&path).expect("open synthetic CFB");
-        let resolved =
-            extract_string8_codepage(&mut comp, Path::new("/"), 32);
+        let resolved = extract_string8_codepage(&mut comp, Path::new("/"), 32);
         assert_eq!(resolved.source, CodepageSource::Fallback);
-        assert_eq!(extract_message_class(&mut comp).as_deref(), Some("IPM.Note"));
+        assert_eq!(
+            extract_message_class(&mut comp).as_deref(),
+            Some("IPM.Note")
+        );
         drop(comp);
         let _ = std::fs::remove_file(&path);
 
         // Internet code page only.
         let path = write_synthetic_ansi_msg("internet", None, Some(65001), b"IPM.Note");
         let mut comp = cfb::open(&path).expect("open synthetic CFB");
-        let resolved =
-            extract_string8_codepage(&mut comp, Path::new("/"), 32);
+        let resolved = extract_string8_codepage(&mut comp, Path::new("/"), 32);
         assert_eq!(
             resolved,
             ResolvedCodepage {
@@ -4937,7 +4936,10 @@ mod tests {
                 source: CodepageSource::InternetCodepage
             }
         );
-        assert_eq!(extract_message_class(&mut comp).as_deref(), Some("IPM.Note"));
+        assert_eq!(
+            extract_message_class(&mut comp).as_deref(),
+            Some("IPM.Note")
+        );
         drop(comp);
         let _ = std::fs::remove_file(&path);
 
@@ -4945,8 +4947,7 @@ mod tests {
         // all-ASCII class under a known ASCII superset still reads.
         let path = write_synthetic_ansi_msg("message", Some(932), Some(1251), b"IPM.Note");
         let mut comp = cfb::open(&path).expect("open synthetic CFB");
-        let resolved =
-            extract_string8_codepage(&mut comp, Path::new("/"), 32);
+        let resolved = extract_string8_codepage(&mut comp, Path::new("/"), 32);
         assert_eq!(
             resolved,
             ResolvedCodepage {
@@ -4954,7 +4955,10 @@ mod tests {
                 source: CodepageSource::MessageCodepage
             }
         );
-        assert_eq!(extract_message_class(&mut comp).as_deref(), Some("IPM.Note"));
+        assert_eq!(
+            extract_message_class(&mut comp).as_deref(),
+            Some("IPM.Note")
+        );
         drop(comp);
         let _ = std::fs::remove_file(&path);
     }
@@ -5074,4 +5078,3 @@ mod tests {
         assert!(failing.is_empty(), "structural gates nonzero: {failing:?}");
     }
 }
-
