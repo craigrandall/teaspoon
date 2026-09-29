@@ -63,13 +63,43 @@ failed.
 
 ### Confirmation
 
-M1's P4a diagnostics already follow this: unreadable `PidTagMessageClass`
-values are counted as `message_class_read_errors` rather than silently
-dropped, and P2's `message_open_errors`/`folder_open_errors` counters follow
-the same pattern for structural failures. See
+The diagnostics follow this decision at the counter level on both adapters.
+What does not exist yet is the per-item complete / partial / failed status
+vocabulary in a normalized model: today the loss accounting is aggregate
+counters in the privacy-safe inventory, not a per-item record.
+
+PST side (M1): unreadable `PidTagMessageClass` values are counted as
+`message_class_read_errors` rather than silently dropped, and P2's
+`message_open_errors`/`folder_open_errors` counters follow the same
+pattern for structural failures. See
 [docs/verification/m1-results.md](../docs/verification/m1-results.md).
-Attachment content and per-recipient classification (in progress as of
-P4b) will need to extend this same status vocabulary once implemented.
+
+MSG side (M2–M3): the custom MS-OXMSG path extends the same pattern.
+
+- Every CFB entry is classified, and anything else is counted rather than
+  dropped; `entry_accounting_gap_total` and `unrecognized_entries_total`
+  both read 0 on the 29-file corpus. Content the tool deliberately does not
+  interpret (a Word document's own OLE streams inside a custom attachment
+  storage) is counted as `opaque_payload`, not omitted.
+- A by-value attachment whose data stream cannot be read is reported as
+  `attachments_data_stream_missing`, not counted as an empty file. This
+  closed a real loss-accounting gap: the earlier MSG path could not tell an
+  unreadable attachment from a zero-byte one.
+- Property values that fail their structural checks each have a counter
+  (`variable_value_stream_missing_total`, `variable_value_size_mismatch_total`,
+  `variable_unicode_decode_errors_total`, and the fixed-value checks), all
+  0 on the corpus.
+- `PT_STRING8` values under a code page the decoder does not implement are
+  reported (`variable_string8_unsupported_codepage_total`) and produce no
+  text, rather than being decoded as if they were Windows-1252. This is
+  covered by synthetic fixtures only, since the corpus has no `PT_STRING8`
+  property.
+
+These gates are reported by `tsp --verify` as a set of counters that must
+all read 0, with a single `structural_gate_violations` total.
+
+Attachment content extraction and the per-item status vocabulary will need
+to extend this same pattern once implemented.
 
 ## More Information
 

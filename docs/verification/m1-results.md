@@ -15,6 +15,16 @@ is accepted as the practical ceiling of M1's PST read capability for now,
 confirmed 2026-09-07. M1 is not blocked or failing — it has reached the
 limit of what this specific dependency, used as intended, can prove.
 
+**Update (M2–M3): this file covers the PST side only, and the PST side has
+not changed since M1.** The MSG side is documented in `m2-results.md` and
+`m3-results.md`. Two of the "unproven" items at the end of this file have
+since been settled: the 2026-09-13 zero-byte fix and the
+`subdirectories_skipped` reporting were both run and confirmed on Windows
+(recorded in `m2-results.md`), and MSG support now exists. The PST-side
+embedded-message ceiling (P4c) is unchanged: the MSG side's ability to open
+embedded messages comes from the custom MS-OXMSG parser, not from anything
+that applies to `outlook-pst`.
+
 ## What M1 establishes
 
 The spike uses the Microsoft Rust PST implementation (`outlook-pst` v1.2.0,
@@ -131,6 +141,13 @@ diagnostic cannot see, because it only checks native `PidTagBodyHtml`
 presence — the exact same single-field check that was wrong on the MSG
 side before the 2026-09-07 fix.
 
+*(This implication was itself overturned the same day: see "Resolution:
+this PST-side result was correct" below. The one RTF-only message is
+genuinely RTF-authored; `bodies_html=55/57` was not an undercount. The
+paragraph above is kept as the record of the reasoning at that point,
+including the premise that exporting to `.msg` preserves the RTF
+property, which turned out not to hold for this message.)*
+
 **Fixing this is a larger lift than the MSG-side fix was**, because
 `outlook-pst` has no `html_from_rtf()`-equivalent convenience method the
 way `msg_parser` does. It would require: (1) extracting
@@ -182,6 +199,11 @@ numbers and dictionary cross-checked against `msg_parser`'s own
 independent from-scratch implementation of the same algorithm — both
 agree exactly, which is meaningful corroboration from two unrelated
 authors' implementations of the same Microsoft spec.
+*(Correction, M3: "both agree exactly" did not hold. The M3 differential
+verification found that `msg_parser`'s preset dictionary diverges from
+MS-OXRTFCP's published one (around byte 195 of 207), and that
+`compressed-rtf` matches the spec. The cross-check recorded here did not
+catch that divergence. See `m3-results.md`, "M3e".)*
 
 One real defensive finding from reading `compressed-rtf`'s actual source
 rather than trusting its signature: `decompress_rtf` indexes into the
@@ -216,9 +238,10 @@ This message is genuinely RTF-authored. The earlier MSG-side finding
 false positive: that method turned out not to gate on the FROMHTML
 control word at all. See `m2-results.md`, "CORRECTED: fromhtml detection
 was not actually spec-gated," for the fix this led to on the MSG side —
-both diagnostics now share one function (`rtf_bytes_contain_fromhtml`)
-checking the literal control word against decompressed bytes, rather than
-each trusting a different crate's higher-level convenience method.
+both diagnostics now share one function (`rtf_bytes_contain_fromhtml`,
+now `check_compressed_rtf_bytes`) checking the literal control word against
+decompressed bytes, rather than each trusting a different crate's
+higher-level convenience method.
 
 Unit tests cover the pure branching logic (absent property, non-binary
 property, too-short buffer, and a structurally-invalid-but-correctly-sized
@@ -302,10 +325,12 @@ malformed/non-Outlook-authored PST, could still produce one). It does
 establish that constructing this case through normal composition is
 impractical, and that it is not representative of realistic
 Outlook-authored content, which is what `tsp-tester.pst` is for. The
-`attachments_zero_byte` classification code in `tsp` is retained (see
-`record_attachment_size` in `src/main.rs`) as inexpensive, spec-correct
-protection against any PST that does contain one — only the goal of
-constructing an example for the fixture was dropped.
+`attachments_zero_byte` classification code in `tsp` is retained (the
+shared `ZeroByteStats` bookkeeping in `src/main.rs`) as inexpensive,
+spec-correct protection against any PST that does contain one — only the
+goal of constructing an example for the fixture was dropped.
+*(Note: a real zero-byte attachment did turn up in the 29-file `.msg`
+corpus, so that classification path has met real data on the MSG side.)*
 
 **By-reference attachment (any of `ATTACH_BY_REFERENCE`,
 `ATTACH_BY_REFERENCE_RESOLVE`, `ATTACH_BY_REFERENCE_ONLY`).** This MAPI
@@ -424,13 +449,10 @@ No claim is made that teaspoon has proven:
   investigated for P4c and found not achievable via `outlook-pst` v1.2.0's
   public API (see "P4c" above); classification still counts it correctly;
 - reading OLE attachment content — same constraint as embedded messages;
-- zero-byte attachment handling against a real row (code exists; fixture
-  construction goal deliberately dropped — see rationale above);
-- the 2026-09-13 zero-byte/attachment-method fix (`attachments_zero_byte`
-  now conditioned on `by_value`, plus the new
-  `attachments_zero_size_other_method` counter) — implemented, not yet
-  compiled or run on Windows;
-- `subdirectories_skipped` reporting — implemented, not yet run;
+- zero-byte attachment handling against a real PST row (code exists;
+  fixture construction goal deliberately dropped — see rationale above);
+  the 2026-09-13 method-conditioned split itself has since been run and
+  confirmed on Windows (see `m2-results.md`);
 - by-reference attachment handling, any of the 3 sub-methods, against a
   real row (code exists; fixture construction goal deliberately dropped —
   see rationale above);
@@ -438,7 +460,8 @@ No claim is made that teaspoon has proven:
   weakly exercised: 2/79 attachments);
 - named-property semantic normalization;
 - corrupt-PST behavior;
-- differential equivalence with another implementation;
-- MSG support.
+- differential equivalence of the PST side with another implementation
+  (no `libpff` or `libpst` comparison has been run; the MSG side has been
+  compared against `msg_parser`, see `m3-results.md`).
 
 Those require further fixtures, further implementation, and explicit tests.

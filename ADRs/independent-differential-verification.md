@@ -63,14 +63,49 @@ considered independent verification.
 
 ### Confirmation
 
-**This ADR records that the decision to do differential verification has
-been accepted — it does not record that differential verification has been
-performed.** As of v0.1.2, no comparison against libpff, libpst, or
-`msg_parser` has been run. This is tracked as outstanding work; see
-[docs/verification/test-strategy.md](../docs/verification/test-strategy.md)
+**This ADR records the decision to do differential verification, and the
+evidence that it has been performed for the MSG side only.** The PST side
+is still outstanding.
+
+MSG side (performed): `tsp --verify` runs the custom MS-OXMSG extraction
+path and `msg_parser` over the same files and prints match/mismatch counts
+per field, never the values compared. Over the 29-file `.msg` corpus it
+showed parity on every comparable field and exactly two differences, both
+triaged against Microsoft's specifications rather than settled by majority
+vote or by trusting either implementation:
+
+1. `msg_parser`'s preset LZFu dictionary diverges from the dictionary
+   published in MS-OXRTFCP; the custom path (through `compressed-rtf`)
+   matches the spec. The disagreement is −1 decompressed byte on one file
+   of 29.
+2. `msg_parser`'s `Attachment::as_message()` returns `None` on the corpus's
+   one embedded-message attachment; the custom path opens it and reads its
+   message class.
+
+Both are recorded in [docs/verification/m3-results.md](../docs/verification/m3-results.md).
+An independent-oracle result that flags a real defect in the oracle itself
+(the dictionary) is the case the "each discrepancy needs triage" consequence
+above anticipated.
+
+Two structural limits on this evidence should be stated plainly:
+
+- The corpus is a single 29-file set, and `msg_parser` is one oracle.
+  `libpff` and `libpst` have not been integrated for either format.
+- A comparison run is not a regression gate by itself. A corpus-gated test
+  (`fixture_corpus_verify_is_clean`, enabled by setting `TSP_FIXTURE_DIR`)
+  re-runs the comparison and the structural gates on demand, because the
+  fixtures are deliberately not committed. CI cannot run it. Until it is run
+  on a machine that has the fixtures, the evidence is a recorded result, not
+  a continuously enforced property.
+
+PST side (outstanding): no comparison against `libpff` or `libpst` has been
+run. See [docs/verification/test-strategy.md](../docs/verification/test-strategy.md)
 for where it sits in the overall evidence ladder.
 
 ## More Information
 
-Candidate PST oracles: libpff, libpst. Candidate MSG oracle: the Rust
-`msg_parser` crate. None have been integrated yet.
+Candidate PST oracles: libpff, libpst (not yet integrated). MSG oracle in
+use: the Rust `msg_parser` crate, through `--verify` only. It is a normal
+Cargo dependency rather than a dev-dependency, because the verification
+harness ships in the `tsp` binary; its oracle-only role is enforced by
+where it is called, not by the Cargo section it is listed under.

@@ -60,12 +60,32 @@ MSG adapter (M2) more disruptive to add than if the boundary is drawn now.
 
 ### Confirmation
 
-M1's PST spike (`tsp`) already writes its diagnostics against a
-`Message`/`Folder` abstraction from the `outlook-pst` crate rather than
-raw PST byte structures, which is consistent with this decision but does
-not yet prove it: the real test is whether the M2 MSG adapter can be
-written to feed the *same* normalized model without changes to the M4
-Markdown/archive engine. That confirmation is still outstanding.
+**Not yet confirmed.** The normalized `OutlookItem` model does not exist in
+the code yet; both adapters currently produce privacy-safe diagnostic
+counters, not normalized items.
+
+What the evidence does show:
+
+- The PST diagnostic (M1) is written against the `outlook-pst` crate's
+  `Message`/`Folder` abstractions rather than raw PST byte structures, and
+  the MSG path (M2–M3) is written against its own decoded-property layer
+  rather than the container bytes. Both are consistent with this decision.
+- The two adapters converge on one vocabulary at the diagnostic level.
+  They share the same counter types (`BodyCounters`, `CountStats`,
+  `ZeroByteStats`), the same MS-OXRTFEX `\fromhtml1` detection function
+  (`check_compressed_rtf_bytes`), and the same report keys, so they cannot
+  drift apart silently. The default `.msg` report has the same shape the
+  PST report uses.
+- The MSG adapter's decoded values (typed fixed values, decoded strings,
+  resolved named properties) are the raw material a normalized model would
+  be built from.
+
+That is convergence in the diagnostics, not proof of the decision. The real
+test is unchanged: whether the MSG adapter can feed the *same* normalized
+model as the PST adapter, without changes to the M4 Markdown/archive
+engine. That confirmation is still outstanding, and it is now unblocked on
+the MSG side, since the custom parser is the production path (see
+[custom-MS-OXMSG-parser-grad-to-prod-msg-path.md](custom-MS-OXMSG-parser-grad-to-prod-msg-path.md)).
 
 ## More Information
 

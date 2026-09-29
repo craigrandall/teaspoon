@@ -61,10 +61,23 @@ dependency of the production miner.
 
 ### Confirmation
 
-M1's spike confirms `tsp.exe` opens and traverses a real PST
+PST side (M1): `tsp.exe` opens and traverses a real PST
 (`tsp-tester.pst`) on Windows 11 without Outlook running or a mail profile
 configured, using only the `outlook-pst` crate. See
 [docs/verification/m1-results.md](../docs/verification/m1-results.md).
+
+MSG side (M2–M3): the same holds for `.msg`. The production `.msg` path
+reads the files through the generic `cfb` container crate plus teaspoon's
+own MS-OXMSG layer, and needs no Outlook, MAPI, or COM. Fixtures used for
+verification were exported from Outlook, but nothing in the runtime path
+uses it. See [docs/verification/m3-results.md](../docs/verification/m3-results.md).
+
+What has not been shown: any run on a non-Windows host. All verification so
+far ran on Windows. CI (`.github/workflows/ci.yml`) builds and unit-tests on
+Linux and Windows, but the fixtures are excluded from the repository, so no
+real PST/MSG parsing runs there. The "cross-platform" driver is therefore
+supported by the choice of dependencies and by CI builds, and not yet by a
+real-data run off Windows.
 
 ## More Information
 

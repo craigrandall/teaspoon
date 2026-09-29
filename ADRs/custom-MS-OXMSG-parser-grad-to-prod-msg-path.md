@@ -1,6 +1,6 @@
 ---
-status: "proposed"
-date: 2026-09-23
+status: "accepted"
+date: 2026-09-29
 decision-makers: Craig
 consulted: Claude (Anthropic)
 informed: n/a — single-developer project
@@ -8,20 +8,23 @@ informed: n/a — single-developer project
 
 # Custom MS-OXMSG parser graduates to the production MSG path
 
+Status history: proposed 2026-09-23; accepted 2026-09-29, when M3f shipped
+the default-path flip with its evidence gate satisfied (see Confirmation).
+
 ## Context and Problem Statement
 
-As of v0.1.9.9, `.msg` input is handled by `msg_parser` by default, with
+As of v0.1.9.9, `.msg` input was handled by `msg_parser` by default, with
 an experimental `cfb`-based custom parser available via `--oxmsg`. The
-custom path has since verified, against the full 29-file fixture corpus,
+custom path had by then verified, against the full 29-file fixture corpus,
 complete structural enumeration (M2.x: every CFB entry accounted for and
 classified), property-entry decoding (type/ID/flags/variable-length size-
 reserved, cross-checked against the attachment Reserved-field sentinel),
 and named-property resolution (GUID set and numeric/string identity,
 confirmed byte-for-byte against real fixture data after a bit-layout
-defect was found and fixed). It still decodes no property *value*.
-`msg_parser` remains the only path that produces teaspoon's current MSG
+defect was found and fixed). It still decoded no property *value*.
+`msg_parser` remained the only path that produced teaspoon's MSG
 diagnostic output (message class, body-type detection, recipient/
-attachment classification), and has the only public API teaspoon uses for
+attachment classification), and had the only public API teaspoon used for
 it. Should the custom parser become the production path, and if so, what
 role does `msg_parser` retain?
 
@@ -44,8 +47,8 @@ role does `msg_parser` retain?
 
 - Graduate the custom parser to be the default MSG path once value
   extraction (M3a-M3e below) is built and differentially verified against
-  `msg_parser`; retain `msg_parser` only as a dev/test differential-
-  verification dependency, never a runtime fallback.
+  `msg_parser`; retain `msg_parser` only as a differential-verification
+  oracle, never a runtime fallback.
 - Graduate the custom parser as the default, and add an explicit,
   user-facing `--msg-parser` flag to fall back to the legacy path
   indefinitely.
@@ -55,8 +58,8 @@ role does `msg_parser` retain?
 
 ## Decision Outcome
 
-Chosen option: "Graduate once verified, `msg_parser` becomes a dev/test
-oracle only, no runtime fallback flag," because it is the only option that
+Chosen option: "Graduate once verified, `msg_parser` becomes an oracle
+only, no runtime fallback flag," because it is the only option that
 keeps `msg_parser`'s role consistent with what the differential-
 verification ADR already decided, while still resolving the raw-property-
 iteration gap that motivated the custom parser. A permanent fallback flag
@@ -72,27 +75,59 @@ subject distinction the verification ADR depends on staying separate.
 - Good, because `msg_parser`'s disagreements stay signals to investigate
   rather than being silently absorbed by users routing around a rough
   edge with a fallback flag.
-- Bad, because it requires M3a-M3e's real value-extraction and parity work
-  before the flag can be removed — this is not a quick win, and
-  `--oxmsg`/`msg_parser` both stay in the tree until it's done.
-- Bad, because dropping `msg_parser` as a runtime dependency later removes
-  a second, independently-maintained implementation's ongoing bug fixes as
-  free verification signal — mitigated by keeping it as a dev-dependency
-  rather than removing it entirely.
+- Bad, because it required M3a-M3e's real value-extraction and parity work
+  before the default could flip. `--oxmsg` and `--extract` remain in the
+  tree as transitional flags until M3g removes them.
+- Bad, because relying on `msg_parser` only as an oracle forgoes a second,
+  independently-maintained implementation's ongoing bug fixes as runtime
+  behavior. The oracle role keeps their value as verification signal.
 
 ### Confirmation
 
 M3e's differential-verification run against the 29-file corpus, documented
-in `docs/verification/` the way `m1-results.md`/`m2-results.md` are, is
-the fitness function: the default flips (M3f) only once that document
+in [docs/verification/m3-results.md](../docs/verification/m3-results.md),
+was the fitness function: the default flips (M3f) only once that document
 shows parity or better, field by field, with every disagreement triaged
-against MS-OXMSG/MS-OXCMSG rather than resolved by which tool said what.
+against the Microsoft specifications rather than resolved by which tool
+said what.
+
+That condition was met. The corpus showed parity on every comparable field
+and exactly two differences, both resolved in the custom path's favor
+against the specifications (the MS-OXRTFCP dictionary, and embedded-message
+opening). M3f then flipped the `.msg` default to the custom path. A
+default-flag run over the 29 fixtures produced output identical to the
+earlier `--extract` output, the build was clean, and all tests passed
+(56 at the flip).
+
+How the outcome differs from the decision as written:
+
+- **`msg_parser` is a normal Cargo dependency, not a dev-dependency.** The
+  option text says "dev/test"; the `--verify` harness ships in the `tsp`
+  binary, and a dev-dependency is not available to the binary. The
+  oracle-only role is enforced by where the crate is called (only from
+  `--verify`), and no default code path calls it. The Cargo section itself
+  does not enforce this. Moving `--verify` behind a Cargo feature or into a
+  separate test-only binary would make `msg_parser` a true dev-dependency;
+  that is an open option, not a scheduled change.
+- **Transitional flags remain until M3g.** `--extract` is now a redundant
+  alias of the default. `--oxmsg` is a structural diagnostic whose gate
+  counters have been folded into `--verify`. Both are to be removed in M3g.
+  Neither falls back to `msg_parser`, so the "no runtime fallback flag"
+  clause holds.
+
+Follow-up hardening, tracked in the M3 results file: the both-paths
+comparison is re-runnable as a corpus-gated test
+(`fixture_corpus_verify_is_clean`, enabled by `TSP_FIXTURE_DIR`), so that
+the M3e evidence can be re-checked on demand instead of being a one-time
+record. It cannot run in CI, because the fixtures are not in the repository.
 
 ## More Information
 
 Supersedes no prior ADR; executes the outstanding work recorded in
 "independent differential verification" for the MSG side specifically.
-Revisit if M3e surfaces a disagreement that can't be resolved against the
-spec text alone (e.g. a real-world `.msg` producer doing something neither
-document anticipates) — that would be grounds to reconsider scope, not to
-abandon the verification step.
+Revisit if a future comparison surfaces a disagreement that can't be
+resolved against the spec text alone (e.g. a real-world `.msg` producer
+doing something neither document anticipates) — that would be grounds to
+reconsider scope, not to abandon the verification step. The corpus has no
+`PT_STRING8` property, so ANSI-encoded `.msg` input is the largest
+remaining area where the graduated path has not met real data.

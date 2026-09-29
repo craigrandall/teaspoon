@@ -8,6 +8,12 @@ contained in the top-level `ADRs` folder of the `teaspoon` GitHub repo:
 - Links to other content/context are encouraged within an ADR. Be sure
   that what you specify is generally, not just specifically (e.g. to your
   local env), findable (e.g. relative paths within this repo).
+- An ADR's `status` records whether the *decision* has been made, not
+  whether the work it calls for is finished. When a decision needs
+  evidence before it can be accepted, or when its outcome differs from
+  what was written, say so in the ADR's Confirmation section. When an ADR
+  changes status, record the transition (with dates) just under the title,
+  so the history is readable without digging through commits.
 
 ---
 

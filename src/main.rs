@@ -38,8 +38,11 @@ struct Args {
     /// Compare the custom MS-OXMSG extraction path against `msg_parser`
     /// for the same .msg input. Reads real property content internally to
     /// do the comparison, but prints only match/mismatch counts -- never
-    /// the values compared. Takes precedence over --oxmsg and --extract.
-    /// PST input is unaffected.
+    /// the values compared. Also runs the custom path's structural
+    /// accounting (every CFB entry classified, every properties stream
+    /// and value stream decoded) and prints its gate counters plus
+    /// `structural_gate_violations` (0 on a clean corpus). Takes
+    /// precedence over --oxmsg and --extract. PST input is unaffected.
     #[arg(long)]
     verify: bool,
 
@@ -1527,6 +1530,182 @@ fn decode_string8_cp1252(bytes: &[u8]) -> (String, u32) {
     (s, undefined)
 }
 
+/// PidTagMessageClass (0x001A): a bounded MAPI vocabulary value.
+const PROP_MESSAGE_CLASS: u16 = 0x001A;
+
+/// PidTagMessageCodepage (0x3FFD, PT_LONG): the code page used to encode
+/// the non-Unicode (PT_STRING8) string properties of a message object
+/// (Microsoft's own property page for it). Zero means "use the folder
+/// object's code page", which a standalone `.msg` file cannot supply, so
+/// zero is treated as unspecified rather than as a code page.
+const PROP_MESSAGE_CODEPAGE: u16 = 0x3FFD;
+
+/// PidTagInternetCodepage (0x3FDE, PT_LONG; PR_INTERNET_CPID): the
+/// message's Internet code page. Second link in the chain: consulted only
+/// when `PidTagMessageCodepage` is absent or zero. This ordering is a
+/// documented teaspoon design choice, not a quotation of a specification
+/// rule.
+const PROP_INTERNET_CODEPAGE: u16 = 0x3FDE;
+
+/// Last link in the chain: Windows-1252, the conventional default for
+/// Western ANSI mail. Reported explicitly (never silently assumed) via
+/// [`CodepageSource::Fallback`].
+const STRING8_FALLBACK_CODEPAGE: u32 = 1252;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodepageSource {
+    MessageCodepage,
+    InternetCodepage,
+    Fallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedCodepage {
+    codepage: u32,
+    source: CodepageSource,
+}
+
+/// The PT_STRING8 code page resolution chain: `PidTagMessageCodepage`,
+/// then `PidTagInternetCodepage`, then the documented Windows-1252
+/// fallback. A value that is absent, zero, or negative is unspecified and
+/// falls through to the next link.
+fn resolve_string8_codepage(
+    message_codepage: Option<i32>,
+    internet_codepage: Option<i32>,
+) -> ResolvedCodepage {
+    let positive = |value: Option<i32>| -> Option<u32> {
+        value.and_then(|v| u32::try_from(v).ok()).filter(|&v| v > 0)
+    };
+    if let Some(codepage) = positive(message_codepage) {
+        return ResolvedCodepage {
+            codepage,
+            source: CodepageSource::MessageCodepage,
+        };
+    }
+    if let Some(codepage) = positive(internet_codepage) {
+        return ResolvedCodepage {
+            codepage,
+            source: CodepageSource::InternetCodepage,
+        };
+    }
+    ResolvedCodepage {
+        codepage: STRING8_FALLBACK_CODEPAGE,
+        source: CodepageSource::Fallback,
+    }
+}
+
+/// Reads the first PT_LONG entry with `property_id` from a decoded
+/// properties stream, type-gated so a PT_ERROR placeholder never reads as
+/// a value.
+fn read_long_property(decoded: &DecodedPropertiesStream, property_id: u16) -> Option<i32> {
+    decoded.entries.iter().find_map(|entry| {
+        if entry.property_id != property_id || entry.property_type != 0x0003 {
+            return None;
+        }
+        match decode_fixed_value(entry.property_type, &entry.tail) {
+            Some(DecodedFixedValue::Long(value)) => Some(value),
+            _ => None,
+        }
+    })
+}
+
+/// Resolves the PT_STRING8 code page for the message whose own
+/// `__properties_version1.0` stream lives directly under `storage`
+/// (`/` for the top-level message, the `3701000D` storage for an embedded
+/// one). An unreadable properties stream resolves to the fallback rather
+/// than failing.
+fn extract_string8_codepage(
+    comp: &mut CompoundFile,
+    storage: &Path,
+    header_len: usize,
+) -> ResolvedCodepage {
+    let decoded = read_stream_bytes(comp, &storage.join("__properties_version1.0"))
+        .and_then(|bytes| decode_properties_stream(&bytes, header_len));
+    match decoded {
+        Some(decoded) => resolve_string8_codepage(
+            read_long_property(&decoded, PROP_MESSAGE_CODEPAGE),
+            read_long_property(&decoded, PROP_INTERNET_CODEPAGE),
+        ),
+        None => resolve_string8_codepage(None, None),
+    }
+}
+
+/// Outcome of decoding PT_STRING8 bytes under a resolved code page. Loss
+/// is explicit: a code page this decoder does not implement is reported,
+/// never silently decoded as something else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum String8Decoded {
+    /// Decoded under an implemented code page; `replaced` counts bytes
+    /// with no defined mapping (each became U+FFFD).
+    Decoded { text: String, replaced: u32 },
+    /// Every byte is 7-bit ASCII and the code page is a known ASCII
+    /// superset this decoder does not otherwise implement, so the text is
+    /// exact even though the code page's upper half is unsupported.
+    AsciiUnderUnsupportedCodepage { text: String },
+    /// A code page this decoder does not implement, with bytes that are
+    /// not all ASCII. No text is produced.
+    UnsupportedCodepage,
+}
+
+/// Code pages whose 0x00-0x7F range is plain ASCII, so an all-ASCII byte
+/// string decodes exactly under them even without a full decoder. Kept
+/// deliberately explicit: EBCDIC and UTF-16/32 code pages are absent.
+fn string8_codepage_is_ascii_superset(codepage: u32) -> bool {
+    matches!(
+        codepage,
+        437 | 850 | 852 | 866 | 874 | 932 | 936 | 949 | 950 | 1250
+            | 1251 | 1253..=1258 | 20866 | 21866 | 28592..=28599 | 28605
+            | 51932 | 51949 | 54936
+    )
+}
+
+/// Decodes PT_STRING8 bytes under `codepage`. Implemented: 1252, 28591
+/// (ISO-8859-1), 20127 (US-ASCII), 65001 (UTF-8). Any other code page
+/// decodes only all-ASCII input, and only when it is a known ASCII
+/// superset; otherwise it is reported as unsupported.
+fn decode_string8_with_codepage(bytes: &[u8], codepage: u32) -> String8Decoded {
+    match codepage {
+        1252 => {
+            let (text, replaced) = decode_string8_cp1252(bytes);
+            String8Decoded::Decoded { text, replaced }
+        }
+        28591 => String8Decoded::Decoded {
+            text: bytes.iter().map(|&b| b as char).collect(),
+            replaced: 0,
+        },
+        20127 => {
+            let mut text = String::with_capacity(bytes.len());
+            let mut replaced = 0u32;
+            for &b in bytes {
+                if b.is_ascii() {
+                    text.push(b as char);
+                } else {
+                    replaced += 1;
+                    text.push('\u{FFFD}');
+                }
+            }
+            String8Decoded::Decoded { text, replaced }
+        }
+        65001 => match std::str::from_utf8(bytes) {
+            Ok(text) => String8Decoded::Decoded {
+                text: text.to_string(),
+                replaced: 0,
+            },
+            Err(_) => {
+                let text = String::from_utf8_lossy(bytes).into_owned();
+                let replaced = text.matches('\u{FFFD}').count() as u32;
+                String8Decoded::Decoded { text, replaced }
+            }
+        },
+        other if bytes.is_ascii() && string8_codepage_is_ascii_superset(other) => {
+            String8Decoded::AsciiUnderUnsupportedCodepage {
+                text: bytes.iter().map(|&b| b as char).collect(),
+            }
+        }
+        _ => String8Decoded::UnsupportedCodepage,
+    }
+}
+
 /// Decodes one entry of the Named Property String Stream
 /// (`__substg1.0_00040102`, MS-OXMSG 2.2.3.1.4): a 4-byte length (the byte
 /// count of the UTF-16 string that follows, not including this length
@@ -1839,6 +2018,16 @@ struct OxmsgTotals {
     /// Bytes replaced with U+FFFD while decoding a PT_STRING8 value as
     /// Windows-1252 -- unverified against real data.
     variable_string8_undefined_byte_total: u64,
+    /// PT_STRING8 value streams under a code page this decoder does not
+    /// implement, with non-ASCII bytes (no text produced).
+    variable_string8_unsupported_codepage_total: u64,
+    /// PT_STRING8 value streams that are all ASCII under a known ASCII
+    /// superset code page this decoder does not otherwise implement.
+    variable_string8_ascii_under_unsupported_codepage_total: u64,
+    /// Which link of the code page chain resolved, once per file.
+    string8_codepage_from_message_total: u64,
+    string8_codepage_from_internet_total: u64,
+    string8_codepage_fallback_total: u64,
     /// A PT_CLSID (0x0048) value stream whose length isn't exactly the 16
     /// bytes a GUID requires.
     variable_clsid_wrong_length_total: u64,
@@ -2110,6 +2299,26 @@ fn print_oxmsg_report(totals: &OxmsgTotals) {
         totals.variable_string8_undefined_byte_total
     );
     println!(
+        "variable_string8_unsupported_codepage_total={}",
+        totals.variable_string8_unsupported_codepage_total
+    );
+    println!(
+        "variable_string8_ascii_under_unsupported_codepage_total={}",
+        totals.variable_string8_ascii_under_unsupported_codepage_total
+    );
+    println!(
+        "string8_codepage_from_message_total={}",
+        totals.string8_codepage_from_message_total
+    );
+    println!(
+        "string8_codepage_from_internet_total={}",
+        totals.string8_codepage_from_internet_total
+    );
+    println!(
+        "string8_codepage_fallback_total={}",
+        totals.string8_codepage_fallback_total
+    );
+    println!(
         "variable_clsid_wrong_length_total={}",
         totals.variable_clsid_wrong_length_total
     );
@@ -2183,7 +2392,26 @@ fn inspect_oxmsg(comp: &mut CompoundFile, totals: &mut OxmsgTotals) {
     // once per entry.
     let named_property_map = read_named_property_map(comp);
 
-    decode_oxmsg_properties_streams(comp, &entries, named_property_map.as_ref(), totals);
+    // The PT_STRING8 code page is resolved once per file from the
+    // top-level message's own properties.
+    let string8_codepage = extract_string8_codepage(
+        comp,
+        Path::new("/"),
+        properties_stream_header_len(OxmsgEntryScope::Message).unwrap_or(32),
+    );
+    match string8_codepage.source {
+        CodepageSource::MessageCodepage => totals.string8_codepage_from_message_total += 1,
+        CodepageSource::InternetCodepage => totals.string8_codepage_from_internet_total += 1,
+        CodepageSource::Fallback => totals.string8_codepage_fallback_total += 1,
+    }
+
+    decode_oxmsg_properties_streams(
+        comp,
+        &entries,
+        named_property_map.as_ref(),
+        string8_codepage.codepage,
+        totals,
+    );
 }
 
 /// Pass 1: classifies every CFB entry from its name, position, and
@@ -2308,6 +2536,7 @@ fn decode_oxmsg_properties_streams(
     comp: &mut CompoundFile,
     entries: &[CollectedOxmsgEntry],
     named_property_map: Option<&NamedPropertyMap>,
+    string8_codepage: u32,
     totals: &mut OxmsgTotals,
 ) {
     for entry in entries {
@@ -2337,6 +2566,7 @@ fn decode_oxmsg_properties_streams(
                 scope,
                 prop_entry,
                 named_property_map,
+                string8_codepage,
                 totals,
             );
         }
@@ -2353,6 +2583,7 @@ fn record_property_entry(
     scope: OxmsgEntryScope,
     entry: &DecodedPropertyEntry,
     named_property_map: Option<&NamedPropertyMap>,
+    string8_codepage: u32,
     totals: &mut OxmsgTotals,
 ) {
     totals.properties_entries_total += 1;
@@ -2369,7 +2600,7 @@ fn record_property_entry(
         PropertyEntryShape::FixedInline => check_fixed_inline_entry(entry, totals),
         PropertyEntryShape::VariableSingle => {
             totals.properties_entries_variable_single_total += 1;
-            check_variable_value_stream(comp, stream_path, entry, totals);
+            check_variable_value_stream(comp, stream_path, entry, string8_codepage, totals);
         }
         PropertyEntryShape::VariableMultivalued => {
             totals.properties_entries_variable_multivalued_total += 1;
@@ -2411,6 +2642,7 @@ fn check_variable_value_stream(
     comp: &mut CompoundFile,
     stream_path: &Path,
     entry: &DecodedPropertyEntry,
+    string8_codepage: u32,
     totals: &mut OxmsgTotals,
 ) {
     let declared_size =
@@ -2438,10 +2670,17 @@ fn check_variable_value_stream(
                 totals.variable_unicode_decode_errors_total += 1;
             }
         }
-        0x001E => {
-            let (_, undefined_count) = decode_string8_cp1252(&value_bytes);
-            totals.variable_string8_undefined_byte_total += undefined_count as u64;
-        }
+        0x001E => match decode_string8_with_codepage(&value_bytes, string8_codepage) {
+            String8Decoded::Decoded { replaced, .. } => {
+                totals.variable_string8_undefined_byte_total += replaced as u64;
+            }
+            String8Decoded::AsciiUnderUnsupportedCodepage { .. } => {
+                totals.variable_string8_ascii_under_unsupported_codepage_total += 1;
+            }
+            String8Decoded::UnsupportedCodepage => {
+                totals.variable_string8_unsupported_codepage_total += 1;
+            }
+        },
         0x0048 if value_bytes.len() != 16 => {
             totals.variable_clsid_wrong_length_total += 1;
         }
@@ -2547,15 +2786,46 @@ fn record_named_property_observation(
 // counters the msg_parser diagnostic does) -- never printed directly.
 // =============================================================================
 
-/// Reads PidTagMessageClass (0x001A, PT_UNICODE) directly from a message's
-/// own `__substg1.0_001A001F` stream at the CFB root. Not independently
-/// unit-tested: it's a thin composition of `read_stream_bytes` (no logic
-/// of its own) and `decode_unicode_value` (already tested) -- its real
+/// Reads a string property by ID from `parent`: PT_UNICODE if present,
+/// otherwise PT_STRING8 decoded under `string8_codepage`. `None` means
+/// absent, undecodable, or under a code page this decoder does not
+/// implement (never silently decoded as something else).
+fn read_string_property(
+    comp: &mut CompoundFile,
+    parent: &Path,
+    property_id: u16,
+    string8_codepage: u32,
+) -> Option<String> {
+    if let Some(bytes) = read_stream_bytes(
+        comp,
+        &expected_variable_stream_path(parent, property_id, 0x001F),
+    ) {
+        return decode_unicode_value(&bytes).ok();
+    }
+    let bytes = read_stream_bytes(
+        comp,
+        &expected_variable_stream_path(parent, property_id, 0x001E),
+    )?;
+    match decode_string8_with_codepage(&bytes, string8_codepage) {
+        String8Decoded::Decoded { text, .. }
+        | String8Decoded::AsciiUnderUnsupportedCodepage { text } => Some(text),
+        String8Decoded::UnsupportedCodepage => None,
+    }
+}
+
+/// Reads PidTagMessageClass (0x001A) directly from a message's own value
+/// streams at the CFB root (PT_UNICODE, or PT_STRING8 under the resolved
+/// code page chain). Not independently unit-tested for the UNICODE path:
+/// it is a thin composition of already-tested pieces -- its real
 /// verification is `run_msg_verify` producing a clean run against the
-/// fixture corpus.
+/// fixture corpus; the STRING8 path is covered by synthetic-fixture tests.
 fn extract_message_class(comp: &mut CompoundFile) -> Option<String> {
-    let bytes = read_stream_bytes(comp, Path::new("/__substg1.0_001A001F"))?;
-    decode_unicode_value(&bytes).ok()
+    let codepage = extract_string8_codepage(
+        comp,
+        Path::new("/"),
+        properties_stream_header_len(OxmsgEntryScope::Message).unwrap_or(32),
+    );
+    read_string_property(comp, Path::new("/"), PROP_MESSAGE_CLASS, codepage.codepage)
 }
 
 struct BodyFlags {
@@ -2898,8 +3168,17 @@ fn open_embedded_message(
     // decode) still counts as a successfully opened message, just one
     // with no readable class -- same as msg_parser, which opens the
     // nested message and exposes an empty `message_class`.
-    let class = read_stream_bytes(comp, &embedded_path.join("__substg1.0_001A001F"))
-        .and_then(|bytes| decode_unicode_value(&bytes).ok());
+    let embedded_codepage = extract_string8_codepage(
+        comp,
+        &embedded_path,
+        properties_stream_header_len(OxmsgEntryScope::EmbeddedObject).unwrap_or(24),
+    );
+    let class = read_string_property(
+        comp,
+        &embedded_path,
+        PROP_MESSAGE_CLASS,
+        embedded_codepage.codepage,
+    );
 
     Some(OpenedEmbeddedMessage { class })
 }
@@ -3145,16 +3424,29 @@ struct MsgVerifyTotals {
     rtf_decompressed_byte_mismatch_deltas: Vec<i64>,
     embedded_message_class_readable_total: u64,
     embedded_message_class_unreadable_total: u64,
+    /// The custom path's structural accounting over the same files,
+    /// accumulated by `inspect_oxmsg` (formerly `--oxmsg`-only).
+    structural: OxmsgTotals,
 }
 
 /// Runs both the custom extraction path and `msg_parser` over the same
 /// files and compares their output field by field.
 fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
-    let mut totals = MsgVerifyTotals::default();
+    let totals = collect_msg_verify_totals(files);
     println!("inventory=privacy_safe");
     println!("input_kind=msg_verify");
     println!("files_scanned={}", files.len());
     println!("subdirectories_skipped={subdirectories_skipped}");
+    print_msg_verify_report(&totals);
+    Ok(())
+}
+
+/// Runs both extraction paths over every file and accumulates the
+/// comparison tallies plus the custom path's structural accounting,
+/// separated from printing (SLAP) so the fixture-gated regression test can
+/// assert on the totals directly.
+fn collect_msg_verify_totals(files: &[PathBuf]) -> MsgVerifyTotals {
+    let mut totals = MsgVerifyTotals::default();
 
     for file in files {
         let outlook = match Outlook::from_path(file) {
@@ -3307,8 +3599,18 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
                 None => totals.embedded_message_class_unreadable_total += 1,
             }
         }
+
+        // Structural accounting (formerly only reachable via --oxmsg):
+        // every CFB entry classified, every properties stream and value
+        // stream decoded. Content-free counters only.
+        inspect_oxmsg(&mut comp, &mut totals.structural);
     }
 
+    totals
+}
+
+/// Prints the `--verify` report, separated from the scan loop (SLAP).
+fn print_msg_verify_report(totals: &MsgVerifyTotals) {
     println!("open_errors_msg_parser={}", totals.open_errors_msg_parser);
     println!("open_errors_custom={}", totals.open_errors_custom);
     println!(
@@ -3384,8 +3686,159 @@ fn run_msg_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> 
         totals.embedded_message_class_unreadable_total
     );
 
-    Ok(())
+    print_verify_structural_gates(&totals.structural);
 }
+
+/// Structural gate counters, each of which MUST read 0 on a clean corpus.
+/// Every one has direct corpus evidence of reading 0 (see
+/// docs/verification/m3-results.md); the value is signed so an overcount
+/// is visible. Names are the same output vocabulary `--oxmsg` used.
+fn structural_gate_values(totals: &OxmsgTotals) -> Vec<(&'static str, i64)> {
+    let reserved_embedded = totals
+        .attach_data_object_reserved_counts
+        .get(&0x01)
+        .copied()
+        .unwrap_or(0);
+    let reserved_storage = totals
+        .attach_data_object_reserved_counts
+        .get(&0x04)
+        .copied()
+        .unwrap_or(0);
+    vec![
+        (
+            "entry_accounting_gap_total",
+            totals.entry_accounting_gap_total(),
+        ),
+        (
+            "unrecognized_entries_total",
+            totals.unrecognized_entries_total as i64,
+        ),
+        (
+            "properties_stream_too_short_for_header_total",
+            totals.properties_stream_too_short_for_header_total as i64,
+        ),
+        (
+            "properties_stream_trailing_bytes_total",
+            totals.properties_stream_trailing_bytes_total as i64,
+        ),
+        (
+            "properties_stream_unexpected_scope_total",
+            totals.properties_stream_unexpected_scope_total as i64,
+        ),
+        (
+            "properties_stream_read_errors",
+            totals.properties_stream_read_errors as i64,
+        ),
+        (
+            "attach_data_object_size_sentinel_mismatches",
+            totals.attach_data_object_size_sentinel_mismatches as i64,
+        ),
+        (
+            "attach_data_object_reserved_vs_embedded_object_storage_gap",
+            reserved_embedded as i64 - totals.embedded_object_storages_message_shaped_total as i64,
+        ),
+        (
+            "attach_data_object_reserved_vs_custom_object_storage_gap",
+            reserved_storage as i64 - totals.embedded_object_storages_custom_total as i64,
+        ),
+        (
+            "fixed_boolean_invalid_encoding_total",
+            totals.fixed_boolean_invalid_encoding_total as i64,
+        ),
+        (
+            "fixed_float_non_finite_total",
+            totals.fixed_float_non_finite_total as i64,
+        ),
+        (
+            "variable_value_stream_missing_total",
+            totals.variable_value_stream_missing_total as i64,
+        ),
+        (
+            "variable_value_size_mismatch_total",
+            totals.variable_value_size_mismatch_total as i64,
+        ),
+        (
+            "variable_value_odd_utf16_length_total",
+            totals.variable_value_odd_utf16_length_total as i64,
+        ),
+        (
+            "variable_unicode_decode_errors_total",
+            totals.variable_unicode_decode_errors_total as i64,
+        ),
+        (
+            "variable_string8_undefined_byte_total",
+            totals.variable_string8_undefined_byte_total as i64,
+        ),
+        (
+            "variable_string8_unsupported_codepage_total",
+            totals.variable_string8_unsupported_codepage_total as i64,
+        ),
+        (
+            "variable_clsid_wrong_length_total",
+            totals.variable_clsid_wrong_length_total as i64,
+        ),
+        (
+            "named_properties_guid_out_of_range_total",
+            totals.named_properties_guid_out_of_range_total as i64,
+        ),
+        (
+            "named_properties_string_decode_errors_total",
+            totals.named_properties_string_decode_errors_total as i64,
+        ),
+        (
+            "named_properties_index_mismatch_total",
+            totals.named_properties_index_mismatch_total as i64,
+        ),
+    ]
+}
+
+fn count_structural_gate_violations(gates: &[(&'static str, i64)]) -> usize {
+    gates.iter().filter(|(_, value)| *value != 0).count()
+}
+
+/// Prints the structural gates, a single violation count (0 on a clean
+/// corpus), and a few informational counters that are reported but not
+/// gated. Keys keep the names `--oxmsg` used.
+fn print_verify_structural_gates(totals: &OxmsgTotals) {
+    let gates = structural_gate_values(totals);
+    for (name, value) in &gates {
+        println!("{name}={value}");
+    }
+    println!(
+        "structural_gate_violations={}",
+        count_structural_gate_violations(&gates)
+    );
+    println!("total_entries={}", totals.total_entries);
+    println!(
+        "opaque_payload_entries_total={}",
+        totals.opaque_payload_entries_total
+    );
+    println!(
+        "named_properties_map_missing_total={}",
+        totals.named_properties_map_missing_total
+    );
+    println!(
+        "named_properties_unresolvable_total={}",
+        totals.named_properties_unresolvable_total
+    );
+    println!(
+        "variable_string8_ascii_under_unsupported_codepage_total={}",
+        totals.variable_string8_ascii_under_unsupported_codepage_total
+    );
+    println!(
+        "string8_codepage_from_message_total={}",
+        totals.string8_codepage_from_message_total
+    );
+    println!(
+        "string8_codepage_from_internet_total={}",
+        totals.string8_codepage_from_internet_total
+    );
+    println!(
+        "string8_codepage_fallback_total={}",
+        totals.string8_codepage_fallback_total
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4302,4 +4755,323 @@ mod tests {
         assert_eq!(compare_count(3, 3), CountComparison::Match);
         assert_eq!(compare_count(3, 4), CountComparison::Mismatch);
     }
+
+    // --- PT_STRING8 code page chain (M3 design debt closed) ---------------
+
+    #[test]
+    fn string8_codepage_chain_prefers_message_then_internet_then_fallback() {
+        assert_eq!(
+            resolve_string8_codepage(Some(932), Some(1251)),
+            ResolvedCodepage {
+                codepage: 932,
+                source: CodepageSource::MessageCodepage
+            }
+        );
+        // Zero ("use the folder's code page"), negative, and absent are all
+        // unspecified and fall through.
+        assert_eq!(
+            resolve_string8_codepage(Some(0), Some(1251)),
+            ResolvedCodepage {
+                codepage: 1251,
+                source: CodepageSource::InternetCodepage
+            }
+        );
+        assert_eq!(
+            resolve_string8_codepage(Some(-1), Some(65001)),
+            ResolvedCodepage {
+                codepage: 65001,
+                source: CodepageSource::InternetCodepage
+            }
+        );
+        assert_eq!(
+            resolve_string8_codepage(None, None),
+            ResolvedCodepage {
+                codepage: 1252,
+                source: CodepageSource::Fallback
+            }
+        );
+        assert_eq!(
+            resolve_string8_codepage(Some(0), Some(0)).source,
+            CodepageSource::Fallback
+        );
+    }
+
+    #[test]
+    fn string8_decoding_covers_implemented_codepages() {
+        // 1252: 0x80 is the euro sign; 0x81 is one of the five undefined bytes.
+        assert_eq!(
+            decode_string8_with_codepage(&[0x80, b'a'], 1252),
+            String8Decoded::Decoded {
+                text: "\u{20AC}a".to_string(),
+                replaced: 0
+            }
+        );
+        assert_eq!(
+            decode_string8_with_codepage(&[0x81], 1252),
+            String8Decoded::Decoded {
+                text: "\u{FFFD}".to_string(),
+                replaced: 1
+            }
+        );
+        // ISO-8859-1 maps 0x80 to U+0080 (unlike 1252).
+        assert_eq!(
+            decode_string8_with_codepage(&[0x80], 28591),
+            String8Decoded::Decoded {
+                text: "\u{0080}".to_string(),
+                replaced: 0
+            }
+        );
+        // US-ASCII: a high byte is a replaced byte, not a silent guess.
+        assert_eq!(
+            decode_string8_with_codepage(&[b'A', 0x80], 20127),
+            String8Decoded::Decoded {
+                text: "A\u{FFFD}".to_string(),
+                replaced: 1
+            }
+        );
+        // UTF-8: valid input is exact; an invalid byte is counted.
+        assert_eq!(
+            decode_string8_with_codepage("caf\u{E9}".as_bytes(), 65001),
+            String8Decoded::Decoded {
+                text: "caf\u{E9}".to_string(),
+                replaced: 0
+            }
+        );
+        assert!(matches!(
+            decode_string8_with_codepage(&[b'a', 0xFF], 65001),
+            String8Decoded::Decoded { replaced: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn string8_decoding_reports_unsupported_codepages_instead_of_guessing() {
+        // All-ASCII under a known ASCII superset: exact, flagged.
+        assert_eq!(
+            decode_string8_with_codepage(b"IPM.Note", 932),
+            String8Decoded::AsciiUnderUnsupportedCodepage {
+                text: "IPM.Note".to_string()
+            }
+        );
+        // Non-ASCII under an unimplemented code page: no text, reported.
+        assert_eq!(
+            decode_string8_with_codepage(&[0x82, 0xA0], 932),
+            String8Decoded::UnsupportedCodepage
+        );
+        // All-ASCII under a code page NOT known to be an ASCII superset
+        // (e.g. an EBCDIC page) is still unsupported.
+        assert_eq!(
+            decode_string8_with_codepage(b"IPM.Note", 37),
+            String8Decoded::UnsupportedCodepage
+        );
+    }
+
+    // --- Synthetic ANSI (.msg with PT_STRING8) fixtures ---------------------
+    //
+    // The corpus has no PT_STRING8 property, so these build minimal CFB
+    // containers in a temp file: a message-level properties stream
+    // (optionally carrying codepage properties) plus a PT_STRING8
+    // PidTagMessageClass value stream. UNVERIFIED until run on Windows.
+
+    fn write_synthetic_ansi_msg(
+        tag: &str,
+        message_codepage: Option<i32>,
+        internet_codepage: Option<i32>,
+        class_bytes: &[u8],
+    ) -> PathBuf {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "tsp-synthetic-{}-{tag}.msg",
+            std::process::id()
+        ));
+        let mut props = vec![0u8; 32]; // message-scope header
+        for (property_id, value) in [
+            (PROP_MESSAGE_CODEPAGE, message_codepage),
+            (PROP_INTERNET_CODEPAGE, internet_codepage),
+        ] {
+            if let Some(value) = value {
+                props.extend_from_slice(&0x0003u16.to_le_bytes()); // PT_LONG
+                props.extend_from_slice(&property_id.to_le_bytes());
+                props.extend_from_slice(&0x0000_0006u32.to_le_bytes()); // flags
+                props.extend_from_slice(&value.to_le_bytes());
+                props.extend_from_slice(&[0u8; 4]);
+            }
+        }
+        let mut comp = cfb::create(&path).expect("create synthetic CFB");
+        let mut properties = comp
+            .create_stream("/__properties_version1.0")
+            .expect("create properties stream");
+        properties.write_all(&props).expect("write properties");
+        properties.flush().expect("flush properties");
+        drop(properties);
+        let mut class = comp
+            .create_stream("/__substg1.0_001A001E")
+            .expect("create class stream");
+        class.write_all(class_bytes).expect("write class");
+        class.flush().expect("flush class");
+        drop(class);
+        drop(comp);
+        path
+    }
+
+    #[test]
+    fn synthetic_ansi_msg_class_reads_through_the_codepage_chain() {
+        // No codepage properties at all: falls back to Windows-1252.
+        let path = write_synthetic_ansi_msg("fallback", None, None, b"IPM.Note");
+        let mut comp = cfb::open(&path).expect("open synthetic CFB");
+        let resolved =
+            extract_string8_codepage(&mut comp, Path::new("/"), 32);
+        assert_eq!(resolved.source, CodepageSource::Fallback);
+        assert_eq!(extract_message_class(&mut comp).as_deref(), Some("IPM.Note"));
+        drop(comp);
+        let _ = std::fs::remove_file(&path);
+
+        // Internet code page only.
+        let path = write_synthetic_ansi_msg("internet", None, Some(65001), b"IPM.Note");
+        let mut comp = cfb::open(&path).expect("open synthetic CFB");
+        let resolved =
+            extract_string8_codepage(&mut comp, Path::new("/"), 32);
+        assert_eq!(
+            resolved,
+            ResolvedCodepage {
+                codepage: 65001,
+                source: CodepageSource::InternetCodepage
+            }
+        );
+        assert_eq!(extract_message_class(&mut comp).as_deref(), Some("IPM.Note"));
+        drop(comp);
+        let _ = std::fs::remove_file(&path);
+
+        // Message code page wins over the Internet code page, and an
+        // all-ASCII class under a known ASCII superset still reads.
+        let path = write_synthetic_ansi_msg("message", Some(932), Some(1251), b"IPM.Note");
+        let mut comp = cfb::open(&path).expect("open synthetic CFB");
+        let resolved =
+            extract_string8_codepage(&mut comp, Path::new("/"), 32);
+        assert_eq!(
+            resolved,
+            ResolvedCodepage {
+                codepage: 932,
+                source: CodepageSource::MessageCodepage
+            }
+        );
+        assert_eq!(extract_message_class(&mut comp).as_deref(), Some("IPM.Note"));
+        drop(comp);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn synthetic_ansi_msg_with_unsupported_codepage_and_high_bytes_reports_absent() {
+        let path = write_synthetic_ansi_msg("unsupported", Some(932), None, &[0x82, 0xA0]);
+        let mut comp = cfb::open(&path).expect("open synthetic CFB");
+        assert_eq!(extract_message_class(&mut comp), None);
+        drop(comp);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- Structural gates folded into --verify -----------------------------
+
+    #[test]
+    fn structural_gates_are_all_zero_for_empty_totals() {
+        let totals = OxmsgTotals::default();
+        let gates = structural_gate_values(&totals);
+        assert!(!gates.is_empty());
+        assert_eq!(count_structural_gate_violations(&gates), 0);
+    }
+
+    #[test]
+    fn structural_gates_flag_each_nonzero_gate() {
+        let mut totals = OxmsgTotals {
+            unrecognized_entries_total: 1,
+            variable_string8_unsupported_codepage_total: 2,
+            ..Default::default()
+        };
+        // One embedded-message Reserved sentinel with no message-shaped
+        // storage to account for it: a gap of +1.
+        totals.attach_data_object_reserved_counts.insert(0x01, 1);
+        let gates = structural_gate_values(&totals);
+        assert_eq!(count_structural_gate_violations(&gates), 4);
+        // total_entries (0) - recognized (0) - opaque (0) - unrecognized (1)
+        // is also a negative accounting gap, hence 4, not 3.
+    }
+
+    // --- Fixture-gated both-paths regression gate --------------------------
+    //
+    // Runs the same comparison `tsp --verify` prints, over a real `.msg`
+    // corpus that is deliberately NOT committed (no personal mail data in
+    // this repository). Skipped, with a note, when TSP_FIXTURE_DIR is
+    // unset, so plain `cargo test` stays hermetic. Failure messages carry
+    // counts only, never content.
+    //
+    // PowerShell:
+    //   $env:TSP_FIXTURE_DIR = "C:\dev\csr\main\teaspoon\_NOTES\test-fixtures\msgs"
+    //   cargo test fixture_corpus_verify_is_clean -- --nocapture
+
+    /// Files (of the 29-file corpus) whose decompressed RTF length is
+    /// EXPECTED to differ from msg_parser's, because msg_parser's LZFu
+    /// preset dictionary diverges from MS-OXRTFCP's (docs/verification/
+    /// m3-results.md). Raise only with a documented, spec-checked reason.
+    const KNOWN_RTF_DICTIONARY_DIVERGENCE_FILES: u64 = 1;
+
+    #[test]
+    fn fixture_corpus_verify_is_clean() {
+        let Some(dir) = std::env::var_os("TSP_FIXTURE_DIR") else {
+            eprintln!("TSP_FIXTURE_DIR not set; skipping fixture-corpus regression gate");
+            return;
+        };
+        let InputKind::Msg { files, .. } =
+            classify_input(Path::new(&dir)).expect("TSP_FIXTURE_DIR must classify")
+        else {
+            panic!("TSP_FIXTURE_DIR must be a directory of .msg files");
+        };
+        let totals = collect_msg_verify_totals(&files);
+
+        assert_eq!(totals.open_errors_msg_parser, 0, "msg_parser open errors");
+        assert_eq!(totals.open_errors_custom, 0, "custom open errors");
+        assert_eq!(totals.message_class_both_present_mismatch, 0);
+        assert_eq!(totals.message_class_presence_mismatch, 0);
+        for (name, tally) in [
+            ("body_plain", &totals.body_plain),
+            ("body_html_native", &totals.body_html_native),
+            ("body_html_via_rtf", &totals.body_html_via_rtf),
+            ("body_rtf", &totals.body_rtf),
+        ] {
+            assert_eq!(tally.mismatch, 0, "{name} mismatches");
+        }
+        for (name, tally) in [
+            ("recipients_to", &totals.recipients_to),
+            ("recipients_cc", &totals.recipients_cc),
+            ("recipients_bcc", &totals.recipients_bcc),
+            ("attachments_total", &totals.attachments_total),
+            ("attachments_by_value", &totals.attachments_by_value),
+            (
+                "attachments_embedded_message",
+                &totals.attachments_embedded_message,
+            ),
+            ("attachments_ole", &totals.attachments_ole),
+            ("attachments_other", &totals.attachments_other),
+            (
+                "attachments_with_content_id",
+                &totals.attachments_with_content_id,
+            ),
+        ] {
+            assert_eq!(tally.mismatched, 0, "{name} mismatches");
+        }
+        assert_eq!(totals.recipient_other_type_total, 0);
+        assert_eq!(totals.recipient_unresolved_total, 0);
+        assert_eq!(totals.attachment_unresolved_total, 0);
+        assert_eq!(totals.attachment_data_stream_missing_total, 0);
+        assert_eq!(totals.embedded_message_class_unreadable_total, 0);
+        assert!(
+            totals.rtf_decompressed_bytes.mismatched <= KNOWN_RTF_DICTIONARY_DIVERGENCE_FILES,
+            "rtf length mismatches exceed the documented dictionary divergence"
+        );
+        let gates = structural_gate_values(&totals.structural);
+        let failing: Vec<&str> = gates
+            .iter()
+            .filter(|(_, value)| *value != 0)
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(failing.is_empty(), "structural gates nonzero: {failing:?}");
+    }
 }
+

@@ -65,8 +65,48 @@ separate.
   specification (producer bugs, legacy quirks), so normative-spec behavior
   and observed-file behavior can still diverge and must both be tracked.
 
+### Confirmation
+
+The decision has been applied, and the last consequence above (spec and
+observed files can diverge, and both must be tracked) has happened in
+practice. Cases recorded in the verification results:
+
+- **A dependency checked against the specification.** `msg_parser`'s preset
+  LZFu dictionary diverged from the dictionary published in MS-OXRTFCP; the
+  disagreement was resolved by checking Microsoft's spec text, not by
+  choosing between two implementations. The custom path (through
+  `compressed-rtf`) matches the spec. See
+  [docs/verification/m3-results.md](../docs/verification/m3-results.md).
+- **A specification-sanctioned detection signal over a convenience
+  method.** HTML encapsulated in RTF is detected by the `\fromhtml1` control
+  word, as MS-OXRTFEX's recognition rules describe, instead of by trusting a
+  crate's `html_from_rtf()`, which turned out not to gate on that signal.
+  See [docs/verification/m2-results.md](../docs/verification/m2-results.md).
+- **The spec text was not enough on its own.** The Named Property entry
+  stream's bit layout (which half of the field holds the Property Index, and
+  which bit is the Kind) was decoded backwards on the first attempt. It was
+  settled by byte-level decoding of real fixture files, and checked against
+  Microsoft's own canonical property names in MS-OXPROPS (the resolved
+  entries produced the identifiers for the task status and percent-complete
+  properties). Authority here was the specification's own vocabulary
+  applied to observed bytes.
+
+Two limits on how far the decision reaches:
+
+- Where the specifications are silent, teaspoon makes design choices and
+  labels them as such. The `PT_STRING8` code page chain is the current
+  example. The properties it reads (`PidTagMessageCodepage`,
+  `PidTagInternetCodepage`) are Microsoft-defined, but the order in which the
+  fallback consults them, and the Windows-1252 last resort, are teaspoon
+  design choices, documented in the code and in the M3 results.
+- Verification against the specification is by reading it and by
+  differential testing. No specification-conformance suite is used.
+
 ## More Information
 
 Primary specifications in scope: MS-PST, MS-OXMSG, MS-OXCMSG, MS-OXOMSG,
-MS-OXPROPS. See [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for where
-these are cited in the current implementation.
+MS-OXPROPS. Specifications now also relied on directly: MS-CFB (the
+container format underneath `.msg`, implemented by the `cfb` crate),
+MS-OXRTFCP (RTF compression) and MS-OXRTFEX (RTF-encapsulated HTML). See
+[docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for where these are cited in
+the current implementation.

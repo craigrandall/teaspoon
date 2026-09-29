@@ -2,7 +2,14 @@
 
 ## Status
 
-**Compiles and runs cleanly on Windows (21/21 tests pass) against real fixture sets on both a `.pst` and a `.msg` basis.** Body-type detection (native HTML, HTML-via-RTF-encapsulation, plain, RTF) is corrected and confirmed against real data as of 2026-09-14. Recipient/attachment classification and the zero-byte/method-conditioning fix are confirmed correct against real data. Embedded-message *opening* (not classification, which works) was investigated across two independent real attempts and found not achievable in practice — see "M2c" below; this is now an accepted, documented ceiling, not an open question.
+**Compiles and runs cleanly on Windows (21/21 tests pass) against real fixture sets on both a `.pst` and a `.msg` basis.** Body-type detection (native HTML, HTML-via-RTF-encapsulation, plain, RTF) is corrected and confirmed against real data as of 2026-09-14. Recipient/attachment classification and the zero-byte/method-conditioning fix are confirmed correct against real data. Embedded-message *opening* (not classification, which works) was investigated across two independent real attempts and found not achievable in practice — see "M2c" below; this was an accepted, documented ceiling, not an open question, for `msg_parser`.
+
+**Update (M3): this file is the record of the M2 spike, which was built on `msg_parser`. It is historical.** The `msg_parser`-based diagnostic described below is no longer the default `.msg` path: the custom MS-OXMSG parser became the default in M3f, and `msg_parser` now serves only as the oracle behind `tsp --verify`. Two conclusions below were superseded by M3:
+
+- The embedded-message ceiling (M2c) is a `msg_parser` limitation, not a limit of the `.msg` format or of `tsp`. The custom parser opens the corpus's embedded-message attachment and reads its class. `msg_parser`'s `as_message()` still returns `None` for it, which is one of the two documented differences from the differential verification.
+- The "custom parser vs. `msg_parser` in production" decision that this file describes as deferred to M3 has been made; see the ADR "Custom MS-OXMSG parser graduates to the production MSG path" and `docs/verification/m3-results.md`.
+
+The body-detection correction (`\fromhtml1`, below) carried forward unchanged: both the PST path and the custom MSG path use the same shared function. The 2026-09-14 findings on regenerated RTF in exported `.msg` files also still stand.
 
 ## Dependency
 
@@ -15,6 +22,8 @@ side. This is a provisional choice for the spike, not a final production
 commitment — see ADR backlog: the "MSG parser candidate" decision
 (custom parser vs. `msg_parser` in production) remains explicitly deferred
 to M3, when loss-accounting requirements for MSG are concrete.
+*(Resolved in M3: the custom parser is the production path; `msg_parser` is
+the verification oracle. See the update note under Status.)*
 
 `msg_parser` is a flattened, opinionated API (a single `Outlook` struct)
 rather than `outlook-pst`'s raw MAPI-property-faithful model. This means
@@ -151,7 +160,9 @@ writeup); findings specific to or mirrored on the MSG side:
   an ORIG-classified recipient on the MSG side through this crate's public
   API. Accepted as a known asymmetry between the two format adapters;
   not scheduled for a fix given how rare this recipient type is and the
-  absence of any fixture evidence of one to test against.
+  absence of any fixture evidence of one to test against. *(Superseded in
+  M3: the custom parser tracks ORIG and other/unresolved recipient types;
+  all are 0 on the 29-file corpus.)*
 - **`bodies_plain` interpretation caveat** — identical to the PST side,
   see `m1-results.md`.
 
@@ -195,7 +206,9 @@ now apply identically strict, specification-correct detection instead of
 two different signals that could (and did) silently disagree. A new
 `rtf_decompression_errors` counter was added to `MsgTotals`, mirroring the
 PST side, for the case where `rtf_compressed` is present but
-`rtf_decompressed()` returns `None`.
+`rtf_decompressed()` returns `None`. *(In the current code the shared
+function is `check_compressed_rtf_bytes`, used by the PST, MSG, and custom
+paths alike.)*
 
 This means the earlier "27 of 29 messages via RTF" figure (recorded
 2026-09-07) was suspected of being an overcount, and needed to be
@@ -239,6 +252,10 @@ measurement.
 
 
 ## M2c: embedded-message opening investigated and found not achievable in practice (2026-09-14)
+
+*(Superseded for the production path by M3: the custom parser opens the
+corpus's embedded-message attachment. The finding below remains accurate
+for `msg_parser`, which is now the oracle. See `m3-results.md`, "M3e".)*
 
 Mirroring P4c on the PST side (`outlook-pst` could not open embedded
 messages through its public API), the same underlying capability was
@@ -337,4 +354,8 @@ do not establish that:
 See project correspondence for the specific follow-up needed to resolve
 the remaining open findings above (embedded-message opening still
 returning `None`, and body-type detection's interpretation, both largely
-addressed but pending final confirmation).
+addressed but pending final confirmation). *(As of M3, both are closed for
+the production path: embedded-message opening works in the custom parser,
+and body-type detection was confirmed in the 2026-09-14 re-run above. What
+this file cannot establish, and M3 did, is agreement with an independent
+implementation; see `m3-results.md`.)*
