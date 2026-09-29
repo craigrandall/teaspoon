@@ -29,10 +29,9 @@ struct Args {
     /// A .pst file, a single .msg file, or a directory of .msg files to inspect.
     input: PathBuf,
 
-    /// Use the experimental custom MS-OXMSG parser (raw CFB structural
-    /// enumeration via the `cfb` crate) instead of `msg_parser` for .msg
-    /// input. PST input is unaffected. A structural spike: proves the
-    /// container opens and enumerates, without decoding property values.
+    /// Structural diagnostic of the custom MS-OXMSG parser (raw CFB
+    /// enumeration via the `cfb` crate) instead of the default extraction
+    /// report. PST input is unaffected. Retired in M3g.
     #[arg(long)]
     oxmsg: bool,
 
@@ -44,12 +43,12 @@ struct Args {
     #[arg(long)]
     verify: bool,
 
-    /// Run the custom MS-OXMSG extraction path alone (no `msg_parser`) and
-    /// print the same report shape as the default .msg diagnostic. Zero
-    /// bytes are counted only for confirmed-empty PidTagAttachDataBinary
-    /// streams; an unreadable data stream is reported separately via
-    /// attachments_data_stream_missing. Takes precedence over --oxmsg.
-    /// PST input is unaffected.
+    /// Run the custom MS-OXMSG extraction path. Since M3f this is the
+    /// default for .msg input, so the flag is a redundant alias kept until
+    /// M3g. Zero bytes are counted only for confirmed-empty
+    /// PidTagAttachDataBinary streams; an unreadable data stream is
+    /// reported separately via attachments_data_stream_missing. Takes
+    /// precedence over --oxmsg. PST input is unaffected.
     #[arg(long)]
     extract: bool,
 }
@@ -129,14 +128,17 @@ fn main() -> Result<()> {
             files,
             subdirectories_skipped,
         } => {
+            // M3f: the custom MS-OXMSG extraction path is the default for
+            // .msg input. `msg_parser` survives only as the independent
+            // oracle behind --verify (ADR: custom MS-OXMSG parser graduates
+            // to the production MSG path). --extract is now redundant with
+            // the default and is kept as an accepted alias until M3g.
             if args.verify {
                 run_msg_verify(&files, subdirectories_skipped)
-            } else if args.extract {
-                run_msg_extract(&files, subdirectories_skipped)
-            } else if args.oxmsg {
+            } else if args.oxmsg && !args.extract {
                 run_oxmsg_diagnostic(&files, subdirectories_skipped)
             } else {
-                run_msg_diagnostic(&files, subdirectories_skipped)
+                run_msg_extract(&files, subdirectories_skipped)
             }
         }
     }
@@ -833,27 +835,7 @@ const PROP_TYPE_ERROR: u16 = 0x000A;
 /// reason as [`PROP_TYPE_ERROR`].
 const PROP_TYPE_UNSPECIFIED: u16 = 0x0000;
 
-fn run_msg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
-    println!("inventory=privacy_safe");
-    println!("input_kind=msg");
-    println!("files_scanned={}", files.len());
-    println!("subdirectories_skipped={subdirectories_skipped}");
-
-    let mut totals = MsgTotals::default();
-
-    for file in files {
-        match Outlook::from_path(file) {
-            Ok(outlook) => inspect_msg(&outlook, &mut totals),
-            Err(_) => totals.open_errors += 1,
-        }
-    }
-
-    print_msg_report(&totals);
-
-    Ok(())
-}
-
-/// Prints the msg_parser-based MSG inventory report, separated from the
+/// Prints the MSG inventory report, separated from the
 /// scan loop (SLAP). Keys are unchanged from previous versions.
 fn print_msg_report(totals: &MsgTotals) {
     println!("open_errors={}", totals.open_errors);
@@ -929,7 +911,7 @@ fn print_msg_report(totals: &MsgTotals) {
     }
 }
 
-/// Aggregated msg_parser-based MSG inventory. Body availability,
+/// Aggregated MSG inventory. Body availability,
 /// recipient/attachment presence/total/max, and zero-size bookkeeping go
 /// through the shared counter types; only the msg_parser vocabulary
 /// buckets remain direct fields here.
@@ -960,69 +942,6 @@ struct MsgTotals {
     embedded_message_classes: BTreeMap<String, u64>,
 }
 
-fn inspect_msg(outlook: &Outlook, totals: &mut MsgTotals) {
-    record_msg_class(totals, &outlook.message_class);
-
-    // HTML detection mirrors the PST side: check the decompressed RTF
-    // bytes directly for the FROMHTML control word rather than trusting
-    // `Outlook::html_from_rtf()`, which does not gate on it (see README
-    // "Change history").
-    let has_html_native = !outlook.html.is_empty();
-    let has_rtf = !outlook.rtf_compressed.is_empty();
-    let has_html_via_rtf = if has_html_native {
-        false
-    } else if has_rtf {
-        match outlook.rtf_decompressed() {
-            Some(bytes) => {
-                totals.bodies.note_decompressed_bytes(bytes.len());
-                rtf_bytes_contain_fromhtml(&bytes)
-            }
-            None => {
-                totals.bodies.note_decompression_error();
-                false
-            }
-        }
-    } else {
-        false
-    };
-
-    totals.bodies.record(
-        !outlook.body.is_empty(),
-        has_html_native,
-        has_html_via_rtf,
-        has_rtf,
-    );
-
-    record_msg_recipients(
-        totals,
-        outlook.to.len() as u64,
-        outlook.cc.len() as u64,
-        outlook.bcc.len() as u64,
-    );
-
-    let mut attachment_count = 0u64;
-    for attach in &outlook.attachments {
-        attachment_count += 1;
-
-        totals.zero_byte_attachments.record(
-            attach.payload_bytes.is_empty(),
-            attach.attach_method == MSG_ATTACH_METHOD_BY_VALUE,
-        );
-        record_msg_attachment_method(totals, attach.attach_method);
-        record_msg_attachment_content_id(totals, !attach.content_id.is_empty());
-
-        match attach.as_message() {
-            Some(Ok(nested)) => {
-                totals.embedded_messages_opened += 1;
-                record_embedded_message_class(totals, &nested.message_class);
-            }
-            Some(Err(_)) => totals.embedded_message_open_errors += 1,
-            None => {}
-        }
-    }
-    totals.attachments.record(attachment_count);
-}
-
 fn record_msg_class(totals: &mut MsgTotals, class: &str) {
     if class.is_empty() {
         totals.message_class_missing += 1;
@@ -1048,21 +967,6 @@ fn record_msg_recipients(totals: &mut MsgTotals, to: u64, cc: u64, bcc: u64) {
     totals.recipients_cc += cc;
     totals.recipients_bcc += bcc;
     totals.recipients.record(to + cc + bcc);
-}
-
-fn record_msg_attachment_method(totals: &mut MsgTotals, method: u32) {
-    match method {
-        MSG_ATTACH_METHOD_BY_VALUE => totals.attachments_method_by_value += 1,
-        MSG_ATTACH_METHOD_EMBEDDED_MESSAGE => totals.attachments_method_embedded_message += 1,
-        MSG_ATTACH_METHOD_OLE => totals.attachments_method_ole += 1,
-        _ => totals.attachments_method_other += 1,
-    }
-}
-
-fn record_msg_attachment_content_id(totals: &mut MsgTotals, has_content_id: bool) {
-    if has_content_id {
-        totals.attachments_with_content_id += 1;
-    }
 }
 
 fn record_embedded_message_class(totals: &mut MsgTotals, class: &str) {
@@ -3001,12 +2905,11 @@ fn open_embedded_message(
 }
 
 /// Runs the custom extraction path alone -- no `msg_parser` at all -- and
-/// prints the exact same report shape as `run_msg_diagnostic`, plus one
+/// prints the MSG inventory report (the default .msg path since M3f), plus one
 /// custom-path-only anomaly key (attachments_data_stream_missing).
-/// Meant to be diffed textually against `run_msg_diagnostic`'s output for
-/// the same files: identical apart from that one extra key is what the
-/// --extract mode actually requires, not another aggregate
-/// match/mismatch count.
+/// Its report shape was verified byte-identical to the former msg_parser
+/// default report apart from that one extra key and the two triaged
+/// improvements recorded in docs/verification/m3-results.md.
 fn run_msg_extract(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
     println!("inventory=privacy_safe");
     println!("input_kind=msg");
@@ -3036,7 +2939,7 @@ fn run_msg_extract(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()>
     Ok(())
 }
 
-/// The custom-path equivalent of `inspect_msg`: populates the exact same
+/// Populates the MSG report totals for one file: the exact same
 /// `MsgTotals`, via the exact same shared `BodyCounters`/`CountStats` types
 /// and `record_*` functions, sourced from the extraction primitives
 /// verified by --verify field by field rather than from `msg_parser`'s
@@ -3966,20 +3869,6 @@ mod tests {
         assert_eq!(totals.recipients_cc, 2);
         assert_eq!(totals.recipients_bcc, 1);
         assert_eq!(totals.recipients.max, 4);
-    }
-
-    #[test]
-    fn msg_attachment_methods_are_bucketed_correctly() {
-        let mut totals = MsgTotals::default();
-        record_msg_attachment_method(&mut totals, MSG_ATTACH_METHOD_BY_VALUE);
-        record_msg_attachment_method(&mut totals, MSG_ATTACH_METHOD_EMBEDDED_MESSAGE);
-        record_msg_attachment_method(&mut totals, MSG_ATTACH_METHOD_OLE);
-        record_msg_attachment_method(&mut totals, 99);
-
-        assert_eq!(totals.attachments_method_by_value, 1);
-        assert_eq!(totals.attachments_method_embedded_message, 1);
-        assert_eq!(totals.attachments_method_ole, 1);
-        assert_eq!(totals.attachments_method_other, 1);
     }
 
     #[test]
