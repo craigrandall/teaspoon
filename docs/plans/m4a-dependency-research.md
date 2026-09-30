@@ -1,6 +1,6 @@
 # M4a research — RTF de-encapsulation, HTML-to-Markdown, and supporting crates
 
-Status: **research findings, nothing adopted.** Compiled 2026-09-30 from web searches and crate documentation. Claims marked *verify* come from search snippets or third-party summaries and must be confirmed against the crate's own source and `Cargo.toml` before adoption, in the way `compressed-rtf` was checked by reading its implementation. Crate versions and ages change quickly; treat the numbers as a snapshot.
+Status: **research findings.** Dependencies `serde`, `serde_json`, `sha2`, `unicode-normalization`, and `proptest` (dev) are approved; the HTML-to-Markdown bake-off is approved; nothing has been added to `Cargo.toml` yet. Compiled 2026-09-30 from web searches and crate documentation. Claims marked *verify* come from search snippets or third-party summaries and must be confirmed against the crate's own source and `Cargo.toml` before adoption, in the way `compressed-rtf` was checked by reading its implementation. Crate versions and ages change quickly; treat the numbers as a snapshot.
 
 Project constraints that filter every candidate: teaspoon is `MIT OR Apache-2.0`; output must be deterministic; the binary runs on Windows; a single maintainer means each dependency is a maintenance risk; and a crate that panics on hostile input is unacceptable (compare the `compressed-rtf` short-buffer panic found in M1).
 
@@ -91,7 +91,7 @@ Licensing note: `html2md` is GPL-3.0-or-later. teaspoon is `MIT OR Apache-2.0`; 
 2. Run `htmd`, `html2markdown`, and `html-to-markdown-rs` with fixed options behind the trait.
 3. Score, per candidate: determinism (two runs identical), no panics on the adversarial set, preserved content (a content-preservation check: all visible text of the HTML appears in the output, order preserved), link and image fidelity, table handling, licensing, dependency count and weight (`cargo tree`), and the ability to inject custom handlers.
 4. Review a sample by eye (private content, project owner only).
-5. Choose, pin the exact version, record the decision in the body-policy ADR.
+5. Choose, pin the exact version, and record the decision in the body-policy ADR (one of the ADRs that complete, and do not supersede, the accepted "Deterministic Markdown archive" ADR).
 
 Provisional expectation: `htmd`, because of its custom-handler API, faithful mode, and small dependency set. This is a hypothesis to be tested, not a decision.
 
@@ -99,10 +99,10 @@ Provisional expectation: `htmd`, because of its custom-handler API, faithful mod
 
 | Need | Recommendation | Notes |
 |---|---|---|
-| Serialization | `serde` (with `derive`) and `serde_json` | Approved. Use a struct-based schema with fixed field order; avoid `HashMap` in serialized output (order); prefer `BTreeMap` or ordered vectors for determinism. |
-| Hash | **`sha2`** (SHA-256) | Chosen over `blake3` because SHA-256 digests can be re-verified with tools already on Windows (`Get-FileHash`, `certutil`) and any other platform, which matters for a durable archive. `blake3` is faster but not needed. Hashing is not on a hot path. Not for security. |
-| Unicode normalization | `unicode-normalization` | Needed for NFC (N2) and collision keys (U1). |
-| Property testing | `proptest` as a **dev-dependency** | Fits the pure naming and planning functions: idempotence, uniqueness, budget, determinism. Needs owner approval (not covered by A6). |
+| Serialization | `serde` (with `derive`) and `serde_json` | Approved (2026-09-30). Use a struct-based schema with fixed field order; avoid `HashMap` in serialized output (order); prefer `BTreeMap` or ordered vectors for determinism. |
+| Hash | **`sha2`** (SHA-256) | Approved (2026-09-30). Chosen over `blake3` because SHA-256 digests can be re-verified with tools already on Windows (`Get-FileHash`, `certutil`) and any other platform, which matters for a durable archive. `blake3` is faster but not needed. Hashing is not on a hot path. Not for security. |
+| Unicode normalization | `unicode-normalization` | Approved (2026-09-30). Needed for NFC (N2) and collision keys (U1). |
+| Property testing | `proptest` as a **dev-dependency** | Approved (2026-09-30). Fits the pure naming and planning functions: idempotence, uniqueness, budget, determinism. |
 | YAML | Avoid | `serde_yaml` is reportedly archived; the research's suggestion is not adopted. |
 | PST reading | Keep `outlook-pst` | The research suggested `libpff` FFI. Not needed here and would add native build complexity on Windows. `libpff`/`libpst` remain candidates only as differential *oracles* run outside the build. |
 | Windows path specifics | None initially | The research suggested the `windows` crate to read `LongPathsEnabled` and `dunce`. Unnecessary while the budget obeys 259; revisit with `--long-paths`. |

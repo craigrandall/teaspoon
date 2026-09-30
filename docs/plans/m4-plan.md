@@ -1,28 +1,33 @@
-# M4 plan (v2) — normalized model and deterministic Markdown archive
+# M4 plan (v3) — normalized model and deterministic Markdown archive
 
-Status: **proposed, not started.** Version 2, revised 2026-09-30 after the project owner's answers to the first plan's open questions and after review of external research on PST-to-Windows-filesystem export. Nothing here has been implemented; every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
+Status: **proposed, not started.** Version 3, revised 2026-09-30 after the project owner's decisions on the open questions in v2. Nothing here has been implemented; every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
 
-- [`m4a-export-rules.md`](m4a-export-rules.md): the draft naming, layout, duplicate, path-length, and overwrite rules, with the open questions Q1-Q8.
+- [`m4a-export-rules.md`](m4a-export-rules.md): the draft naming, layout, identity, duplicate, path-length, and overwrite rules (v2, aligned with the accepted archive ADR).
 - [`m4a-dependency-research.md`](m4a-dependency-research.md): RTF de-encapsulation, HTML-to-Markdown converters, and supporting crates.
 
-## What changed from v1
+## Decisions in force (project owner, 2026-09-30)
 
-1. **Decisions recorded from the owner (2026-09-30):**
-   - Staged order accepted: module split first, walking skeleton before breadth.
-   - Export mirrors the PST folder tree; message files are named from subjects; duplicates use Windows-style suffixes; path length is handled up front; `tsp` warns and asks before overwriting.
-   - Same-name sibling folders are told apart by the folders' own identifiers.
-   - A message with attachments gets a `<subject> - attachments` folder.
-   - `serde`, `serde_json`, and a hash crate approved.
-   - More `.pst` fixtures are available on request.
-2. **Layout changed.** The owner's layout (`<subject>.md` plus `<subject> - attachments/`) differs from the layout the accepted ADR "Deterministic Markdown archive" chose (one folder per message with `message.md`, `metadata.json`, `attachments/`). A superseding ADR is required; the determinism and Markdown-as-projection decisions of that ADR are kept.
-3. **New early work: a pure naming/plan engine and a counts-only "naming census".** From the external research: the mapping rules are deterministic and can be a pure function, testable with property tests and reusable as a `--dry-run`. The census turns the identity and layout decisions from guesses into evidence before the ADRs are frozen. The research's scanner is adopted as `--dry-run` inside the export mode, not as a separate tool.
-4. **M4a splits in two.** Draft now (M4a-1); freeze after the census (M4a-2).
-5. **Research findings folded in:** no Rust crate performs MS-OXRTFEX de-encapsulation (write it in-house); HTML-to-Markdown gets a bake-off with a provisional preference for `htmd`; SHA-256 via `sha2`.
-6. **What the research contributed and what was not adopted.** Adopted: the Windows and PST rule sets, the mapping options (sanitize with deterministic suffix; budget-aware flattening; attachments beside the message), the plan/dry-run split, property testing of the naming engine, and the check catalog (as plan counters). Not adopted: date-prefixed, hash-suffixed filenames (they conflict with the owner's requirement that filenames mirror subjects); `libpff` FFI (unnecessary; `outlook-pst` is pure Rust); `serde_yaml` (reportedly archived); the `windows` crate and `rayon` (unneeded now). Two of its claims are treated as unverified: that EntryIDs "survive as long as the object is not modified", and that FAT variants have a 260-character path limit "in practice" (260 is a Win32 API limit, not a FAT limit).
+- Staged order: module split first, walking skeleton before breadth.
+- **Layout stays as the accepted ADR [Deterministic Markdown archive](../../ADRs/deterministic-markdown-archive.md) chose:** one folder per message containing `message.md`, `metadata.json`, and an `attachments/` subfolder. That ADR is not superseded. The message folder's name mirrors the message subject; `attachments/` is a literal name.
+- Export mirrors the PST folder tree. Root is `<out>/<PST file stem>/` (sanitized) so several PSTs can share one `<out>`.
+- Duplicates: content-identical copies get ` - Copy`, ` - Copy (2)`, ...; other same-name items get ` (2)`, ` (3)`, ....
+- Metadata lives alongside the item it describes: `metadata.json` in a message folder, `folder.json` in a folder directory.
+- Replacement characters as in rule N3; scope: everything reachable from the IPM subtree, non-mail items as metadata stubs; inline attachments stay in `attachments/` and are marked `inline`.
+- Overwrite safety: `tsp` warns (counts only) and asks permission, or exits.
+- Path length is handled up front, using UTF-16 code unit counts and worst-case child reservation.
+- Approved dependencies: `serde`, `serde_json`, `sha2`, `unicode-normalization`, and `proptest` (dev-only). The HTML-to-Markdown bake-off is approved.
+- The owner will create the priority fixtures separately.
+
+## What changed from v2
+
+1. **Layout reverted to the accepted ADR.** v2 had proposed `<subject>.md` plus `<subject> - attachments/` and a superseding ADR. That is withdrawn. The new ADRs in M4a-2 *complete* the archive ADR (identity, sanitization, collisions, attachment relationships, which it deferred) and do not replace it.
+2. **Metadata location.** No hidden `.tsp/` store. `metadata.json` is per message (as the ADR says) and `folder.json` is per folder (the folder marker Q8 asked about, with ownership and identity duties).
+3. **Naming rules adapted** to directory names: no extension to split, device names apply to directories, the 248-character directory rule becomes the binding path constraint, `attachments/` cannot collide with siblings, and the attachments-path reservation is 13 units plus the longest attachment name.
+4. **Long paths, folder markers, and other delegated questions answered** in the rules document (L7, section 3.2).
 
 ## Goal
 
-Turn what the two adapters read into a durable archive: a Windows-safe directory tree mirroring the source's folders, one `.md` per message named from its subject, attachments in a sibling folder, and tool-owned metadata that carries identity, provenance, and loss status. M4 is the first milestone where `tsp` writes message content to disk; stdout stays counts-only.
+Turn what the two adapters read into a durable archive: a Windows-safe directory tree mirroring the source's folders, one directory per message named from its subject, with `message.md`, `metadata.json`, and `attachments/`, plus a `folder.json` per folder carrying identity, provenance, and loss status. M4 is the first milestone where `tsp` writes message content to disk; stdout stays counts-only.
 
 ## Where M3 leaves us
 
@@ -45,43 +50,41 @@ Turn what the two adapters read into a durable archive: a Windows-safe directory
 
 ### M4a-1 — draft decisions and rules (documentation)
 
-Done with this version: [`m4a-export-rules.md`](m4a-export-rules.md) and [`m4a-dependency-research.md`](m4a-dependency-research.md).
-
-Gate: the owner answers Q1-Q8 in the rules document and the decisions below.
+Done with this version: [`m4a-export-rules.md`](m4a-export-rules.md) v2 and [`m4a-dependency-research.md`](m4a-dependency-research.md). Open items still for the owner are Q9-Q11 in the rules document (export root for non-PST inputs; whether the root records a SHA-256 of the source by default; the content-hash definition behind ` - Copy`).
 
 ### M4b-1 — mechanical module split
 
 Move `main.rs` into modules along the seams the README documents: CLI, shared vocabulary, PST diagnostic, MSG report, custom parser (structure, decoding, extraction), verification.
 
-Gate: default `.msg` output, `--verify` output, and PST output are byte-identical before and after (saved reports diffed); build, clippy, and the test count unchanged (66).
+Gate: default `.msg` output, `--verify` output, and PST output byte-identical before and after (saved reports diffed); build, clippy, and test count unchanged (66).
 
 ### M4b-2 — pure naming and planning modules
 
 New modules with no I/O and no PST or MSG types:
 
 - `naming`: sanitize (N-rules), UTF-16 length measurement, shortening (L4/L5), collision keys (U1), suffix assignment (U2-U8).
-- `plan`: given a tree of names, timestamps, identifiers, content hashes, and a policy (budget, root length), produce the full list of final paths with flags and counters.
+- `plan`: given a tree of names, timestamps, identifiers, content hashes, and a policy (budget, root length), produce every final path with flags and counters.
 
 Gate:
-- Unit tests for every rule, including astral-plane characters counted as two units, `CON`/`NUL.md`, trailing dots and spaces, NFC versus NFD names, case-only differences, empty names, `.tsp` at the root, and file-versus-folder collisions.
-- **Property tests** (`proptest` as a dev-dependency, if approved) over arbitrary names and trees: sanitizing is idempotent; no final component contains a reserved character; every path is within budget; no two entries in a directory share a collision key; output is identical across runs and independent of input order.
-- Coverage of each research check (C-01 to C-18 as applicable) as a named plan counter.
+- Unit tests for every rule, including astral-plane characters counted as two units, a directory named `NUL`, trailing dots and spaces, NFC versus NFD names, case-only differences, empty names, `folder.json` and `.tsp-tmp` collisions, and attachment-file versus embedded-directory collisions.
+- **Property tests** (`proptest`) over arbitrary names and trees: sanitizing is idempotent; no final component contains a reserved character; every path is within budget; no two entries in a namespace share a collision key; output is identical across runs and independent of input order.
+- Each research check (C-01 to C-18 as applicable) exists as a named plan counter.
 
 ### M4b-3 — naming census and folder-identity spike (counts only)
 
-Add `tsp <input> --out <dir> --dry-run`: runs the planning phase over a PST or `.msg` input and prints only counts, in the stable `key=value` vocabulary and with a `plan_gate_violations` total in the `--verify` style. It writes nothing.
+Add `tsp <input> --out <dir> --dry-run`: runs the planning phase over a PST or `.msg` input and prints only counts in the stable `key=value` vocabulary, with `plan_gate_violations`, in the `--verify` style. It writes nothing.
 
-Keys (proposed): names needing sanitization by class; reserved-name hits; trailing-dot/space hits; empty subjects; components truncated; maximum component and path lengths in UTF-16 units; maximum folder depth; folders flattened; collision groups (messages, folders, attachments); content-identical duplicate groups; messages missing `PidTagInternetMessageId`; duplicate `PidTagInternetMessageId`; attachments without names; attachment name collisions; budget exceeded; maximum entries per directory.
+Keys (proposed): names needing sanitization by class; reserved-name hits; trailing-dot and trailing-space hits; empty subjects; components truncated; maximum component and path lengths in UTF-16 units; maximum relative path; maximum folder depth; folders flattened; collision groups (messages, folders, attachments); content-identical duplicate groups versus same-name groups (using a provisional content hash); messages missing `PidTagInternetMessageId`; duplicate `PidTagInternetMessageId`; attachments without names; attachment name collisions; budget exceeded; maximum entries per directory.
 
 Spike: determine what `outlook-pst` v1.2.0 exposes as a folder identifier (NID, `PidTagRecordKey`, EntryID) and record it.
 
-Gate: the census runs on the 29-message `.msg` set, the 57-message PST, and every fixture from the fixture table below; the counts are reviewed; the folder-identity question is answered (available, not available, or partly).
+Gate: the census runs on the 29-message `.msg` set, the 57-message PST, and every fixture available; the counts are reviewed with the owner; the folder-identity question is answered (available, not available, or partly).
 
-### M4a-2 — freeze the ADRs
+### M4a-2 — accept the new ADRs
 
-Using the census, accept up to five ADRs: export layout and naming (superseding the layout part of "Deterministic Markdown archive"); message and folder identity and duplicate policy; output posture (`--out`, `--dry-run`, consent, `.tsp` ownership); body and formatting-loss policy; metadata and per-item status schema.
+Using the census, accept up to five ADRs that **complete** the archive ADR: (1) export naming, collisions, and path budgets; (2) message and folder identity and provenance; (3) output posture (`--out`, `--dry-run`, consent, ownership by `folder.json`); (4) body and formatting-loss policy; (5) `metadata.json` / `folder.json` schemas and per-item status. The archive ADR gets a cross-reference in "More Information" (status and layout unchanged).
 
-Gate: ADRs accepted by the owner; a hand-written example archive for one corpus message (private content replaced) that follows them; the example passes the plan's own invariants.
+Gate: ADRs accepted by the owner; a hand-written example archive for one corpus message (private content replaced) that follows them and passes the plan's own invariants.
 
 ### M4b-4 — normalized model types
 
@@ -91,14 +94,14 @@ Gate: invariants tested; a table mapping each existing counter category to its m
 
 ### M4c — walking skeleton on synthetic input
 
-Thin path end to end for the simplest case: a synthetic plain-text `.msg` (built at test time, as the ANSI tests do) with no attachments through model, plan, consent, staged write, and read-back.
+A thin path end to end for the simplest case: a synthetic plain-text `.msg` (built at test time, as the ANSI tests do) with no attachments through model, plan, consent, staged write, and read-back, producing `<stem>/<subject>/message.md`, `metadata.json`, and the root and folder `folder.json`.
 
-Includes the overwrite behavior: counts-only preflight, interactive prompt, non-interactive refusal without `--overwrite`, and "never touch files we did not create".
+Includes the overwrite behavior: counts-only preflight, interactive prompt, non-interactive refusal without `--overwrite`, refusal to touch anything the tool did not create, and `target_source_mismatch` detection.
 
 Gate:
 - Golden files committed for synthetic fixtures (no personal data), run in CI on Linux and Windows.
 - Two exports of the same input are byte-identical (tree hash).
-- Overwrite matrix tested: empty target, existing identical files, existing different files, unrelated files, non-interactive without consent.
+- Overwrite matrix tested: empty target, identical existing files, different existing files, unrelated files, non-interactive without consent.
 - One real corpus message exported and reviewed by the owner against a checklist.
 
 ### M4d — envelope: headers, recipients, properties
@@ -107,43 +110,43 @@ Subject, sender, recipients, dates, importance, Internet message ID, transport h
 
 Gate: differential check against `msg_parser` for the fields it exposes, counts only, every mismatch triaged against the specifications; unit tests and inspection for the rest.
 
-### M4e-0 — HTML-to-Markdown bake-off
+### M4e-0 — HTML-to-Markdown bake-off (approved)
 
-Follow the process in [`m4a-dependency-research.md`](m4a-dependency-research.md): candidates `htmd`, `html2markdown`, `html-to-markdown-rs`, behind an `HtmlToMarkdown` trait, judged on determinism, panics, content preservation, tables, links/images, licensing, dependency weight, and custom-handler support.
+Follow [`m4a-dependency-research.md`](m4a-dependency-research.md): candidates `htmd`, `html2markdown`, `html-to-markdown-rs`, behind an `HtmlToMarkdown` trait, judged on determinism, panics, content preservation, tables, links and images, licensing, dependency weight, and custom-handler support.
 
-Gate: a recorded choice with exact version pinned, in the body-policy ADR.
+Gate: a recorded choice with the exact version pinned, in the body-policy ADR.
 
 ### M4e-1 — MS-OXRTFEX de-encapsulation (in-house)
 
 Implement the module specified in the research document, including confirming the recognition rule (first 10 tokens) against `check_compressed_rtf_bytes`.
 
-Gate: spec-derived unit and golden tests; differential (weak oracle) against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML corpus messages, counts only, every disagreement triaged; property test that arbitrary input never panics and stays within an output bound.
+Gate: spec-derived unit and golden tests; a weak-oracle differential against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML corpus messages, counts only, every disagreement triaged; a property test that arbitrary input never panics and stays within an output bound.
 
 ### M4e-2 — body pipeline
 
-Body selection (native HTML, HTML from RTF, RTF, plain text) per the ADR; Outlook/Word preprocessing and `cid:` mapping; conversion via the chosen crate; original body kept verbatim in the tool-owned store; formatting loss recorded (color, highlight, font, layout, embedded objects).
+Body selection (native HTML, HTML from RTF, RTF, plain text) per the ADR; Outlook/Word preprocessing and `cid:` mapping to files in `attachments/`; conversion via the chosen crate into `message.md`; the original body kept verbatim inside the message folder (file names and placement decided in the body-policy ADR); formatting loss recorded in `metadata.json`.
 
 Gate: golden tests on synthetic bodies for each variant and tricky case; a corpus run reporting per-variant conversion counts and failures; a content-preservation check (all visible text present, order preserved); owner review of a sample.
 
 ### M4f — attachments
 
-Write by-value attachment bytes into `<final stem> - attachments/`; sanitize and de-duplicate names (N/U rules); record size and SHA-256; zero-byte files written empty and flagged; inline images linked from Markdown by `cid:` mapping; embedded messages written as nested messages under the depth cap; OLE and by-reference recorded as not extracted with reasons.
+Write by-value attachment bytes into the message's `attachments/`; sanitize and de-duplicate names (N and U rules); record size and SHA-256; zero-byte files written empty and flagged; inline attachments marked `inline: true`; embedded messages written as nested message folders inside `attachments/` under the depth cap (default 3); OLE and by-reference recorded as not extracted with reasons.
 
 Gate:
 - Byte-level differential: SHA-256 of each extracted by-value attachment equals the hash of `msg_parser`'s payload, counts only.
-- Adversarial synthetic fixtures (T6): reserved names, trailing dots/spaces, 255+ names, duplicates, case-only differences, empty and missing names, Unicode names, control characters, deep embedded chains.
+- Adversarial synthetic fixtures (T6): reserved names, trailing dots and spaces, 255+ names, duplicates, case-only differences, empty and missing names, Unicode names, control characters, deep embedded chains.
 - Every corpus attachment appears in the archive or in diagnostics, and the two totals equal `total_attachments`.
 - Path budget respected for the deepest attachment of every message.
 
 ### M4g — metadata, diagnostics, per-item status
 
-Tool-owned `.tsp/` store: `manifest.json` (every folder and message, identity, original names and paths, applied renames, budget used, hashes) and per-message JSON (property bag, recipients, attachment records, status). Status vocabulary: complete, partial, failed, each with a closed list of reasons. Content hash for messages (needed by rule U4). Stdout summary of counts.
+Implement the `metadata.json` and `folder.json` schemas from the ADR: identity and provenance, property bag, recipients, attachment records, named properties, extraction diagnostics, per-item status (complete, partial, failed, each with a closed list of reasons), applied renames and truncations, and the folder's child index. Define the content hash (rule U4, Q11). Stdout summary of counts.
 
-Gate: JSON schema tests on synthetic archives; corpus stdout summary reconciles with `--verify` totals (every message accounted for); no absolute paths and no export-time values in metadata.
+Gate: JSON schema tests on synthetic archives; the corpus stdout summary reconciles with `--verify` totals (every message accounted for); no absolute paths and no export-time values in any metadata file.
 
 ### M4h — writer hardening
 
-Staged and atomic writes; short fixed staging path; replace-on-rename behavior verified on Windows; deterministic ordering and line endings (LF, UTF-8 without BOM); modification-time policy; partial-failure behavior (one failed message never corrupts or hides others); FAT32 directory-size warning.
+Staged, atomic writes via the short fixed `.tsp-tmp` staging directory; replace-on-rename behavior verified on Windows; deterministic ordering and line endings (LF, UTF-8 without BOM); modification-time policy; partial-failure behavior (one failed message never corrupts or hides others); FAT32 directory-size warning; `--long-paths` and `--max-relative-path` options.
 
 Gate: run-twice byte-identical trees on the corpus (single tree-hash line); fault injection (unwritable target, simulated disk full where practical, corrupt input mid-batch); results independent of input order; consent flow re-tested.
 
@@ -157,7 +160,7 @@ Gate: the diagnostic's counts reconcile with the archive (57 messages and 79 att
 
 ### M4j — end-to-end verification and close
 
-`--verify`-style archive read-back (counts only): messages, attachments by status, body variants, hash matches, schema violations, files not in the manifest; the plan re-derived from the archive and compared with the recorded plan. Corpus-gated regression test in the `TSP_FIXTURE_DIR` pattern. Manual review protocol for private content. Documentation and ADR confirmations updated.
+`--verify`-style archive read-back (counts only): messages, attachments by status, body variants, hash matches, schema violations, entries not listed in their folder's `folder.json`; the plan re-derived from the archive and compared with the recorded plan. Corpus-gated regression test in the `TSP_FIXTURE_DIR` pattern. Manual review protocol for private content. Documentation and ADR confirmations updated.
 
 Gate: all earlier gates re-run on the final build; every coverage-matrix row for M4 capabilities verified or marked with its limit; the exit criteria below.
 
@@ -166,45 +169,47 @@ Gate: all earlier gates re-run on the final build; every coverage-matrix row for
 1. Exporting the 29-message corpus and the fixture PSTs produces archives in which every message and attachment is accounted for as complete, partial (with reason), or failed (with reason).
 2. Two runs over the same input give byte-identical archives.
 3. Extracted attachment bytes match the oracle's for every by-value attachment `msg_parser` can read.
-4. No path exceeds the budget; every directory is collision-free under the case-insensitive key; asserted by the plan gates and by read-back.
+4. No path exceeds the budget; every namespace is collision-free under the case-insensitive key; asserted by the plan gates and by read-back.
 5. Stdout is content-free; the archive contains no absolute paths or export-time values; no existing file is replaced without consent.
 6. Synthetic golden and adversarial tests run in CI; corpus-dependent checks are gated and documented.
 7. Documentation and ADRs match the code, with verified and unverified items stated separately.
 
-## Fixtures requested (owner offered more PSTs; this is the optimal set)
+## Fixtures (owner is creating these separately)
 
-I cannot read PSTs or run Rust here, so the value of a fixture reaches me as the output of your runs (`tsp <pst>`, then the census output), plus a short note on how it was created. The PST files themselves do not need to be sent. Priority is by how much risk each removes.
+Results reach me as the output of your runs (`tsp <pst>`, then the census), plus a short note on how each was made; the PST files do not need to be sent. Priority is by risk removed. At least 1-3 are wanted before M4b-3.
 
 | Priority | Fixture | Why | How to create |
 |---|---|---|---|
-| 1 | **ANSI PST** (Outlook 97-2002 format), small, mixed content, including non-Latin text in a Windows code page | Only way to exercise `PT_STRING8` decoding on real data and ANSI-store handling in `outlook-pst` | Outlook, Data File dialog, choose the 97-2002 format if still offered; otherwise a PST from an old archive |
-| 2 | **Adversarial-names PST** | Exercises N/L/U rules on real Outlook data | Subjects containing `< > : " / \ | ? *`, `CON`, `NUL`, trailing dots and spaces, an empty subject, 255-character and 300-character subjects, emoji, right-to-left text, combining marks, an NFC and an NFD version of the same word; folders with the same problems (the UI blocks some characters, so use automation or another tool for those); sibling folders differing only by case |
-| 3 | **Duplicates PST** | Tests U-rules and the content-identical versus same-subject distinction | 6+ different messages with the same subject in one folder; a message copied within a folder and across folders; a conversation with 10 `RE:` replies; same-name sibling folders if any tool can produce them (an import may) |
+| 1 | **ANSI PST** (Outlook 97-2002 format), small, mixed content, including non-Latin text in a Windows code page | Only way to exercise `PT_STRING8` decoding on real data and ANSI-store handling in `outlook-pst` | Outlook data file dialog, 97-2002 format if still offered; otherwise an old archive |
+| 2 | **Adversarial-names PST** | Exercises N, L, U rules on real Outlook data | Subjects with `< > : " / \ \| ? *`, `CON`, `NUL`, trailing dots and spaces, an empty subject, 255- and 300-character subjects, emoji, right-to-left text, combining marks, an NFC and an NFD form of the same word; folders with the same problems (the UI blocks some characters, so use automation or another tool); sibling folders differing only by case |
+| 3 | **Duplicates PST** | Tests U rules and the content-identical versus same-subject distinction | 6+ different messages with one subject in one folder; a message copied within a folder and across folders; a conversation with 10 `RE:` replies; same-name sibling folders if any tool can produce them |
 | 4 | **Deep and wide PST** | Path budget, flattening, directory size | 25-30 nested levels with moderately long names; one folder with several thousand small messages |
-| 5 | **Attachments PST** | M4f | Duplicate attachment names in one message; attachment with no name; a 200-character attachment name; several inline images (signature logos and pasted pictures); an embedded message three levels deep; an OLE object; a zero-byte attachment; one 50-200 MB attachment; an attachment named `desktop.ini`; an attachment with a reserved device name |
-| 6 | **Non-mail items PST** | Scope decision (section 12 of the rules) | A calendar entry, contact, task, note, meeting request, and a bounce (NDR) |
-| 7 | **Other producers** | The corpus is one producer | A PST from Exchange export; one from a third-party migration tool; one from a current Outlook build versus the existing one |
-| 8 | **Encrypted or password PSTs** | `outlook-pst` may not read them | One with "compressible encryption", one with a password (the password is only a CRC gate per the research, but the file mode differs) |
+| 5 | **Attachments PST** | M4f | Duplicate attachment names in a message; an attachment with no name; a 200-character attachment name; several inline images; an embedded message three levels deep; an OLE object; a zero-byte attachment; one 50-200 MB attachment; `desktop.ini`; a reserved device name |
+| 6 | **Non-mail items PST** | Scope (rules section 12) | A calendar entry, contact, task, note, meeting request, and a bounce (NDR) |
+| 7 | **Other producers** | The corpus is one producer | PSTs from an Exchange export, a third-party migration tool, and a current Outlook build |
+| 8 | **Encrypted or password PSTs** | `outlook-pst` may not read them | One with compressible encryption, one with a password |
 | 9 | **Damaged PST** | Adversarial (T6) | A copy of a small PST truncated partway |
 | 10 | **More `.msg` files** | Bodies (M4e) | Word-authored HTML with tables and colors; signature images; a genuine RTF-only message; ANSI-encoded messages; messages from other clients saved as `.msg` |
 
-Privacy: any of these can be synthetic. The census outputs are counts, so they are safe to paste. Do not paste subjects or names.
+Privacy: any of these can be synthetic, and census outputs are counts, so they are safe to paste. Do not paste subjects or names.
 
 ## Principal risks
 
-- **Filename policy** (M4a). Naming decides re-export stability; a wrong choice forces re-exporting archives. Mitigation: pure engine, census before freeze, property tests.
+- **Naming policy** (M4a/M4b). Naming decides re-export stability; a wrong choice forces re-exporting archives. Mitigation: pure engine, census before the ADRs are accepted, property tests.
+- **Path budget in a directory-per-message layout.** Every message is a directory, so the 248 rule and worst-case child reservation bind tightly; long subjects plus long attachment names will be truncated often on long roots. Mitigation: budget from the real root, report truncation counts, `--max-relative-path`, guidance to export near a drive root.
 - **Bodies** (M4e). De-encapsulation and HTML-to-Markdown quality on Word HTML; partly subjective. Mitigation: bake-off, content-preservation check, verbatim body kept.
 - **PST attachments** (M4i). Blocked by the public API.
 - **Folder identity.** The NID-derived identifier may not be exposed by `outlook-pst`; the fallback ordering is deterministic but weaker.
+- **Content-hash definition** (Q11) decides which duplicates are labeled ` - Copy`; a poor definition mislabels. Mitigation: census reports how many groups it splits.
+- **Uninformative file names.** Every message is called `message.md`, so search results and editor tabs show the folder only as context. Accepted with the ADR; `message.md` can open with a title line (body-policy ADR).
 - **Single-producer corpus.** Addressed by the fixture table.
 - **Windows-only behavior** is verifiable only on Windows; CI covers unit tests on Linux and Windows.
-- **Superseding an accepted ADR** (layout). Must be done explicitly, not by drift.
 - **Dependencies.** Each new crate is a maintenance risk; pin, read source, check license.
 
-## Decisions needed from the owner
+## Decisions still needed from the owner
 
-1. Answer Q1-Q8 in `m4a-export-rules.md` (root naming; suffix scheme; where metadata lives; replacement characters; scope of non-mail items; inline attachments; long paths and default budget; folder markers).
-2. Approve `proptest` as a dev-dependency, and `unicode-normalization` and `sha2` as dependencies (A6 covered `serde`, `serde_json`, and "a hash crate").
-3. Approve the M4e-0 bake-off and, unless it fails, the provisional choice of `htmd`.
-4. Confirm superseding the per-message-folder layout in the accepted archive ADR.
-5. Supply fixtures in the priority order above, at least priorities 1-3 before M4b-3.
+1. Q9: export root for non-PST inputs (proposal in rules section 3.1).
+2. Q10: record a SHA-256 of the source file by default, with `--no-source-hash` to skip.
+3. Q11: the content-hash definition (can wait until M4g; the census uses a provisional one).
+4. Fixtures 1-3 before M4b-3.
+5. Go-ahead to start M4b-1 (module split).

@@ -1,24 +1,27 @@
-# M4a draft — export naming, layout, and overwrite rules
+# M4a draft — export naming, layout, and overwrite rules (v2)
 
-Status: **proposed draft, nothing implemented or verified.** This is the working specification for the naming and layout decisions the M4 plan calls M4a. It is meant to be argued with, then frozen as ADRs after the naming census (M4b-3) has produced evidence from real fixtures. Every "verify" tag marks a claim that was taken from documentation or memory and has not been checked against this project's fixtures or Windows.
+Status: **proposed draft, nothing implemented or verified.** This is the working specification for the naming, identity, and overwrite decisions the M4 plan calls M4a. It completes what the accepted ADR [Deterministic Markdown archive](../../ADRs/deterministic-markdown-archive.md) explicitly left open (message identity, filename sanitization, collision handling, attachment relationships). **It does not change that ADR's layout**: one folder per message containing `message.md`, `metadata.json`, and an `attachments/` subfolder. Every "verify" tag marks a claim taken from documentation or memory that has not been checked against this project's fixtures or Windows.
 
-Inputs: the project owner's requirements (2026-09-30), the external research "Support for linting a PST, anticipating a Windows filesystem for message export" (2026-09-29, referred to below as *the research*), Microsoft's Win32 naming and MS-PST documentation, and the existing ADRs.
+Revision history: v1 (2026-09-30) proposed a different layout (`<subject>.md` plus `<subject> - attachments/`). The project owner decided to keep the accepted ADR's layout, so v2 adapts every rule to it. The earlier ` - attachments` folder requirement is withdrawn; `attachments/` is now a literal name.
 
-## 1. Requirements taken as given
+Sources: the owner's requirements and decisions (2026-09-30); the external research "Support for linting a PST, anticipating a Windows filesystem for message export" (2026-09-29; *the research*); Microsoft's Win32 naming documentation and MS-PST; the existing ADRs.
+
+## 1. Requirements and decisions in force
 
 1. Exporting a PST mirrors its folder tree as a directory tree.
-2. Each message becomes a `.md` file whose name mirrors the message's subject.
-3. Duplicate names are disambiguated in the Windows style (` - Copy`, ` - Copy (2)`, ...), with the differences between PST and Windows semantics fully accounted for up front, including path length.
-4. A message that has attachments gets a folder named `<subject> - attachments`.
-5. Sibling PST folders with identical names are told apart using the folders' own identifiers.
+2. Each message becomes a folder (per the accepted ADR) whose **name mirrors the message subject**; the folder holds `message.md`, `metadata.json`, and `attachments/`.
+3. Duplicate names are disambiguated with Windows-style suffixes: ` - Copy`, ` - Copy (2)`, ... for content-identical duplicates, otherwise ` (2)`, ` (3)`, ... (decision Q2).
+4. All PST-versus-Windows differences, including path length, are handled up front.
+5. Sibling PST folders with the same name are told apart using the folders' own identifiers.
 6. If an export could overwrite existing content, `tsp` warns and asks permission to continue, or exits.
-7. Stdout stays content-free (counts only). Archive content goes only into the directory the user names.
+7. Stdout stays content-free (counts only); archive content goes only into the directory the user names.
+8. Export root is `<out>/<PST file stem>/` (sanitized), so several PSTs can share one `<out>` (Q1).
+9. Metadata lives alongside the item it describes: `metadata.json` in a message folder (per the ADR), `folder.json` in a folder directory (Q3).
+10. Replacement characters as proposed in N3 (Q4); scope as in section 12 (Q5); inline attachments are kept in `attachments/` and marked `inline` (Q6).
 
-## 2. What "CLI shape" means, and a proposal
+## 2. What "CLI shape" means, and the proposal
 
-"CLI shape" is how the user asks for an export on the command line, not what is written to disk. Today `tsp <input>` prints a content-free diagnostic and `tsp --verify <input>` compares two parsers. Export is a new behavior that writes message content, so it needs its own spelling, and the choice matters because existing usage and the stable output vocabulary must keep working.
-
-Proposal:
+"CLI shape" is how the user asks for an export on the command line, not what is written to disk. `tsp <input>` prints a content-free diagnostic and `tsp --verify <input>` compares two parsers. Export writes message content, so it needs its own spelling without disturbing existing usage or the stable output vocabulary.
 
 ```text
 tsp <input>                          # unchanged: content-free diagnostic
@@ -27,228 +30,234 @@ tsp <input> --out <dir> --dry-run    # project the export, report counts, write 
 tsp <input> --out <dir> --overwrite  # non-interactive consent to replace files this tool would generate
 ```
 
-Reasons: `--out` cannot be confused with the diagnostic, `--dry-run` falls out of a pure planning phase (section 8), and consent can be given interactively or by flag. Alternatives (a `tsp export` subcommand) are equivalent in substance; the flag form matches the existing idiom.
-
 Consent behavior (requirement 6):
 
-- Preflight compares the plan with what is already in `<dir>` and reports **counts only** to stdout: files that would be created, files that already match, files that would be replaced, and files present that this export would not touch.
-- Interactive terminal: print the counts and ask `Continue? [y/N]`. Anything but an explicit yes exits with code 2 and writes nothing.
-- Not interactive (stdin is not a terminal): behave as "no" unless `--overwrite` was given.
-- `tsp` only ever replaces files whose names its own plan generated. It never deletes files it did not create. A separate `--clean` (delete previously generated files that the new plan no longer produces) would require the archive's ownership manifest to be present and would need its own consent; propose deferring `--clean`.
-- Writes go to a staging area and are moved into place, so a failed or refused run leaves the target as it was (see section 8).
+- Preflight compares the plan with what is already under `<dir>/<stem>/` and reports **counts only**: items that would be created, items that already match, items that would be replaced, and entries present that this export would not touch.
+- Interactive terminal: print the counts and ask `Continue? [y/N]`; anything but an explicit yes exits with code 2 and writes nothing.
+- Not interactive (stdin is not a terminal): treated as "no" unless `--overwrite` was given.
+- `tsp` only replaces files that its own plan generates. It never deletes entries it did not create. Deleting stale generated entries would be a separate `--clean` with its own consent; propose deferring it.
+- Ownership is recognized by `folder.json` (section 3.2). If the target stem directory exists but its root `folder.json` records a different source, preflight reports `target_source_mismatch` and treats it as a stronger warning.
+- Writes go to a staging area and are moved into place (section 8).
 
 ## 3. Layout
 
-Requirement 4 changes the layout the accepted ADR "Deterministic Markdown archive" chose (a folder per message containing `message.md`, `metadata.json`, and `attachments/`). This proposal replaces it, so it needs a superseding ADR (see section 11).
-
 ```text
 <out>/
-  <store name>/                       # see open question Q1
+  <PST file stem>/
+    folder.json                      # root: source provenance, archive summary
     Inbox/
-      Budget review.md
-      Budget review - attachments/
-        Q3 plan.xlsx
-        image001.png
-      Budget review - Copy.md          # content-identical duplicate
-      RE_ Budget review.md             # ':' replaced
-      RE_ Budget review (2).md         # same sanitized name, different content
+      folder.json
+      Budget review/
+        message.md
+        metadata.json
+        attachments/                 # present only when at least one file is written
+          Q3 plan.xlsx
+          image001.png               # inline: true in metadata.json
+      Budget review - Copy/          # content-identical duplicate
+      RE_ Budget review/             # ':' replaced
+      RE_ Budget review (2)/         # same name, different content
       Projects/
-        ...
+        folder.json
     Sent Items/
-  .tsp/                               # tool-owned; see section 3.2
-    manifest.json
+      folder.json
 ```
 
 ### 3.1 What maps to what
 
 | PST | Filesystem |
 |---|---|
-| Folder | Directory named from `PidTagDisplayName` |
-| Message | `<subject>.md` in the folder's directory |
-| Attachment (file) | File inside `<message stem> - attachments/` |
-| Embedded message | `<subject>.md` inside the attachments folder, with its own ` - attachments` folder if it has attachments (recursive, depth-capped; section 7) |
-| Folder / message identity | `.tsp/manifest.json` and message front matter (3.2) |
+| Store / input | `<out>/<PST file stem>/` with root `folder.json` |
+| Folder | Directory named from `PidTagDisplayName`, containing `folder.json` |
+| Message | Directory named from `PidTagSubject`, containing `message.md`, `metadata.json`, and (when needed) `attachments/` |
+| Attachment (file) | File inside the message's `attachments/` |
+| Embedded message | A message directory (with its own `message.md`, `metadata.json`, `attachments/`) inside the parent's `attachments/`; depth-capped (section 7) |
+| Identity and provenance | `metadata.json` (messages) and `folder.json` (folders) |
 
-### 3.2 Where metadata lives (open question)
+Inputs other than a PST: a directory of `.msg` files exports to `<out>/<directory name>/` with one message directory per file; a single `.msg` exports to `<out>/<msg file stem>/` containing one message directory. The name of the source file goes into provenance, never into the message directory name (Q9).
 
-The research proposed YAML front matter in each `.md`. `serde_yaml` is reportedly archived and unmaintained, and YAML is harder to keep deterministic than JSON, so avoid it. Proposal: each message's `.md` starts with a single comment line carrying its stable identity (`<!-- tsp:id=... -->`), and everything else (property bag, recipients, status, original names, provenance) lives in `.tsp/messages/<id>.json`, with `.tsp/manifest.json` listing every message and folder with hashes. This keeps the visible tree clean, keeps metadata out of the path budget, and keeps the user tree grep-friendly. The trade-off is that a user who copies only the visible tree loses the metadata. Alternative: sidecar `<stem>.json` files next to each message (visible, but doubles the file count and consumes path budget). Decision for the project owner (Q3).
+### 3.2 Metadata files
 
-The name `.tsp` is reserved at the export root (rule N9).
+- **`metadata.json`** (message): as in the accepted ADR, it carries whatever the normalized model captured, including properties Markdown cannot render, extraction diagnostics, recipients, attachment records (including `inline: true/false`, content hash, status), provenance, and the message's identity.
+- **`folder.json`** (folder): original display name and original path, the folder's identifier (section 9), applied renames and truncations (with reasons), counts, and an index of child entries (kind, directory name, identity, and for messages the content hash). The index supports overwrite preflight and read-back verification without scanning file contents.
+- **Root `folder.json`**: additionally the source (file name, size, optionally SHA-256; Q10), tool version, schema version, the budget used, and archive-wide summary counts.
+- Schemas are versioned, ordered, and free of absolute paths and export-time values so two exports of the same input are byte-identical.
+
+**Reserved names.** `folder.json` is reserved in every folder directory, and the staging name `.tsp-tmp` is reserved directly under `<out>`. A child directory whose collision key equals a reserved key is renamed by the uniqueness rules (N9). Message directories contain only the three fixed names, so no subject-derived name can collide there.
+
+**Why metadata alongside, and not in a hidden store or one root manifest** (a question the owner delegated): (1) the ADR's stated benefit is that each message "can be inspected, diffed, or moved as a unit", and a separate store or a single manifest breaks that; (2) a hidden directory is dropped by some copy tools and is one more tool-owned name to protect; (3) a single root manifest is a single point of failure and grows with the archive. The cost is one small file per folder, which is negligible next to the two or three files per message.
 
 ## 4. Deriving and sanitizing names
 
-Applied to folder names, message stems, and attachment names. All rules are pure functions of their inputs.
+Applied to PST folder names, message directory names, attachment file names, and (for the root) the PST file stem. All rules are pure functions.
 
-**N1. Source strings.** Folder: `PidTagDisplayName`. Message: `PidTagSubject` (the full subject, which per MS-OXCMSG is the subject prefix plus the normalized subject, so `RE: ` is kept as the owner asked). Attachment: `PidTagAttachLongFilename`, then `PidTagAttachFilename`, then a synthetic name (N8). Verify: some producers reportedly store control characters at the start of the subject to mark the prefix; the census must show whether the corpus has them (rule N3 strips them regardless).
+**N1. Source strings.** Folder: `PidTagDisplayName`. Message: `PidTagSubject`, the full subject, which per MS-OXCMSG is the subject prefix plus the normalized subject (so `RE: ` is kept). Attachment: `PidTagAttachLongFilename`, then `PidTagAttachFilename`, then a synthetic name (N8). Embedded message directory: the embedded message's subject. Verify: some producers reportedly place control characters at the start of a subject to mark the prefix; the census must show whether the corpus has them (N3 removes them regardless).
 
-**N2. Unicode form.** Normalize to NFC. Unpaired surrogates in PST UTF-16 data cannot be represented in a Rust string; decode with replacement and flag the item (`name_lossy_decode`). ANSI PST strings are decoded through the code page chain already built for `PT_STRING8`; an unsupported code page yields the synthetic name (N8) and a flag.
+**N2. Unicode form.** Normalize to NFC. Unpaired surrogates in PST UTF-16 data cannot be represented in a Rust string; decode with replacement and flag the item (`name_lossy_decode`). ANSI PST strings use the code page chain already built for `PT_STRING8`; an unsupported code page yields a synthetic name (N8) and a flag.
 
-**N3. Characters removed or replaced.**
+**N3. Characters removed or replaced** (replacement characters accepted by the owner).
 
 | Class | Action |
 |---|---|
-| `< > : " / \ | ? *` | replace with a visually close safe character (proposal below), never delete |
+| `< > : " \| ? *` | replace with `_` |
+| `/` and `\` | replace with `-` |
 | C0 controls U+0000-U+001F, DEL U+007F, C1 controls U+0080-U+009F | delete, flag |
-| Line/paragraph separators U+2028/2029, bidi controls U+202A-202E and U+2066-2069, zero-width characters U+200B-200D and U+FEFF | delete, flag |
-| Leading/trailing Unicode whitespace (including U+00A0 and U+3000) | trim |
+| U+2028/2029, bidi controls U+202A-202E and U+2066-2069, zero-width characters U+200B-200D and U+FEFF | delete, flag |
+| Leading/trailing Unicode whitespace (including U+00A0, U+3000) | trim |
 | Trailing `.` or space (after all other steps) | trim repeatedly |
 | Runs of whitespace | collapse to one space |
 
-Suggested replacements (owner to approve): `:` becomes `-` when it is followed by a space (`RE: x` becomes `RE- x`, which looks odd); the research suggested `_`. Proposal: replace every reserved character with `_`, except `/` and `\`, which become `-`. Whichever is chosen is fixed forever, because changing it renames every exported file.
+The replacement table is fixed permanently: changing it would rename every exported directory.
 
-**N4. Reserved device names.** Compare the part of the component before the first `.` (after trimming), case-insensitively, against `CON PRN AUX NUL COM0-COM9 LPT0-LPT9` and the superscript variants, plus `CONIN$ CONOUT$`. On a match, append `_` to that part (`NUL` becomes `NUL_`). This applies to folders, message stems (because `NUL.md` is the device), and attachment names. Verify the exact set against current Microsoft documentation; the conservative superset costs nothing.
+**N4. Reserved device names.** Compare the part of the component before the first `.` (after trimming), case-insensitively, against `CON PRN AUX NUL COM0-COM9 LPT0-LPT9`, the superscript variants, `CONIN$`, and `CONOUT$`. On a match, append `_` to that part (`NUL` becomes `NUL_`). This applies to **directories too**: a message whose subject is `NUL` is exported as a directory, and Windows still treats `NUL` as a device name. Verify the set against current Microsoft documentation; the conservative superset costs nothing.
 
 **N5. Dot names.** A component that becomes `.` or `..` is treated as empty (N8).
 
-**N6. Explorer-special and tool-special names.** Attachment names equal (case-insensitively) to `desktop.ini`, `thumbs.db`, `autorun.inf`, or beginning with `~$` get a leading `_`. Verify the list. Executable attachment types written to disk may be quarantined by antivirus; that is behavior to document, not a naming rule.
+**N6. Explorer-special and tool-special names.** Attachment names equal (case-insensitively) to `desktop.ini`, `thumbs.db`, `autorun.inf`, or beginning with `~$` get a leading `_`. Verify the list. Executable attachment types written to disk may be quarantined by antivirus; document it.
 
-**N7. Idempotence.** `sanitize(sanitize(x)) == sanitize(x)`. Tested by property tests.
+**N7. Idempotence.** `sanitize(sanitize(x)) == sanitize(x)`. Property-tested.
 
-**N8. Empty or unusable names.** Empty after sanitizing: folder `(unnamed folder)`, message `(no subject)` (matches what Outlook displays), attachment `attachment-<n>` where `<n>` is the 1-based position in the attachment table, with an extension from the MIME type only if one is recorded. Never omit an item.
+**N8. Empty or unusable names.** Empty after sanitizing: folder `(unnamed folder)`, message `(no subject)` (what Outlook displays), PST stem `archive`, attachment `attachment-<n>` (1-based position in the attachment table, with an extension from the MIME type only if one is recorded). Never omit an item.
 
-**N9. Reserved for the tool.** At the export root, a PST folder named `.tsp` (any case) is renamed by the uniqueness rules as if it collided with a sibling.
+**N9. Reserved for the tool.** Names that collide with reserved keys (`folder.json` in any folder directory; `.tsp-tmp` under `<out>`) are renamed by U4 as if they collided with a sibling.
 
-**N10. Extensions.** Message files always end in `.md`. A subject that already ends in `.md` is not special. For attachments, the extension is the text after the last `.` if that text is 1-16 characters with no spaces; otherwise the attachment has no extension. The extension is never truncated (L3).
+**N10. Extensions (attachments only).** The extension is the text after the last `.` if it is 1-16 characters with no spaces; otherwise none. Suffixes go before the extension. Message and folder directories have no extension, so suffixes go at the end; this removes a class of extension-splitting bugs that a `<subject>.md` layout would have had.
 
 ## 5. Length and path budgets
 
-**Measurement.** Windows limits count UTF-16 code units, not characters and not bytes. An emoji is 2 units. Every length in these rules is UTF-16 code units. Verify with tests using astral-plane characters.
+**Measurement.** Windows limits count UTF-16 code units, not characters or bytes; an emoji counts as 2. Every length in these rules is UTF-16 code units. Verify with astral-plane tests.
 
-**L1. Component limit.** 255 units per component on NTFS, FAT32 and exFAT. After all suffixes are added, a component must be at most 255; the working target is lower (L3).
+**L1. Component limit.** 255 units per component on NTFS, FAT32, and exFAT, after all suffixes.
 
-**L2. Path limit.** Default budget: the full path, including drive, separators, and the terminating null, must be under 260. That leaves 259 units for the full path of the deepest file or directory. Two documented wrinkles: (a) `CreateDirectory` reportedly enforces a lower limit of 248 for directory paths (so an 8.3 name can still fit); treat directory paths as at most 247. (b) The user's `--out` path counts, so the relative budget is `259 - len(absolute out root) - 1`. Both verify against Microsoft documentation.
+**L2. Path limit.** Default budget: the full path of every file and directory, including drive, separators, and the terminating null, stays under 260, so at most 259 units. Two wrinkles (verify against Microsoft documentation): (a) `CreateDirectory` reportedly enforces 248 for directory paths so an 8.3 name can still fit; treat directory paths as at most 247; (b) the user's `--out` path and the PST-stem directory count, so the relative budget is computed from the real absolute root.
 
-Long-path support (registry `LongPathsEnabled` plus manifest, or the `\\?\` prefix) would allow more, but archivers, sync clients, older tools, and other operating systems still fail on long paths. Default is to obey the 259 budget; a `--long-paths` flag can lift it deliberately. Rust's standard library is believed to handle long Windows paths by itself (verify); the risk is downstream tools, not `tsp`.
+Because this layout makes **every message a directory**, the 248 rule is the binding constraint for message directories.
 
-**L3. Reserved room.** Truncation is computed against the *worst-case* child, not the item itself:
+**L3. Worst-case child reservation.** Name shortening for a message directory is computed from the worst-case path inside it:
 
-- a message stem reserves ` - Copy (99)` (12 units) so a later duplicate still fits, plus `.md` (3) for the file;
-- a message with attachments reserves ` - attachments` (14 units), one separator, and the longest attachment name it will actually contain (capped, default 100 units including extension), plus ` - Copy (99)` for that name;
-- a folder reserves one separator plus the shortest legal child.
-- the atomic-write staging path (section 8) must not exceed the final path, so staging uses a short fixed prefix.
+- directory path `D` (absolute);
+- `metadata.json`: `D + 1 + 13`; `message.md`: `D + 1 + 10`;
+- attachment: `D + 1 + 11 + 1 + A` where `A` is the longest sanitized attachment name in that message (` - Copy (99)` reserved, 12 units);
+- embedded message: the same applies recursively from its own directory;
+- plus room for a later ` - Copy (99)` suffix on `D`'s last component (12 units).
 
-**L4. Truncation order.** When the projected path exceeds the budget: (1) shorten message stems, longest first, down to a floor of 24 units; (2) shorten attachment stems down to a floor of 16; (3) shorten folder names down to a floor of 16, deepest first; (4) flatten: fold the remaining over-budget subtree into its nearest fitting ancestor as `Parent - Child - Grandchild` (research Option 4) and record the original path in the manifest; (5) if even that fails, fall back to `msg-<8 hex of the identity hash>.md` (N8-style) and flag. Every step is deterministic given the same input and the same budget; the budget and each decision are recorded in the manifest.
+So `D <= 245` for `metadata.json`, and `D + 13 + A <= 259` when the message has attachments. Attachment names are first limited to 100 units including extension (stem floor 16), then message directory names are shortened. The stem for the PST root directory and staging names also count.
 
-**L5. How to shorten.** Cut at a word or code point boundary that is not inside a surrogate pair or a combining sequence, then append `…` (U+2026, 1 unit). Never cut inside a grapheme cluster.
+**L4. Truncation order.** When the projected path exceeds the budget: (1) shorten attachment stems to at most 100, then as needed to a floor of 16; (2) shorten message directory names, longest first, to a floor of 24; (3) shorten folder names, deepest first, to a floor of 16; (4) flatten: join an over-budget chain of folders into one directory name `Parent - Child - Grandchild` and record the original path in each `folder.json` (research option 4); (5) last resort: `msg-<8 hex of the identity hash>` for the message directory, flagged. Every step is deterministic; the budget and each decision are recorded in the metadata.
 
-**L6. Directory size.** FAT32 allows at most 65,534 entries per directory (verify); NTFS has no practical limit but Explorer degrades with tens of thousands. A warning is enough: report the maximum entries in any directory. Recommend NTFS for the output.
+**L5. How to shorten.** Cut at a code point boundary that is not inside a surrogate pair or combining sequence, never inside a grapheme cluster, then append `…` (U+2026, one unit).
+
+**L6. Directory size.** FAT32 allows at most 65,534 entries per directory (verify); NTFS has no practical limit but Explorer slows with tens of thousands. Warn and report the maximum entries in any directory. NTFS is recommended for the output.
+
+**L7. Long paths: advice (Q7, delegated to Claude).** Default: obey the 259 budget; provide `--long-paths` as an explicit opt-in, off by default. Rationale: the archive's purpose is durability and portability. `\\?\` or registry-enabled long paths work for the tool that wrote them, but Explorer in older configurations, many archivers, sync clients, backup software, PowerShell 5, and other operating systems routinely fail on long paths, and a durable archive that cannot be copied is not durable. Do *not* apply a blanket "portable" relative cap by default (it would shorten names needlessly for people exporting near a drive root). Instead: (a) compute the budget from the real root; (b) record the longest relative path in the root `folder.json` and report `plan_max_relative_path_units`; (c) offer `--max-relative-path N` for someone exporting an archive meant to move to a longer root; (d) when names must be shortened, say so in counts and in metadata. Suggest, in documentation, exporting to a short path such as `D:\tsp`.
 
 ## 6. Uniqueness and duplicates
 
-A directory is one namespace on Windows: a file and a folder cannot share a name, and names are compared case-insensitively. A PST has separate namespaces (a folder and a message may both be called `Budget`), so collisions the PST never had appear on export.
+A directory is one namespace on Windows: a file and a directory cannot share a name, and names compare case-insensitively. A PST has separate namespaces (a folder and a message may both be called `Budget`; sibling folders may share a name). In this layout the namespaces that matter are: (a) a PST folder directory's children (subfolder directories and message directories, plus the reserved `folder.json`); (b) a message's `attachments/` (attachment files and embedded-message directories).
 
-**U1. Collision key.** `casefold(NFC(final component name))`, computed on the **final** on-disk name including extension (`Budget.md`, not `Budget`), across the union of everything that will exist in one directory: subfolders, message files, attachments folders. Case folding is a conservative superset of NTFS behavior; NFC keys also protect a later move to macOS. Verify: NTFS uses its own upcase table.
+**U1. Collision key.** `casefold(NFC(final component name))`, computed on the **final** on-disk name within one of the namespaces above. Case folding is a conservative superset of NTFS behavior; NFC protects a later move to macOS. Verify: NTFS uses its own upcase table.
 
-**U2. Natural names claim first.** For each directory, first compute every item's natural name (sanitized and truncated). Natural names that do not collide are final. Only then are colliding items renamed. This guarantees that a message really called `Budget (2)` keeps its name and a generated suffix skips over it.
+**U2. Natural names claim first.** Within a namespace, compute every item's natural name (sanitized, truncated). Non-colliding natural names are final. Only then are colliding items renamed, so a message genuinely called `Budget (2)` keeps its name and a generated suffix skips over it.
 
-**U3. Deterministic order.** Items in a collision group are ordered by (message time ascending, then the item's stable identifier ascending). The first keeps the natural name. For folders the order is the folder's identifier (section 6.1). Order never depends on scan order, thread scheduling, or the clock. Message time is the delivery time, falling back to submit time, then to a fixed value that sorts last.
+**U3. Deterministic order.** Items in a collision group are ordered by (message time ascending, then the item's stable identifier ascending). The first keeps the natural name. For folders the order is the folder identifier (section 9). Order never depends on scan order, scheduling, or the clock. Message time is delivery time, then submit time, then a fixed value that sorts last.
 
-**U4. Suffix scheme (owner's Windows-style convention, with one refinement).**
+**U4. Suffix scheme (decision Q2).**
 
-- Later items in a group whose **content is identical** to an earlier one (same content hash, defined in M4g) get ` - Copy`, ` - Copy (2)`, ` - Copy (3)`, counted within that content-identical set. These really are copies.
-- Later items that share a name but **differ in content** get ` (2)`, ` (3)`, ... counted within the name group.
+- A later item whose **content is identical** to an earlier item in the group gets ` - Copy`, ` - Copy (2)`, ` - Copy (3)`, ..., counted within that content-identical set. These are genuine copies.
+- A later item that shares a name but **differs in content** gets ` (2)`, ` (3)`, ..., counted within the name group.
 
-The refinement is a proposal for the owner. In a mailbox, same-subject messages in one folder are usually different messages (twelve replies titled `RE: Meeting`), not copies. Labeling them ` - Copy` would tell a future reader they are redundant, and in an archive that could lead to deleting evidence. Windows itself uses ` - Copy` only for genuine copy operations and ` (2)` for name conflicts. If the owner prefers ` - Copy` for everything, the mechanism is identical and only the string changes.
+Rationale for the split: in a mailbox, same-subject messages in one folder are usually different messages (twelve replies titled `RE: Meeting`), not copies; labeling them ` - Copy` would tell a future reader they are redundant.
 
-**U5. Suffix placement and length.** The suffix goes before the extension and counts against L1/L3. If adding the suffix would exceed the budget, shorten the stem (L4), never the suffix.
+**Content identity.** U4 needs a content hash before names are final. It must ignore bookkeeping that differs between a message and its copy (identifiers, creation and modification times, read flags) and include what defines the message (class, subject, sender, recipients, sent and delivery times, all body variants, attachment names and bytes). The exact definition is an M4g schema decision; the naming census (M4b-3) uses a provisional definition and reports how many groups it splits.
 
-**U6. Attachments folder follows the message.** The attachments folder is named `<final message stem> - attachments`, so `Budget - Copy.md` pairs with `Budget - Copy - attachments`. The attachments folder takes part in U1 with the message's directory, and its own name is checked for collisions (a PST subfolder named `Budget - attachments` is renamed by U4, folders using the ` (2)` form).
+**U5. Suffix placement and length.** Suffixes are appended to the directory name (no extension to split). If a suffix would exceed the budget, shorten the stem (L4), never the suffix. Suffixes count toward L1 and L3.
 
-**U7. Folder duplicates.** Sibling folders that collide (identical names, case-only differences, or normalization differences) are ordered by identifier; the first keeps the name and the rest get ` (2)`, ` (3)`. Folders are never ` - Copy`: two folders with the same name are not copies of each other, and the PST may hold different content in each. The original name and identifier are recorded in the manifest.
+**U6. Folders.** Sibling folders that collide (same name, case-only, or normalization differences) are ordered by identifier; the first keeps the name and the rest get ` (2)`, ` (3)`. Folders never get ` - Copy`: two same-named folders are not copies of each other. The original name and identifier are recorded in `folder.json`.
 
-**U8. Attachment duplicates.** Within one attachments folder, colliding names get ` (2)` before the extension (`image001 (2).png`), in attachment-table order. Content-identical attachments still get ` (n)`, not ` - Copy`, because inline images with the same name and different content ids are common.
+**U7. Attachments.** Within one `attachments/`, colliding names get ` (2)` before the extension (`image001 (2).png`), in attachment-table order; content-identical attachments still get ` (n)` rather than ` - Copy`, because inline images with the same name and different content are common. An embedded-message directory and an attachment file compete in the same namespace.
 
-**U9. Verification of uniqueness.** After planning, a final pass rebuilds every directory's collision keys and asserts there are no duplicates. A violation is a bug, and the export refuses to start.
+**U8. Reserved keys.** `folder.json` and, under `<out>`, `.tsp-tmp` take part in U1.
 
-**Idempotence and stability.** Re-exporting the same unchanged PST produces the same names. If messages are added, the ordinals can shift for later items in a group. That is inherent to ordinal suffixes (the research's objection to them) and is accepted; the stable identity in `.tsp` is what lets a later tool match files to messages regardless of suffix.
+**U9. Final check.** After planning, rebuild every namespace's collision keys and assert there are no duplicates. A violation is a bug, and the export refuses to start.
 
-## 7. Attachments folder: feasibility critique
+**Stability.** Re-exporting an unchanged PST gives the same names. If messages are added, later ordinals in a group can shift; the stable identity in `metadata.json` is what lets a later tool match directories to messages.
 
-Requirement 4 (`<subject> - attachments`) is feasible on Windows with these consequences that the requirement does not state:
+## 7. Attachments (`attachments/`) and embedded messages
 
-1. **The attachment path is the longest path, not the message path.** `Dir\Subject.md` is `P + S + 3` units. An attachment is `Dir\Subject - attachments\name.ext`, which is `P + S + 14 + 1 + A`. The subject budget must therefore be computed from the attachment path (L3). A subject that fits as a message file can fail as an attachment parent.
-2. **Cost of the suffix itself is small.** 14 units out of a 255 component and a 259 total path. It is not the problem. Nesting is.
-3. **Embedded messages recurse.** A forwarded chain (message with an attached message with an attached message) repeats stem + ` - attachments` at every level, quickly consuming the budget. Proposal: a depth cap (default 3) and, beyond it, write the embedded message flattened into the deepest legal folder with a flag. Also stop recursion cycles (an embedded message cannot legitimately contain itself, but corrupt files exist).
-4. **File and folder share a namespace.** `Subject - attachments` can collide with a PST subfolder or another message with that exact name (U6).
-5. **Inline images inflate the count.** Signature logos and pasted images are attachments with a content id. The corpus has 23 content-id attachments among 29; many messages would get an attachments folder containing only `image001.png`. Options: (a) keep them all (simplest, faithful); (b) put inline attachments in an `inline` subfolder (extra depth); (c) keep them and mark them `inline: true` in the manifest. Recommend (a) with (c), and let the owner decide (Q6).
-6. **Sorting.** Explorer sorts folders above files by default, so `Subject.md` and `Subject - attachments` are not adjacent. Cosmetic.
-7. **Only when present.** The folder is created only for messages with at least one attachment. An attachment that could not be extracted (PST attachment bytes, embedded OLE) still appears in the manifest, and the folder is created only if at least one file is written; otherwise the message's metadata carries the flag.
-8. **Attachment name hygiene** applies (N4, N6, N10), and executable attachments may be quarantined by antivirus when written.
+The accepted layout has none of the problems of a `<subject> - attachments` sibling folder: the literal `attachments/` name is 11 units, sits inside the message directory (so it cannot collide with a subfolder or another message), and needs no suffix logic. What remains:
+
+1. **The attachment path is the longest path** (L3). A subject that fits as a message directory may not leave room for a long attachment name, so the reservation is computed from the longest attachment actually present.
+2. **Embedded messages recurse.** A forwarded chain repeats `<subject>\attachments\` at every level. Proposal: a depth cap (default 3); beyond it, the embedded message is written, flagged, into the deepest legal level as a flat directory named `Embedded - <subject>`, and the flag records the original nesting. Also stop cycles (corrupt files).
+3. **Created only when needed.** `attachments/` is created only if at least one file or embedded message directory is written. An attachment that cannot be extracted (PST attachment bytes, OLE objects) still appears in `metadata.json` with its status and reason.
+4. **Inline attachments (decision Q6).** Signature logos and pasted pictures stay in `attachments/` and carry `inline: true` in `metadata.json`; the corpus has 23 content-ID attachments among 29, so many messages will have an `attachments/` holding only `image001.png`. Keeping them is the faithful choice, and the flag lets a reader or tool filter them.
+5. **Attachment name hygiene** applies (N4, N6, N8, N10). Executable attachments may be quarantined by antivirus.
 
 ## 8. Export lifecycle
 
-1. **Plan (pure).** Walk the source, apply N/L/U rules, produce a plan: every directory and file with final names, lengths, and flags. No I/O. This is the same code the `--dry-run` uses.
-2. **Gate.** Check plan invariants (U9, budgets). Print counts-only findings, in the `--verify` style, under keys such as `plan_names_sanitized`, `plan_names_truncated`, `plan_collision_groups`, `plan_max_path_units`, `plan_budget_exceeded`.
-3. **Preflight against the target** (section 2), ask consent.
-4. **Write** into a staging directory under `<out>/.tsp/staging-<short>/` and move into place. On the same volume, rename is cheap and atomic per file; replacing an existing file needs the Windows replace-on-rename call (verify what Rust's `std::fs::rename` does on Windows when the target exists).
-5. **Verify** by reading back and comparing to the plan.
+1. **Plan (pure).** Walk the source; apply N, L, and U rules; produce every directory and file with final names, lengths, and flags. No I/O. The same code serves `--dry-run`.
+2. **Gate.** Check plan invariants (U9, budgets) and print counts-only findings in the `--verify` style, under keys such as `plan_names_sanitized`, `plan_names_truncated`, `plan_collision_groups`, `plan_max_path_units`, `plan_budget_exceeded`, `plan_gate_violations`.
+3. **Preflight against the target** and consent (section 2).
+4. **Write** into a staging directory `<out>/.tsp-tmp/` (short fixed name so staging paths never exceed final paths) and move into place. Same-volume rename is cheap; replacing an existing file needs the Windows replace-on-rename behavior (verify what `std::fs::rename` does on Windows when the target exists).
+5. **Verify** by reading back and comparing with the plan; remove `.tsp-tmp`.
 
-File modification times: set to the message time when it is valid and representable (Windows cannot represent times before 1601, and PSTs can contain placeholders such as the year 4500), otherwise leave as written. Times are excluded from determinism comparisons.
+File modification times: set to the message time when valid and representable (Windows cannot represent times before 1601, and PSTs can contain placeholders such as the year 4500), otherwise leave as written. Times are excluded from determinism comparisons.
 
-## 9. Folder identity (the "GUID" question)
+## 9. Folder identity
 
-The research and the owner both note that PST folders can share a name. What identifies a folder:
+- Every PST node has a 32-bit **NID**, unique within that PST. A folder's `PidTagRecordKey` and `PidTagEntryId` are *calculated properties derived from the NID* (MS-PST lists both with base tag `nid`). The EntryID also contains the store's 16-byte **Provider UID** (the store's own `PidTagRecordKey`).
+- So a folder identifier is unique within one PST and distinguishable across different PSTs by the Provider UID, but it is not a free-standing GUID. Two byte-identical copies of a PST share all of it.
+- Whether `outlook-pst` v1.2.0 exposes the NID or these properties for a folder has not been checked; that is the spike in M4b-3.
 
-- Every PST node has a 32-bit **NID**, unique within that PST. A folder's `PidTagRecordKey` and `PidTagEntryId` are *calculated properties derived from the NID* (MS-PST folder objects table lists both with base tag `nid`). The EntryID also contains the store's 16-byte **Provider UID** (the store's own `PidTagRecordKey`).
-- So the folder identifier is unique within one PST, and globally distinguishable across different PSTs by the Provider UID, but it is not a free-standing GUID assigned to the folder. Two byte-identical copies of a PST share all of it.
-- Whether `outlook-pst` v1.2.0 exposes the NID or these properties for a folder has not been checked; that is a spike in M4b-3.
+Use: (1) **ordering key** for U3/U6 (NID ascending); (2) **recorded in `folder.json`** (NID, EntryID hex, Provider UID, original display name, parent NID, original path); (3) **never in the visible name** except through the ` (n)` rule when siblings collide; (4) if the identifier cannot be obtained, fall back to (display name, position in the hierarchy table, content count) and flag `folder_identity_fallback`; that order is deterministic for a given file but not meaningful across files.
 
-Proposed use:
-
-1. **Ordering key** for U3/U7: sort colliding sibling folders by NID (ascending). Deterministic and independent of display order.
-2. **Recorded in the manifest** (NID, EntryID hex, Provider UID, original display name, parent NID, original path), so a renamed directory can be traced to its folder.
-3. **Never in the visible name** except through the ` (n)` rule, and only when siblings collide.
-4. If the exposed identifier cannot be obtained, fall back to (display name, index in the hierarchy table, content count) as the ordering key and flag `folder_identity_fallback`. That ordering is deterministic for a given file but not meaningful across files.
+**Message identity** (the item the accepted ADR deferred): the directory name is for humans and is not the identity. Identity is the source identifier (for a PST message: NID plus the store's Provider UID), recorded in `metadata.json` together with `PidTagInternetMessageId` when present, and the content hash. Missing or duplicated Internet message IDs therefore cannot affect naming, which resolves the ADR's deferred question for folder naming.
 
 ## 10. Where PST and Windows differ (checklist)
-
-Stated by the owner or the research, plus items neither mentioned:
 
 | # | Difference | Handled by |
 |---|---|---|
 | 1 | Reserved characters, device names, trailing dots/spaces | N3, N4 |
 | 2 | Case-insensitive, case-preserving names | U1 |
 | 3 | Total path limit; component limit | L1-L4 |
-| 4 | Duplicate names are legal in a PST | U2-U8 |
-| 5 | Same-name sibling folders are possible | U7, section 9 |
+| 4 | Duplicate names are legal in a PST | U2-U7 |
+| 5 | Same-name sibling folders are possible | U6, section 9 |
 | 6 | Unbounded folder depth | L4 flattening |
-| 7 | Copies are independent objects | faithful mirror (both exported); ` - Copy` for identical content |
+| 7 | Copies are independent objects | both exported; ` - Copy` for identical content |
 | 8 | Unrestricted subject length and content | N3, L4, L5 |
-| 9 | Attachment names: missing, illegal, duplicated | N8, U8 |
-| 10 | **Files and folders share one namespace on Windows; a PST separates them** | U1 (union) |
+| 9 | Attachment names missing, illegal, duplicated | N8, U7 |
+| 10 | **Files and directories share one namespace on Windows; a PST separates them** | U1 (namespaces in section 6) |
 | 11 | **Length is counted in UTF-16 units** | section 5 |
-| 12 | **Normalization: NFC/NFD names look identical** | N2, U1 |
+| 12 | **Normalization: NFC and NFD names look identical** | N2, U1 |
 | 13 | **Invalid UTF-16 and code-page loss in ANSI PSTs** | N2 |
-| 14 | **Invisible/bidi characters in subjects** | N3 |
+| 14 | **Invisible and bidi characters in subjects** | N3 |
 | 15 | **Empty subject or folder name** | N8 |
-| 16 | **The `--out` root consumes the budget** | L2 |
-| 17 | **Suffixes, ` - attachments`, and staging paths consume the budget** | L3 |
-| 18 | **Tool-owned names (`.tsp`) may collide with user folders** | N9 |
-| 19 | **Files per directory (FAT32 65,534)** | L6 |
-| 20 | **File timestamps cannot always be represented** | section 8 |
-| 21 | **Non-mail items (calendar, contacts, tasks, notes)** | section 12 |
-| 22 | **Hidden/associated items, search folders, items outside the IPM subtree** | section 12 |
-| 23 | **Sync clients (OneDrive and similar) add their own name and path limits** | document; census warns on very long paths |
+| 16 | **The `--out` root and PST stem consume the budget** | L2, L7 |
+| 17 | **Message directories are directories: the 248 rule, device names apply** | L2, N4 |
+| 18 | **Fixed child names, suffixes, and staging consume the budget** | L3 |
+| 19 | **Tool-owned names may collide with user folders** | N9, U8 |
+| 20 | **Files per directory (FAT32 65,534)** | L6 |
+| 21 | **File timestamps cannot always be represented** | section 8 |
+| 22 | **Non-mail items (calendar, contacts, tasks, notes)** | section 12 |
+| 23 | **Hidden/associated items, search folders, items outside the IPM subtree** | section 12 |
+| 24 | **Sync clients add their own name and path limits** | document; census warns on long paths |
 
-## 11. ADRs this implies
+## 11. ADRs this implies (complete, do not supersede)
 
-1. **Export layout and naming** (supersedes the layout part of "Deterministic Markdown archive"; keeps its determinism and Markdown-as-projection decisions).
-2. **Message and folder identity, duplicate policy** (mirror faithfully; U-rules).
-3. **Output posture** (`--out`, `--dry-run`, consent, `.tsp` ownership, stdout content-free).
+The accepted ADR [Deterministic Markdown archive](../../ADRs/deterministic-markdown-archive.md) keeps its status and layout. M4a-2 adds ADRs that decide what it deferred, and the archive ADR gets a cross-reference in its "More Information" section pointing to them (a link, not a status change):
+
+1. **Export naming, collisions, and path budgets** (sections 4-6).
+2. **Message and folder identity and provenance** (section 9; fills the ADR's deferred identity item).
+3. **Output posture** (`--out`, `--dry-run`, consent, ownership by `folder.json`, stdout content-free).
 4. **Body and formatting-loss policy** (M4e).
-5. **Metadata and per-item status schema** (M4g).
+5. **`metadata.json` / `folder.json` schemas and per-item status** (M4g).
 
-## 12. Scope of what is exported
+## 12. Scope of what is exported (decision Q5)
 
-Proposed default, for the owner to confirm (Q5): export everything reachable from the IPM subtree, including Deleted Items. Every item gets a `.md`: mail (`IPM.Note*`) with body; other classes (appointments, contacts, tasks, notes, reports, meeting requests) get a `.md` with a metadata summary and the status `partial: non-mail item` until they have a renderer. Skipped and counted, never silently: associated (hidden) items, search folders (virtual), and anything outside the IPM subtree (orphans, recoverable items). Counts appear in the manifest and in the stdout summary.
+Everything reachable from the IPM subtree, including Deleted Items. Every item gets a message directory: mail (`IPM.Note*`) with a body in `message.md`; other classes (appointments, contacts, tasks, notes, reports, meeting requests) get `message.md` with a short metadata summary and status `partial: non-mail item` until they have a renderer. Skipped and counted, never silently: associated (hidden) items, search folders (virtual), and anything outside the IPM subtree (orphans, recoverable items). Counts appear in the root `folder.json` and in the stdout summary.
 
-## 13. Open questions (owner)
+## 13. Open questions (new)
 
-- **Q1.** Export root naming: `<out>/<store display name>/...`, `<out>/<PST file stem>/...`, or the IPM children directly under `<out>`. Proposal: the PST file stem, sanitized, so several PSTs can share an output directory.
-- **Q2.** The suffix scheme in U4 (content-identical ` - Copy`, otherwise ` (n)`) versus ` - Copy` for all.
-- **Q3.** Where metadata lives (section 3.2).
-- **Q4.** Replacement characters in N3.
-- **Q5.** Scope in section 12.
-- **Q6.** Inline attachments (section 7, item 5).
-- **Q7.** Whether to allow `--long-paths`, and the default budget (259 versus a portable relative cap such as 200 so the archive can move to a longer root).
-- **Q8.** Whether folders should carry a small visible marker file; proposal: no.
+- **Q8 resolved in section 3.2** (folder marker files: yes, as `folder.json`, with rationale).
+- **Q7 resolved in L7** (advice above).
+- **Q9.** Export root for non-PST inputs (section 3.1): directory name for a folder of `.msg` files, file stem for a single `.msg`. Proposal as written.
+- **Q10.** Whether the root `folder.json` records a SHA-256 of the whole source file by default. It is strong provenance (design principle 6) but costs minutes on a multi-gigabyte PST. Proposal: on by default, with `--no-source-hash` to skip it.
+- **Q11.** Exact definition of the content hash behind U4 (M4g ADR); the census uses a provisional one.
