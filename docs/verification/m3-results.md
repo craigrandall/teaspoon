@@ -2,9 +2,11 @@
 
 ## Status
 
-**M3a–M3f: complete and verified against the full 29-file corpus.** The default `.msg` path is the custom MS-OXMSG extraction path. The M3f flip was verified by running the flipped default over the 29 fixtures: its output is identical to the earlier `--extract` output (`extract4.txt`), the build was clean, and all 56 tests passed. **M3g** (remove the transitional `--oxmsg` and `--extract` flags) remains.
+**M3 is complete: M3a through M3g.**
 
-**Post-M3f follow-ups: drafted, awaiting a Windows run.** Three changes landed after the flip was verified and have not yet been compiled or run by the project owner: the structural gates folded into `--verify`, the `PT_STRING8` code page chain (closing the M3b design debt), and the corpus-gated regression test. They are described in "Post-M3f follow-ups" below, with exactly what is and is not yet evidenced. Nothing in this document reports a result from them; the results recorded here are those of the verified M3f build.
+- **M3a-M3f: complete and verified against the full 29-file corpus.** The default `.msg` path is the custom MS-OXMSG extraction path. The M3f flip was verified by running the flipped default over the 29 fixtures: its output is identical to the earlier `--extract` output (`extract4.txt`), the build was clean, and all 56 tests passed.
+- **Post-M3f follow-ups: complete and verified on Windows.** The structural gates folded into `--verify`, the `PT_STRING8` code page chain, and the corpus-gated regression test were built and run: the build was clean, all 64 tests passed, and the full-corpus `--verify` run reported `structural_gate_violations=0` (output recorded below).
+- **M3g: code delivered, awaiting the first Windows build and test run.** The transitional `--oxmsg` and `--extract` flags were removed. This is the only part of this document that describes code that has not yet been compiled or run by the project owner; see "M3g -- transitional flags retired".
 
 ADR "Custom MS-OXMSG parser graduates to the production MSG path" moved from Proposed to Accepted with M3f. ADR "Independent differential verification" now records the MSG-side verification actually performed: the `--verify` harness and the `--extract` vs. default textual diff are exactly the "independent implementation as comparison oracle" work that ADR called for. The PST-side comparison is still outstanding.
 
@@ -12,7 +14,7 @@ ADR "Custom MS-OXMSG parser graduates to the production MSG path" moved from Pro
 
 All results below come from the 29-file `.msg` fixture corpus (3 subdirectories deliberately skipped, non-recursive scan), run on Windows. The fixtures are not in the repository.
 
-The M3e commands, run while `msg_parser` was still the default:
+The M3e commands, run while `msg_parser` was still the default (`--extract` and `--oxmsg` were later retired in M3g; the commands are kept as the record of how this evidence was produced):
 
 ```text
 cargo run --release -- "C:\dev\csr\main\teaspoon\_NOTES\test-fixtures\msgs\" > default.txt
@@ -28,6 +30,12 @@ cargo run --release -- "C:\dev\csr\main\teaspoon\_NOTES\test-fixtures\msgs\" > d
 ```
 
 `default_was_extract4.txt` is identical to `extract4.txt`, the `--extract` output captured before the flip.
+
+The post-M3f verification, run on the build with the follow-ups. This is the current form of the `--verify` command above:
+
+```text
+cargo run --release -- --verify "C:\dev\csr\main\teaspoon\_NOTES\test-fixtures\msgs\" > verify.txt
+```
 
 Quality gate (unchanged from previous slices): `cargo fmt --check`, `cargo check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`, `cargo build --release`. CI (`.github/workflows/ci.yml`) runs the same on Linux and Windows, but cannot run anything that needs the fixtures.
 
@@ -174,25 +182,85 @@ What changed in M3f:
 
 **Verification of the flip:** the default run over the 29 fixtures produced `default_was_extract4.txt`, identical to `extract4.txt`; `cargo` build clean; 56 tests passed.
 
-## Post-M3f follow-ups (drafted; awaiting a Windows run)
+## Post-M3f follow-ups (verified)
 
 ### Structural gates folded into `--verify`
 
-The structural counters that previously ran only under `--oxmsg` now also run inside `--verify`. `--verify` calls the same structural walk (`inspect_oxmsg`) on each file it already opens, accumulates the result next to the comparison tallies, and prints:
+The structural counters that previously ran only under `--oxmsg` now run inside `--verify`. `--verify` calls the same structural walk (`inspect_oxmsg`) on each file it already opens, accumulates the result next to the comparison tallies, and prints:
 
 - one line per structural gate, using the same key names `--oxmsg` used, each of which must read 0 on a clean corpus: `entry_accounting_gap_total`, `unrecognized_entries_total`, the four `properties_stream_*` anomaly counters, `attach_data_object_size_sentinel_mismatches`, the two `attach_data_object_reserved_vs_*_object_storage_gap` cross-checks, the fixed-value checks, the variable-value checks (`variable_value_stream_missing_total` and its siblings, including `variable_string8_unsupported_codepage_total`), and the three named-property checks;
 - `structural_gate_violations`, the number of gates that are nonzero (0 on a clean corpus);
 - a few informational, ungated counters (`total_entries`, `opaque_payload_entries_total`, the named-property "missing/unresolvable" totals, and the `PT_STRING8` code page resolution counts).
 
-Most gates above have corpus evidence of reading 0 in the sections of this document that record them. Two need a caveat. `unrecognized_entries_total` was first reported as 62 and then fully accounted for (see "Resolution of the 62 unrecognized entries" below); the M3f evidence records no unrecognized entries, but no post-resolution `--oxmsg` output is attached to this document, so the resolved value of 0 is asserted rather than shown. `variable_string8_unsupported_codepage_total` is new with the code page chain, and is 0 by construction on a corpus with no `PT_STRING8` value. So the first `--verify` run on the corpus is what evidences the gate block as a whole: expect `structural_gate_violations=0`, and treat a nonzero `unrecognized_entries_total` as either a stale expectation in this document or a real finding, to be triaged against the resolution table.
-
 Structural counts are signed where they are differences, so an overcount is visible. The scan loop and the printing were separated (`collect_msg_verify_totals`, `print_msg_verify_report`) so that assertions can run on the totals rather than on printed text.
 
-This is what allows `--oxmsg` to be retired: its accounting checks no longer depend on it.
+**Full-corpus `--verify` output** (abridged; every omitted structural gate line reads 0, and `verify.txt` in the project owner's working copy has all of them):
+
+```text
+inventory=privacy_safe
+input_kind=msg_verify
+files_scanned=29
+subdirectories_skipped=3
+open_errors_msg_parser=0
+open_errors_custom=0
+message_class_both_present_match=29
+message_class_both_present_mismatch=0
+message_class_presence_mismatch=0
+message_class_both_absent=0
+body_plain_both_true=29
+body_plain_mismatch=0
+body_html_native_both_false=29
+body_html_native_mismatch=0
+body_html_via_rtf_both_true=27
+body_html_via_rtf_both_false=2
+body_html_via_rtf_mismatch=0
+body_rtf_both_true=29
+body_rtf_mismatch=0
+msg_parser_rtf_decompression_errors=0
+custom_rtf_decompression_errors=0
+recipients_to_match=29
+recipients_cc_match=29
+recipients_bcc_match=29
+recipient_orig_total=0
+recipient_other_type_total=0
+recipient_unresolved_total=0
+attachments_total_match=29
+attachments_by_value_match=29
+attachments_embedded_message_match=29
+attachments_ole_match=29
+attachments_other_match=29
+attachments_with_content_id_match=29
+attachment_unresolved_total=0
+attachment_data_stream_missing_total=0
+rtf_decompressed_bytes_match=28
+rtf_decompressed_bytes_mismatch=1
+rtf_decompressed_bytes_mismatch_delta=-1
+embedded_message_class_readable_total=1
+embedded_message_class_unreadable_total=0
+entry_accounting_gap_total=0
+unrecognized_entries_total=0
+(... every other structural gate line: 0 ...)
+variable_string8_unsupported_codepage_total=0
+structural_gate_violations=0
+total_entries=2647
+opaque_payload_entries_total=6
+named_properties_map_missing_total=0
+named_properties_unresolvable_total=0
+variable_string8_ascii_under_unsupported_codepage_total=0
+string8_codepage_from_message_total=3
+string8_codepage_from_internet_total=26
+string8_codepage_fallback_total=0
+```
+
+What this shows:
+
+- **Parity on every comparable field**, with the two triaged differences: the single-file RTF length delta of -1 (`rtf_decompressed_bytes_mismatch=1`, delta -1) and the embedded-message open (`embedded_message_class_readable_total=1`).
+- **All 21 structural gates read 0**, so `structural_gate_violations=0`. This closes the caveat carried in the earlier draft of this document: `unrecognized_entries_total` reads 0 in a post-resolution run, no longer just asserted. The 62 entries first reported as unrecognized are all accounted for (see "Resolution of the 62 unrecognized entries").
+- `total_entries=2647` and `opaque_payload_entries_total=6` agree with the first full-corpus structural report recorded in the retained groundwork below.
 
 ### `PT_STRING8` code page chain
 
-The M3b design debt is closed in code. `PT_STRING8` bytes are decoded under a code page resolved once per message:
+The M3b design debt is closed. `PT_STRING8` bytes are decoded under a code page resolved once per message:
 
 1. `PidTagMessageCodepage` (0x3FFD), when present and greater than zero. Zero means "use the folder's code page", which a standalone `.msg` cannot supply, so it counts as unspecified;
 2. otherwise `PidTagInternetCodepage` (0x3FDE), when present and greater than zero. This ordering is a teaspoon design choice, not a quotation of a specification rule;
@@ -202,7 +270,10 @@ The decoder implements Windows-1252, ISO-8859-1, US-ASCII, and UTF-8. Any other 
 
 The chain is used wherever the extraction layer reads a string: the top-level message class, and the embedded message's class (each from that message's own properties stream).
 
-**Evidence status:** covered by unit tests of the chain and the decoders, and by synthetic ANSI `.msg` files (a minimal CFB container built in a temp file at test time: a properties stream, optionally with the codepage properties, and a `PT_STRING8` message class stream). Not exercised by any real file: the corpus has none, so this path has not met a real producer's output. The first real ANSI `.msg` file is the actual verification.
+**Evidence, in two parts that should not be conflated:**
+
+- *Resolution has met real data.* All 29 corpus files carry a code page property, so the chain resolved without the fallback on every file: `string8_codepage_from_message_total=3`, `string8_codepage_from_internet_total=26`, `string8_codepage_fallback_total=0`. The code page numbers themselves are not printed, so this run does not show which code pages they were.
+- *Decoding has not.* The corpus still contains no `PT_STRING8` value (`variable_string8_undefined_byte_total=0`, `variable_string8_unsupported_codepage_total=0`, `variable_string8_ascii_under_unsupported_codepage_total=0`), so the decoders are verified by unit tests and synthetic ANSI `.msg` files (a minimal CFB container built in a temp file at test time), not by a real producer's output. The first real ANSI `.msg` file is the actual verification of decoding.
 
 ### Corpus-gated regression test
 
@@ -213,30 +284,38 @@ $env:TSP_FIXTURE_DIR = "C:\dev\csr\main\teaspoon\_NOTES\test-fixtures\msgs"
 cargo test fixture_corpus_verify_is_clean -- --nocapture
 ```
 
-**Evidence status:** written, not yet run. Until it has been run on the corpus, treat it as unverified code. It should pass on the corpus for the reasons recorded above; a failure would be a finding, not a nuisance.
+**Evidence status:** the test compiled and the suite passed. Whether the test ran against the corpus (rather than skipping because `TSP_FIXTURE_DIR` was unset) is not recorded. The `--verify` output above is exactly the set of values this test asserts on (every mismatch 0, every gate 0, one RTF-length mismatch), so it should pass; run it once with the variable set to turn that from a prediction into a result.
 
 ### Test count
 
-56 at the M3f flip (verified). The follow-ups add eight tests (the chain, the decoders, unsupported code pages, two synthetic ANSI fixtures, two structural-gate tests, and the corpus-gated test, which counts as passing when skipped), for an expected 64. That number is a prediction until `cargo test` confirms it.
+56 at the M3f flip; 64 after the follow-ups (verified by `cargo test`).
+
+## M3g -- transitional flags retired
+
+The last M3 step removes the two flags that existed only to bridge the flip.
+
+- **`--extract` removed.** It had been a redundant alias of the default since M3f.
+- **`--oxmsg` removed,** together with `run_oxmsg_diagnostic` and its `open_errors` counter. Its accounting checks no longer depend on it: they are the structural gates in `--verify`.
+- **The structural breakdown is kept, but only when it is needed.** `print_oxmsg_report` was renamed `print_structural_breakdown`. `--verify` prints it, after a `structural_breakdown=follows` marker, only when `structural_gate_violations` is nonzero. On a clean corpus the `--verify` output is unchanged from the run recorded above. When a gate does fire, the same run shows the entry accounting and the privacy-safe shape of anything unrecognized, which is what the `--oxmsg` report existed to show. Some keys in the breakdown repeat gate lines, with identical values. This choice also keeps every structural counter field in use; deleting the report would have left dozens of counters that are written and never read, which fails `clippy -D warnings`.
+- **The flags now fail loudly.** Passing `--oxmsg` or `--extract` is a command-line error, not a silent no-op. A test asserts this.
+- **`main()`** now has two `.msg` branches: `--verify`, or the default extraction report. PST input is unchanged.
+
+**Evidence status:** written, not yet compiled or run. The expected test count is 66: the 64 above plus one test that the retired flags are rejected (and `--verify` and bare input still parse), and one that the breakdown printer runs on empty totals without panicking (the breakdown never prints on a clean corpus, so this keeps it exercised). Expected behavior on the corpus: the default `.msg` output identical to `default_was_extract4.txt`, and `--verify` output identical to the run above. Both are predictions until run.
 
 ## Known limitations at close of M3
 
-- `PT_STRING8` has been exercised only by synthetic fixtures; the corpus has no `PT_STRING8` property. Multi-byte and other unimplemented code pages are reported, not decoded.
+- `PT_STRING8` decoding has been exercised only by synthetic fixtures; the corpus has no `PT_STRING8` value. Multi-byte and other unimplemented code pages are reported, not decoded.
 - `msg_parser` exposes only To/Cc/Bcc; the custom path additionally reports ORIG and other/unresolved recipient buckets (all 0 on this corpus). After the default flip these are the MSG-side vocabulary, matching the PST side's.
 - Embedded messages are opened one level deep only.
-- The structural `--oxmsg` counters are whole-tree by design and not directly comparable to `msg_parser`'s outer-message-only counts without the top-level scoping used by the extraction layer.
+- The structural counters are whole-tree by design and not directly comparable to `msg_parser`'s outer-message-only counts without the top-level scoping used by the extraction layer.
 - All MSG verification runs against one 29-file corpus, with `msg_parser` as the only oracle. No comparison against `libpff` or `libpst` has been run for either format.
-- The two transitional flags (`--oxmsg`, `--extract`) are still in the binary until M3g.
-
-## What M3g involves
-
-Remove `--oxmsg` and `--extract`, and the code only they reach. The prerequisite the `--oxmsg` removal was waiting on — its accounting checks living somewhere else — is met by the `--verify` gates once the follow-ups above have run clean. Before removing the structural walk itself, note that `--verify` still calls it; what goes is the separate `--oxmsg` report (the entry-shape breakdown lines), which is the part with no other consumer.
+- The corpus-gated regression test has not been recorded as run against the corpus (see above).
 
 ---
 
 # Retained M2.x groundwork evidence
 
-The sections below are carried over from the previous `oxmsg-results.md` -- superseded by this file -- with only the terminology corrected where M3f made it stale; they remain the evidence base for the structural claims the M3 extraction layer builds on. Structural counters named here are now also reported by `tsp --verify`.
+The sections below are carried over from the previous `oxmsg-results.md` -- superseded by this file -- with only the terminology corrected where M3f and M3g made it stale; they remain the evidence base for the structural claims the M3 extraction layer builds on. They were produced by the `--oxmsg` mode, which M3g retired; the same structural counters are now reported by `tsp --verify`, and the full breakdown is printed when a gate fires.
 
 ## Why the custom parser exists
 
@@ -250,7 +329,7 @@ This was raised as a live decision once the original condition for deferring it 
 
 ## Structural enumeration and entry accounting
 
-The `--oxmsg` path opens each `.msg` file with `cfb::open` and classifies every entry name against well-known MS-OXMSG conventions — never by inspecting content: `__properties_version1.0`, `__substg1.0_PPPPTTTT` (including the `-NNNNNNNN` multiple-value index suffix), `__attach_version1.0_#*` / `__recip_version1.0_#*` storages, `__nameid_version1.0`, and `__substg1.0_3701000D` embedded-object storages. Anything else is counted, never silently dropped, with a privacy-safe breakdown (CFB object kind, depth, name shape, fixed-vocabulary ancestry).
+The structural walk (formerly `--oxmsg`, now run by `--verify`) opens each `.msg` file with `cfb::open` and classifies every entry name against well-known MS-OXMSG conventions — never by inspecting content: `__properties_version1.0`, `__substg1.0_PPPPTTTT` (including the `-NNNNNNNN` multiple-value index suffix), `__attach_version1.0_#*` / `__recip_version1.0_#*` storages, `__nameid_version1.0`, and `__substg1.0_3701000D` embedded-object storages. Anything else is counted, never silently dropped, with a privacy-safe breakdown (CFB object kind, depth, name shape, fixed-vocabulary ancestry).
 
 The 29-file corpus confirmed complete accounting. The block below is the first full-corpus report, before the unrecognized entries were resolved as described in the next section; it is kept as the record of that run:
 

@@ -106,7 +106,8 @@ would be built from, but nothing yet assembles them into a normalized item.
 and prints match and mismatch counts per field, never the values compared.
 It also runs the custom path's structural accounting and prints its gate
 counters, which must all read 0, with a single `structural_gate_violations`
-total. Disagreements are triaged against the Microsoft specifications, not
+total; when any gate is nonzero it also prints the structural breakdown for
+triage. Disagreements are triaged against the Microsoft specifications, not
 settled by majority vote (see
 [ADR: Microsoft specifications as normative authority](../ADRs/microsoft-specifications-as-normative-authority.md)
 and [ADR: independent differential verification](../ADRs/independent-differential-verification.md)).

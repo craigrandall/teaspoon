@@ -10,11 +10,13 @@ informed: n/a — single-developer project
 
 Status history: proposed 2026-09-23; accepted 2026-09-29, when M3f shipped
 the default-path flip with its evidence gate satisfied (see Confirmation).
+The transitional flags were retired in M3g the same day.
 
 ## Context and Problem Statement
 
 As of v0.1.9.9, `.msg` input was handled by `msg_parser` by default, with
-an experimental `cfb`-based custom parser available via `--oxmsg`. The
+an experimental `cfb`-based custom parser available via `--oxmsg` (a
+flag since retired). The
 custom path had by then verified, against the full 29-file fixture corpus,
 complete structural enumeration (M2.x: every CFB entry accounted for and
 classified), property-entry decoding (type/ID/flags/variable-length size-
@@ -76,8 +78,8 @@ subject distinction the verification ADR depends on staying separate.
   rather than being silently absorbed by users routing around a rough
   edge with a fallback flag.
 - Bad, because it required M3a-M3e's real value-extraction and parity work
-  before the default could flip. `--oxmsg` and `--extract` remain in the
-  tree as transitional flags until M3g removes them.
+  before the default could flip. The transitional `--oxmsg` and `--extract`
+  flags that bridged the flip were removed in M3g.
 - Bad, because relying on `msg_parser` only as an oracle forgoes a second,
   independently-maintained implementation's ongoing bug fixes as runtime
   behavior. The oracle role keeps their value as verification signal.
@@ -109,17 +111,23 @@ How the outcome differs from the decision as written:
   does not enforce this. Moving `--verify` behind a Cargo feature or into a
   separate test-only binary would make `msg_parser` a true dev-dependency;
   that is an open option, not a scheduled change.
-- **Transitional flags remain until M3g.** `--extract` is now a redundant
-  alias of the default. `--oxmsg` is a structural diagnostic whose gate
-  counters have been folded into `--verify`. Both are to be removed in M3g.
-  Neither falls back to `msg_parser`, so the "no runtime fallback flag"
-  clause holds.
+- **The transitional flags are gone.** `--extract` had become a redundant
+  alias of the default, and `--oxmsg` a structural diagnostic whose gate
+  counters were folded into `--verify`. M3g removed both, and passing
+  either is now a command-line error. Neither ever fell back to
+  `msg_parser`, so the "no runtime fallback flag" clause held throughout.
+  The structural breakdown `--oxmsg` printed is now printed by `--verify`,
+  and only when a structural gate is nonzero.
 
-Follow-up hardening, tracked in the M3 results file: the both-paths
+Follow-up hardening, recorded in the M3 results file: the both-paths
 comparison is re-runnable as a corpus-gated test
 (`fixture_corpus_verify_is_clean`, enabled by `TSP_FIXTURE_DIR`), so that
 the M3e evidence can be re-checked on demand instead of being a one-time
-record. It cannot run in CI, because the fixtures are not in the repository.
+record. It cannot run in CI, because the fixtures are not in the repository,
+and it has not been recorded as run against the corpus. What was run is
+`tsp --verify` over the 29 fixtures, which reported parity on every
+comparable field and zero structural gate violations, on a build with 64
+passing tests.
 
 ## More Information
 

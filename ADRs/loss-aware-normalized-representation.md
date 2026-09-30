@@ -91,12 +91,16 @@ MSG side (M2–M3): the custom MS-OXMSG path extends the same pattern.
   0 on the corpus.
 - `PT_STRING8` values under a code page the decoder does not implement are
   reported (`variable_string8_unsupported_codepage_total`) and produce no
-  text, rather than being decoded as if they were Windows-1252. This is
-  covered by synthetic fixtures only, since the corpus has no `PT_STRING8`
-  property.
+  text, rather than being decoded as if they were Windows-1252. The
+  decoding is covered by synthetic fixtures only, since the corpus has no
+  `PT_STRING8` value; the code page resolution has met real data (all 29
+  files resolved from a real code page property, none from the fallback).
 
 These gates are reported by `tsp --verify` as a set of counters that must
-all read 0, with a single `structural_gate_violations` total.
+all read 0, with a single `structural_gate_violations` total. The full
+29-file run reported `structural_gate_violations=0`. When a gate fires,
+`--verify` also prints the privacy-safe structural breakdown, so a
+violation can be triaged from the same run.
 
 Attachment content extraction and the per-item status vocabulary will need
 to extend this same pattern once implemented.

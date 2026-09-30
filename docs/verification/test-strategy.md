@@ -53,7 +53,7 @@ The project distinguishes:
 | T2 fixture | `tsp-tester.pst` (57 messages, enhanced to cover 5 of 7 identified gaps) | 29-file `.msg` corpus, plus synthetic ANSI (`PT_STRING8`) `.msg` files built at test time |
 | T3 behavioral | Not started | Not started |
 | T4 fidelity | Not started | Partial: field-by-field agreement with `msg_parser` on every comparable field |
-| T5 differential | Not started; no `libpff`/`libpst` comparison has been run | Done against `msg_parser` (`--verify`), two differences triaged against the specifications; `libpff`/`libpst` not used |
+| T5 differential | Not started; no `libpff`/`libpst` comparison has been run | Done against `msg_parser` (`--verify`, re-run on the final M3 build), two differences triaged against the specifications; `libpff`/`libpst` not used |
 | T6 adversarial | Not started | Partial: synthetic fixtures for unsupported code pages and undecodable strings; no malformed or truncated container corpus |
 | T7 corpus | One PST | One 29-file corpus; fixtures deliberately not in the repository, and provenance is not recorded in it |
 
@@ -77,8 +77,17 @@ committed with it.
   dictionary divergence, bounded to a fixed number of files so that a
   second divergence cannot hide inside it.
 - Failure messages carry counts and gate names only, never content.
+- Status: the test exists and the suite passes, but a passing suite does not
+  show that it ran against the corpus (it skips when the variable is unset).
+  The `tsp --verify` output it asserts on has been recorded for the full
+  corpus, with every mismatch and gate at 0 apart from the one tolerated RTF
+  length difference.
 - Raising the tolerated RTF divergence, or adding any other exception,
   requires a specification-checked reason recorded in the M3 results.
+
+When a structural gate does fire, `--verify` prints the privacy-safe
+structural breakdown after a `structural_breakdown=follows` marker, so the
+same run that reports a violation also carries the evidence to triage it.
 
 Design choices behind this, for the next fixture-gated check:
 

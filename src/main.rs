@@ -29,31 +29,17 @@ struct Args {
     /// A .pst file, a single .msg file, or a directory of .msg files to inspect.
     input: PathBuf,
 
-    /// Structural diagnostic of the custom MS-OXMSG parser (raw CFB
-    /// enumeration via the `cfb` crate) instead of the default extraction
-    /// report. PST input is unaffected. Retired in M3g.
-    #[arg(long)]
-    oxmsg: bool,
-
     /// Compare the custom MS-OXMSG extraction path against `msg_parser`
     /// for the same .msg input. Reads real property content internally to
     /// do the comparison, but prints only match/mismatch counts -- never
     /// the values compared. Also runs the custom path's structural
     /// accounting (every CFB entry classified, every properties stream
     /// and value stream decoded) and prints its gate counters plus
-    /// `structural_gate_violations` (0 on a clean corpus). Takes
-    /// precedence over --oxmsg and --extract. PST input is unaffected.
+    /// `structural_gate_violations` (0 on a clean corpus). When any gate
+    /// is nonzero it also prints the privacy-safe structural breakdown
+    /// needed to triage it. PST input is unaffected.
     #[arg(long)]
     verify: bool,
-
-    /// Run the custom MS-OXMSG extraction path. Since M3f this is the
-    /// default for .msg input, so the flag is a redundant alias kept until
-    /// M3g. Zero bytes are counted only for confirmed-empty
-    /// PidTagAttachDataBinary streams; an unreadable data stream is
-    /// reported separately via attachments_data_stream_missing. Takes
-    /// precedence over --oxmsg. PST input is unaffected.
-    #[arg(long)]
-    extract: bool,
 }
 
 enum InputKind {
@@ -131,15 +117,13 @@ fn main() -> Result<()> {
             files,
             subdirectories_skipped,
         } => {
-            // M3f: the custom MS-OXMSG extraction path is the default for
-            // .msg input. `msg_parser` survives only as the independent
-            // oracle behind --verify (ADR: custom MS-OXMSG parser graduates
-            // to the production MSG path). --extract is now redundant with
-            // the default and is kept as an accepted alias until M3g.
+            // The custom MS-OXMSG extraction path is the .msg path (M3f).
+            // `msg_parser` survives only as the independent oracle behind
+            // --verify (ADR: custom MS-OXMSG parser graduates to the
+            // production MSG path). The transitional --oxmsg and --extract
+            // flags were retired in M3g.
             if args.verify {
                 run_msg_verify(&files, subdirectories_skipped)
-            } else if args.oxmsg && !args.extract {
-                run_oxmsg_diagnostic(&files, subdirectories_skipped)
             } else {
                 run_msg_extract(&files, subdirectories_skipped)
             }
@@ -983,7 +967,7 @@ fn record_embedded_message_class(totals: &mut MsgTotals, class: &str) {
 
 // =============================================================================
 // Custom MS-OXMSG parser: container naming conventions and entry
-// classification (experimental, opt-in via --oxmsg)
+// classification (the custom parser's structural layer)
 // =============================================================================
 //
 // MS-OXMSG stores every message property inside a CFB (MS-CFB) container as
@@ -1894,8 +1878,8 @@ fn read_named_property_map(comp: &mut CompoundFile) -> Option<NamedPropertyMap> 
 }
 
 // =============================================================================
-// Custom MS-OXMSG structural diagnostic (--oxmsg): aggregate counters,
-// report, and two-pass walk
+// Custom MS-OXMSG structural accounting (gated and reported by --verify):
+// aggregate counters, breakdown report, and two-pass walk
 //
 // Pass 1 classifies every CFB entry by name and position (immutable walk);
 // pass 2 decodes the entry array of every properties stream found. The
@@ -1906,7 +1890,6 @@ fn read_named_property_map(comp: &mut CompoundFile) -> Option<NamedPropertyMap> 
 
 #[derive(Default)]
 struct OxmsgTotals {
-    open_errors: u64,
     total_entries: u64,
     root_entries_total: u64,
     recognized_entries_total: u64,
@@ -2076,30 +2059,13 @@ struct CollectedOxmsgEntry {
     clsid: String,
 }
 
-fn run_oxmsg_diagnostic(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
-    println!("inventory=privacy_safe");
-    println!("input_kind=msg_oxmsg");
-    println!("files_scanned={}", files.len());
-    println!("subdirectories_skipped={subdirectories_skipped}");
-
-    let mut totals = OxmsgTotals::default();
-
-    for file in files {
-        match cfb::open(file) {
-            Ok(mut comp) => inspect_oxmsg(&mut comp, &mut totals),
-            Err(_) => totals.open_errors += 1,
-        }
-    }
-
-    print_oxmsg_report(&totals);
-
-    Ok(())
-}
-
-/// Prints the `--oxmsg` structural inventory report, separated from the
-/// scan loop (SLAP). Keys are unchanged from previous versions.
-fn print_oxmsg_report(totals: &OxmsgTotals) {
-    println!("open_errors={}", totals.open_errors);
+/// Prints the full structural breakdown (entry accounting, per-scope and
+/// per-type property counts, the privacy-safe shape of anything
+/// unrecognized), separated from the scan loop (SLAP). `--verify` prints it
+/// only when a structural gate is nonzero, to make the violation
+/// triageable; keys keep the vocabulary the retired `--oxmsg` report used,
+/// so some repeat the gate lines with identical values.
+fn print_structural_breakdown(totals: &OxmsgTotals) {
     println!("total_entries={}", totals.total_entries);
     println!("root_entries_total={}", totals.root_entries_total);
     println!(
@@ -2777,13 +2743,13 @@ fn record_named_property_observation(
 }
 
 // =============================================================================
-// Custom MS-OXMSG extraction layer: real property reads used by --verify
-// and --extract
+// Custom MS-OXMSG extraction layer: real property reads used by the default
+// .msg report and by --verify
 //
-// Unlike the --oxmsg structural diagnostic, these functions return real
-// content. They are only ever consumed by --verify (which prints only
-// match/mismatch counts) and --extract (which prints only the same
-// counters the msg_parser diagnostic does) -- never printed directly.
+// Unlike the structural accounting, these functions return real content.
+// They are only ever consumed by the default report (which prints only
+// counters) and --verify (which prints only match/mismatch counts) --
+// never printed directly.
 // =============================================================================
 
 /// Reads a string property by ID from `parent`: PT_UNICODE if present,
@@ -2851,7 +2817,7 @@ fn extract_body_flags(comp: &mut CompoundFile) -> BodyFlags {
     // Non-empty, not merely present: msg_parser's `body`/`html`/
     // `rtf_compressed` are empty for a zero-length (or absent) value, and
     // the `!is_empty()` checks this path is diffed against in
-    // --verify/--extract use exactly that definition. A zero-length
+    // --verify uses exactly that definition. A zero-length
     // stream exists in the CFB but carries no body, so `Some(vec![])`
     // must count as "no body" -- `.is_some()` alone made the two paths
     // disagree on any file with an empty body stream, and made an empty
@@ -3266,8 +3232,8 @@ fn inspect_oxmsg_as_msg(
 
     // Per embedded-message ATTACHMENT, not once per file: msg_parser's
     // diagnostic increments `embedded_messages_opened` for every
-    // embedded-message attachment it opens, and --extract promises to be
-    // diffable against that report, so a message with two embedded
+    // embedded-message attachment it opens, and the default report promises
+    // to stay diffable against that report, so a message with two embedded
     // messages must report 2 here, not the previous version's 1.
     let message_shaped = message_shaped_parent_paths(&*comp);
     for attach_path in &methods.embedded_paths {
@@ -3425,7 +3391,7 @@ struct MsgVerifyTotals {
     embedded_message_class_readable_total: u64,
     embedded_message_class_unreadable_total: u64,
     /// The custom path's structural accounting over the same files,
-    /// accumulated by `inspect_oxmsg` (formerly `--oxmsg`-only).
+    /// accumulated by `inspect_oxmsg`.
     structural: OxmsgTotals,
 }
 
@@ -3589,7 +3555,7 @@ fn collect_msg_verify_totals(files: &[PathBuf]) -> MsgVerifyTotals {
         totals.attachment_unresolved_total += attachment_methods.unresolved;
         totals.attachment_data_stream_missing_total += attachment_methods.zero_data_stream_missing;
 
-        // Per embedded-message attachment, matching --extract; the
+        // Per embedded-message attachment, matching the default report; the
         // previous once-per-file gate undercounted any message with more
         // than one embedded-message attachment.
         let message_shaped = message_shaped_parent_paths(&comp);
@@ -3600,7 +3566,7 @@ fn collect_msg_verify_totals(files: &[PathBuf]) -> MsgVerifyTotals {
             }
         }
 
-        // Structural accounting (formerly only reachable via --oxmsg):
+        // Structural accounting (formerly the separate --oxmsg mode):
         // every CFB entry classified, every properties stream and value
         // stream decoded. Content-free counters only.
         inspect_oxmsg(&mut comp, &mut totals.structural);
@@ -3692,7 +3658,7 @@ fn print_msg_verify_report(totals: &MsgVerifyTotals) {
 /// Structural gate counters, each of which MUST read 0 on a clean corpus.
 /// Every one has direct corpus evidence of reading 0 (see
 /// docs/verification/m3-results.md); the value is signed so an overcount
-/// is visible. Names are the same output vocabulary `--oxmsg` used.
+/// is visible. Names are the output vocabulary the retired `--oxmsg` used.
 fn structural_gate_values(totals: &OxmsgTotals) -> Vec<(&'static str, i64)> {
     let reserved_embedded = totals
         .attach_data_object_reserved_counts
@@ -3798,7 +3764,8 @@ fn count_structural_gate_violations(gates: &[(&'static str, i64)]) -> usize {
 
 /// Prints the structural gates, a single violation count (0 on a clean
 /// corpus), and a few informational counters that are reported but not
-/// gated. Keys keep the names `--oxmsg` used.
+/// gated. When any gate is nonzero the full structural breakdown follows,
+/// so the violation can be triaged from the same run.
 fn print_verify_structural_gates(totals: &OxmsgTotals) {
     let gates = structural_gate_values(totals);
     for (name, value) in &gates {
@@ -3837,13 +3804,17 @@ fn print_verify_structural_gates(totals: &OxmsgTotals) {
         "string8_codepage_fallback_total={}",
         totals.string8_codepage_fallback_total
     );
+    if count_structural_gate_violations(&gates) > 0 {
+        println!("structural_breakdown=follows");
+        print_structural_breakdown(totals);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // --- Custom MS-OXMSG parser groundwork (--oxmsg) -------------------------
+    // --- Custom MS-OXMSG parser groundwork -----------------------------------
 
     #[test]
     fn oxmsg_entry_classification_covers_every_known_convention() {
@@ -5076,5 +5047,24 @@ mod tests {
             .map(|(name, _)| *name)
             .collect();
         assert!(failing.is_empty(), "structural gates nonzero: {failing:?}");
+    }
+
+    // --- M3g: transitional flags retired ------------------------------------
+
+    #[test]
+    fn retired_flags_are_rejected_and_verify_is_accepted() {
+        assert!(Args::try_parse_from(["tsp", "--oxmsg", "x.msg"]).is_err());
+        assert!(Args::try_parse_from(["tsp", "--extract", "x.msg"]).is_err());
+        let args = Args::try_parse_from(["tsp", "--verify", "x.msg"]).expect("--verify parses");
+        assert!(args.verify);
+        let args = Args::try_parse_from(["tsp", "x.msg"]).expect("bare input parses");
+        assert!(!args.verify);
+    }
+
+    #[test]
+    fn structural_breakdown_prints_for_empty_totals_without_panicking() {
+        // The breakdown is only printed when a gate fires, so it never
+        // runs on a clean corpus; this keeps it exercised regardless.
+        print_structural_breakdown(&OxmsgTotals::default());
     }
 }
