@@ -94,12 +94,13 @@ Two structural limits on this evidence should be stated plainly:
 - A comparison run is not a regression gate by itself. A corpus-gated test
   (`fixture_corpus_verify_is_clean`, enabled by setting `TSP_FIXTURE_DIR`)
   re-runs the comparison and the structural gates on demand, because the
-  fixtures are deliberately not committed. CI cannot run it, and it has not
-  been recorded as run against the corpus. The comparison itself has been
-  re-run since (`tsp --verify` over the 29 fixtures: parity on every
-  comparable field, the same two triaged differences, zero structural gate
-  violations), so the evidence is a recorded result that has been
-  reproduced, not yet a continuously enforced property.
+  fixtures are deliberately not committed. CI cannot run it; it has been run
+  by hand against the corpus and passed. The comparison itself has been
+  re-run more than once (`tsp --verify` over the 29 fixtures: parity on
+  every comparable field, the same two triaged differences, zero structural
+  gate violations, identical output across runs), so the evidence has been
+  reproduced. It is not a continuously enforced property, because nothing
+  runs it automatically.
 
 PST side (outstanding): no comparison against `libpff` or `libpst` has been
 run. See [docs/verification/test-strategy.md](../docs/verification/test-strategy.md)

@@ -77,11 +77,12 @@ committed with it.
   dictionary divergence, bounded to a fixed number of files so that a
   second divergence cannot hide inside it.
 - Failure messages carry counts and gate names only, never content.
-- Status: the test exists and the suite passes, but a passing suite does not
-  show that it ran against the corpus (it skips when the variable is unset).
-  The `tsp --verify` output it asserts on has been recorded for the full
-  corpus, with every mismatch and gate at 0 apart from the one tolerated RTF
-  length difference.
+- Status: run against the 29-file corpus with the variable set, and passed
+  (a run that names the test, not only a passing suite, since the test skips
+  when the variable is unset). The `tsp --verify` output it asserts on has
+  been recorded for the full corpus, with every mismatch and gate at 0 apart
+  from the one tolerated RTF length difference. Nothing runs it
+  automatically; it stays a manual step.
 - Raising the tolerated RTF divergence, or adding any other exception,
   requires a specification-checked reason recorded in the M3 results.
 

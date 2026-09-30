@@ -123,11 +123,11 @@ Follow-up hardening, recorded in the M3 results file: the both-paths
 comparison is re-runnable as a corpus-gated test
 (`fixture_corpus_verify_is_clean`, enabled by `TSP_FIXTURE_DIR`), so that
 the M3e evidence can be re-checked on demand instead of being a one-time
-record. It cannot run in CI, because the fixtures are not in the repository,
-and it has not been recorded as run against the corpus. What was run is
-`tsp --verify` over the 29 fixtures, which reported parity on every
-comparable field and zero structural gate violations, on a build with 64
-passing tests.
+record. It cannot run in CI, because the fixtures are not in the repository.
+It has been run against the 29 fixtures and passed. Alongside it, `tsp
+--verify` over the same fixtures reported parity on every comparable field
+and zero structural gate violations, on a build with 66 passing tests (64 at
+the time of the first such run).
 
 ## More Information
 

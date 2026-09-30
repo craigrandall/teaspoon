@@ -2,11 +2,11 @@
 
 ## Status
 
-**M3 is complete: M3a through M3g.**
+**M3 is complete: M3a through M3g, all verified on Windows.**
 
 - **M3a-M3f: complete and verified against the full 29-file corpus.** The default `.msg` path is the custom MS-OXMSG extraction path. The M3f flip was verified by running the flipped default over the 29 fixtures: its output is identical to the earlier `--extract` output (`extract4.txt`), the build was clean, and all 56 tests passed.
-- **Post-M3f follow-ups: complete and verified on Windows.** The structural gates folded into `--verify`, the `PT_STRING8` code page chain, and the corpus-gated regression test were built and run: the build was clean, all 64 tests passed, and the full-corpus `--verify` run reported `structural_gate_violations=0` (output recorded below).
-- **M3g: code delivered, awaiting the first Windows build and test run.** The transitional `--oxmsg` and `--extract` flags were removed. This is the only part of this document that describes code that has not yet been compiled or run by the project owner; see "M3g -- transitional flags retired".
+- **Post-M3f follow-ups: complete and verified on Windows.** The structural gates folded into `--verify`, the `PT_STRING8` code page chain, and the corpus-gated regression test were built and run: the build was clean, all 64 tests passed at that point, and the full-corpus `--verify` run reported `structural_gate_violations=0` (output recorded below).
+- **M3g: complete and verified on Windows.** The transitional `--oxmsg` and `--extract` flags were removed; the build was clean, all 66 tests passed, the corpus-gated test ran and passed, and the full-corpus `--verify` output is identical to the pre-removal run. See "M3g -- transitional flags retired".
 
 ADR "Custom MS-OXMSG parser graduates to the production MSG path" moved from Proposed to Accepted with M3f. ADR "Independent differential verification" now records the MSG-side verification actually performed: the `--verify` harness and the `--extract` vs. default textual diff are exactly the "independent implementation as comparison oracle" work that ADR called for. The PST-side comparison is still outstanding.
 
@@ -284,11 +284,11 @@ $env:TSP_FIXTURE_DIR = "C:\dev\csr\main\teaspoon\_NOTES\test-fixtures\msgs"
 cargo test fixture_corpus_verify_is_clean -- --nocapture
 ```
 
-**Evidence status:** the test compiled and the suite passed. Whether the test ran against the corpus (rather than skipping because `TSP_FIXTURE_DIR` was unset) is not recorded. The `--verify` output above is exactly the set of values this test asserts on (every mismatch 0, every gate 0, one RTF-length mismatch), so it should pass; run it once with the variable set to turn that from a prediction into a result.
+**Evidence status:** run against the corpus and passed. With `TSP_FIXTURE_DIR` set to the 29-file directory, `cargo test fixture_corpus_verify_is_clean` reported `1 passed; 0 failed; 65 filtered out`, in about 0.9 seconds, which is consistent with a real corpus scan and not the instant skip an unset variable produces. It asserts on the same values the `--verify` output records.
 
 ### Test count
 
-56 at the M3f flip; 64 after the follow-ups (verified by `cargo test`).
+56 at the M3f flip; 64 after the follow-ups; 66 after M3g (each verified by `cargo test`).
 
 ## M3g -- transitional flags retired
 
@@ -300,7 +300,7 @@ The last M3 step removes the two flags that existed only to bridge the flip.
 - **The flags now fail loudly.** Passing `--oxmsg` or `--extract` is a command-line error, not a silent no-op. A test asserts this.
 - **`main()`** now has two `.msg` branches: `--verify`, or the default extraction report. PST input is unchanged.
 
-**Evidence status:** written, not yet compiled or run. The expected test count is 66: the 64 above plus one test that the retired flags are rejected (and `--verify` and bare input still parse), and one that the breakdown printer runs on empty totals without panicking (the breakdown never prints on a clean corpus, so this keeps it exercised). Expected behavior on the corpus: the default `.msg` output identical to `default_was_extract4.txt`, and `--verify` output identical to the run above. Both are predictions until run.
+**Evidence status:** verified. The build was clean and all 66 tests passed: the 64 above, one test that the retired flags are rejected (and that `--verify` and bare input still parse), and one that the breakdown printer runs on empty totals without panicking. A second full-corpus `--verify` run (`verify2.txt`) is line-for-line identical to the run recorded above, so the removal changed nothing on a clean corpus. The default `.msg` report was not re-diffed against `default_was_extract4.txt` after M3g; that comparison was made at M3f and the report code was not touched by M3g.
 
 ## Known limitations at close of M3
 
@@ -309,7 +309,7 @@ The last M3 step removes the two flags that existed only to bridge the flip.
 - Embedded messages are opened one level deep only.
 - The structural counters are whole-tree by design and not directly comparable to `msg_parser`'s outer-message-only counts without the top-level scoping used by the extraction layer.
 - All MSG verification runs against one 29-file corpus, with `msg_parser` as the only oracle. No comparison against `libpff` or `libpst` has been run for either format.
-- The corpus-gated regression test has not been recorded as run against the corpus (see above).
+- The structural breakdown printed when a gate fires has never fired on real data, since every gate is 0 on the corpus. It is exercised only by a test that prints it for empty totals. A deliberately failing fixture would be needed to see it on real output.
 
 ---
 
