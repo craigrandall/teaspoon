@@ -1,6 +1,6 @@
 # M4 plan (v4) — normalized model and deterministic Markdown archive
 
-Status: **M4a-1 decided; M4b-1 drafted and awaiting its first build.** Version 4, revised 2026-09-30 after the project owner's decisions on the remaining open questions (Q7-Q11). Nothing here has been implemented; every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
+Status: **M4a-1 decided; M4b-1 built and tested (v0.1.20); byte-identical output check pending.** Version 4, revised 2026-09-30 after the project owner's decisions on the remaining open questions (Q7-Q11). Nothing here has been implemented; every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
 
 - [`m4a-export-rules.md`](m4a-export-rules.md): the draft naming, layout, identity, duplicate, path-length, and overwrite rules (v3, aligned with the accepted archive ADR).
 - [`m4a-dependency-research.md`](m4a-dependency-research.md): RTF de-encapsulation, HTML-to-Markdown converters, and supporting crates.
@@ -44,7 +44,7 @@ Turn what the two adapters read into a durable archive: a Windows-safe directory
 - The MSG adapter decodes typed properties, value streams, named properties, recipients, attachments (methods, content IDs, emptiness), and one level of embedded message. It reads content into memory and prints only counts.
 - The PST adapter is a counter-only diagnostic over `outlook-pst` v1.2.0. It cannot open embedded-message or OLE attachments (P4c).
 - `msg_parser` is an oracle for comparable MSG fields; no PST oracle has been run.
-- No normalized model, body extraction for output, renderer, or writer exists. All code is one 5,070-line `main.rs`.
+- No normalized model, body extraction for output, renderer, or writer exists. As of v0.1.20 the code is eleven modules under `src/` (split from a 5,070-line `main.rs`).
 - Fixtures: 29 `.msg` files (27 carry HTML only inside RTF; 23 attachments carry a content ID; 1 embedded message; 1 zero-byte attachment; no `PT_STRING8` value) and one enhanced PST (57 messages, 79 attachments).
 
 ## Working rules (unchanged)
@@ -64,7 +64,7 @@ Done with this version: [`m4a-export-rules.md`](m4a-export-rules.md) v3 and [`m4
 
 ### M4b-1 — mechanical module split
 
-Status: **drafted (uncompiled), awaiting the owner's first build.** The approach and the compile risks are described with the delivered files (`src-split/`).
+Status: **built clean with 66 tests passing (v0.1.20).** Remaining: the byte-identical output check below, to be recorded here.
 
 Move `main.rs` into modules along the seams the README documents: CLI, shared vocabulary, PST diagnostic, MSG report, custom parser (structure, decoding, extraction), verification. No behavior change.
 
@@ -204,6 +204,12 @@ Results reach me as the output of your runs (`tsp <pst>`, then the census), plus
 | 10 | **More `.msg` files** | Bodies (M4e) | Word-authored HTML with tables and colors; signature images; a genuine RTF-only message; ANSI-encoded messages; messages from other clients saved as `.msg` |
 
 Privacy: any of these can be synthetic, and census outputs are counts, so they are safe to paste. Do not paste subjects or names.
+
+## Architecture note: separate crates (not a goal now)
+
+The module split exists for navigability and so that new pure modules (`naming`, `plan`, the model) can be developed and tested without the adapters. It is not a first step toward a Cargo workspace. All items are `pub(crate)` because the split was mechanical, so the current boundaries are not a designed public API, and the crate is `publish = false`.
+
+Crate boundaries become worthwhile only for a concrete reason: another program embedding the engine, enforcing that the model never depends on an adapter, isolating heavy dependencies (`outlook-pst`, `msg_parser`, an HTML converter) so they compile and change separately, or independent versioning. None applies today. Decision: stay a single binary crate through M4, keep `naming`, `plan`, and the model free of imports from `pst`, `oxmsg_*`, and `verify` (a test can check the `use crate::` lines), and revisit at M4j with evidence such as build times and the shape of the interfaces. If the boundary is ever drawn, a plausible set is: model, naming, and plan; the MSG adapter; the PST adapter; the archive writer; and the CLI with `--verify`.
 
 ## Principal risks
 

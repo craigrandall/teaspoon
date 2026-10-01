@@ -36,7 +36,7 @@ This is deliberately **not** the production miner and does not yet emit Markdown
   - A corpus-gated regression test re-runs the both-paths comparison and the structural gates on demand (see [Build and run](#build-and-run)). It skips unless `TSP_FIXTURE_DIR` is set. It has been run against the 29-file corpus with the variable set, and passed.
 - **M3g (verified):** `--oxmsg` and `--extract` were removed; passing either is now a command-line error. The structural breakdown that `--oxmsg` printed is now printed by `--verify` only when a structural gate is nonzero. The build was clean, all 66 tests passed, and the full-corpus `--verify` output is identical to the run before the flags were removed (so the breakdown, which prints only on a violation, has not been exercised on real data).
 
-**M4 — normalized model and deterministic Markdown archive: proposed, not started.** The staged plan and the decisions it needs from the project owner are in `docs/plans/m4-plan.md`.
+**M4 — normalized model and deterministic Markdown archive: in progress.** Planning decisions are made (`docs/plans/m4-plan.md` v4, with the naming and layout rules in `docs/plans/m4a-export-rules.md` and the crate research in `docs/plans/m4a-dependency-research.md`); the layout stays the one chosen by the accepted ADR "Deterministic Markdown archive". The first code stage, the module split (M4b-1), built clean with all 66 tests passing at v0.1.20. See the plan for the staged work that follows.
 
 See `docs/verification/m3-results.md` for the full evidence trail, including the run commands and the field-by-field diff table.
 
@@ -100,15 +100,21 @@ Reports are `key=value` lines (plus grouped `key field=value` lines for per-clas
 
 Every counter is either an aggregate count, a bounded MAPI vocabulary value (message classes, property IDs/types, attach methods, recipient types, property-set labels, CLSIDs, code page numbers), or a size in bytes — never user content. Anything the tool cannot classify is counted (`*_unrecognized*`, `*_errors`, `*_unknown`, `entry_accounting_gap_total`, `*_unsupported_codepage*`) rather than silently dropped, so nothing disappears without a trace.
 
-## Architecture (single `main.rs`, top to bottom)
+## Architecture (modules under `src/`)
 
-1. **CLI and input classification** — `Args`, `InputKind`, `classify_input`, and the dispatch in `main()`.
-2. **Shared detection and vocabulary** — the MS-OXRTFEX `\fromhtml1` encapsulated-HTML check (`check_compressed_rtf_bytes`), MAPI property / recipient-type / attach-method constants, and the shared counters (`BodyCounters`, `CountStats`, `ZeroByteStats`) used identically by the PST and MSG paths so the two adapters cannot drift apart.
-3. **PST diagnostic** — walks the IPM subtree via `outlook_pst` and counts message classes, body availability (plain / native HTML / HTML encapsulated in RTF), recipient types, and attachment methods.
-4. **MSG report** — the shared report shape (`MsgTotals`, `print_msg_report`), populated by the custom path.
-5. **Custom MS-OXMSG parser** — pure, string-based classification of the CFB naming conventions (`classify_oxmsg_entry` and friends), property stream/value decoding primitives (fixed-value decoding to real typed values, UTF-16LE decoding, the `PT_STRING8` code page chain and decoders), the structural walk (two passes: classify entries, then decode properties streams), run by `--verify`, the named-property map resolution, and the extraction layer (`extract_*`, `open_embedded_message`, `run_msg_extract`) that feeds both the default report and `--verify`.
-6. **Differential verification** — comparison types, `collect_msg_verify_totals`, `print_msg_verify_report`, the structural gates (`structural_gate_values`), and the breakdown printed when a gate fires (`print_structural_breakdown`).
-7. **Tests** — classification, decoding, counters, every verify-comparison outcome, synthetic ANSI fixtures, structural gates, and the corpus-gated regression test.
+Since v0.1.20 the code is split into modules with no change in behavior (a mechanical split; every item is `pub(crate)` and each module imports exactly what it uses):
+
+1. **`main.rs`** — module declarations and `main()`, which dispatches on the input kind.
+2. **`cli.rs`** — `Args`, `InputKind`, `classify_input`.
+3. **`shared.rs`** — the `CompoundFile` alias, the MS-OXRTFEX `\fromhtml1` encapsulated-HTML check (`check_compressed_rtf_bytes`), MAPI property / recipient-type / attach-method constants, and the shared counters (`BodyCounters`, `CountStats`, `ZeroByteStats`) used identically by the PST and MSG paths so the two adapters cannot drift apart.
+4. **`pst.rs`** — the PST diagnostic: walks the IPM subtree via `outlook_pst` and counts message classes, body availability (plain / native HTML / HTML encapsulated in RTF), recipient types, and attachment methods.
+5. **`msg_report.rs`** — the shared MSG report shape (`MsgTotals`, `print_msg_report`), populated by the custom path.
+6. **`oxmsg_classify.rs`** — the custom MS-OXMSG parser's container naming conventions and entry classification (`classify_oxmsg_entry` and friends).
+7. **`oxmsg_decode.rs`** — property stream and value decoding primitives: typed fixed values, UTF-16LE decoding, the `PT_STRING8` code page chain and decoders, and named-property decoding.
+8. **`oxmsg_structure.rs`** — structural accounting: the two-pass walk (classify entries, then decode properties streams), `OxmsgTotals`, and the breakdown report printed by `--verify` when a gate fires.
+9. **`oxmsg_extract.rs`** — the extraction layer (`extract_*`, `open_embedded_message`, `run_msg_extract`) that feeds both the default report and `--verify`.
+10. **`verify.rs`** — differential verification: comparison types, `collect_msg_verify_totals`, `print_msg_verify_report`, the structural gates (`structural_gate_values`).
+11. **`tests.rs`** — all unit tests: classification, decoding, counters, every verify-comparison outcome, synthetic ANSI fixtures, structural gates, retired-flag handling, and the corpus-gated regression test.
 
 External crates: `outlook-pst` (PST), `cfb` (generic MS-CFB container), `compressed-rtf` (MS-OXRTFCP), `msg_parser` (oracle for `--verify` only), `clap`, `anyhow`.
 
@@ -144,3 +150,4 @@ Background dates below refer to the project's own verification timeline; the und
 - **2026-09-29 (M3f)** — Default flipped: `.msg` input uses the custom MS-OXMSG path. The `msg_parser`-based default report path and its helpers were removed, and `msg_parser` is used only by `--verify`. The default run over the 29 fixtures matched the earlier `--extract` output exactly; the build was clean and the tests passed.
 - **2026-09-29 (post-M3f)** — Structural gate counters folded into `--verify` (`structural_gate_violations`); `PT_STRING8` code page chain and synthetic ANSI fixtures added; the corpus-gated both-paths regression test added. Verified on Windows: clean build, 64 tests passing, and a full-corpus `--verify` run with parity on every comparable field and `structural_gate_violations=0`. The code page chain resolved without its fallback on all 29 files (3 from the message code page, 26 from the Internet code page).
 - **2026-09-29 (M3g)** — Removed the transitional `--oxmsg` and `--extract` flags and `run_oxmsg_diagnostic`. The structural breakdown is now printed by `--verify` only when a structural gate is nonzero. Verified on Windows: clean build, 66 tests passing, `fixture_corpus_verify_is_clean` run against the corpus and passed, and the full-corpus `--verify` output identical to the pre-removal run. M3 is complete.
+- **v0.1.20 (M4b-1)** — Module split with no behavior change: `main.rs` became eleven files (see Architecture). Build clean, 66 tests passing. Byte-identical output against the previous build is checked separately and recorded in `docs/plans/m4-plan.md` once run.

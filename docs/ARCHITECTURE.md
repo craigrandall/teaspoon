@@ -116,8 +116,6 @@ The PST side has no independent-oracle comparison yet.
 
 ## Code layout
 
-All code is in `src/main.rs`, ordered top to bottom: CLI and input
-classification; shared detection and vocabulary; the PST diagnostic; the MSG
-report; the custom MS-OXMSG parser (classification, decoding, structural
-walk, extraction); differential verification; tests. The README lists the
-current functions in each section. The file has not been split into modules.
+The code lives in `src/`, one module per seam (v0.1.20): `cli` (arguments and input classification), `shared` (vocabulary, the encapsulated-HTML check, shared counters), `pst` (the PST diagnostic), `msg_report` (the shared MSG report), `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, and `oxmsg_extract` (the custom MS-OXMSG parser, from naming conventions through extraction), `verify` (the `--verify` comparison and structural gates), `tests`, and `main` (dispatch). The README lists the contents of each module.
+
+Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules. Every item is `pub(crate)` because the split was mechanical, so the module boundaries are organizational, not yet a designed API. The planned model, naming, and planning modules (M4b) are meant to depend on no adapter module.
