@@ -1,6 +1,6 @@
 # M4 plan (v4) — normalized model and deterministic Markdown archive
 
-Status: **M4a-1 decided; M4b-1 built and tested (v0.1.20); byte-identical output check pending.** Version 4, revised 2026-09-30 after the project owner's decisions on the remaining open questions (Q7-Q11). Nothing here has been implemented; every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
+Status: **M4a-1 decided; M4b-1 verified (v0.1.20); M4b-2 drafted (uncompiled) and awaiting its first build.** Version 4, revised 2026-09-30 after the project owner's decisions on the remaining open questions (Q7-Q11). Nothing here has been implemented; every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
 
 - [`m4a-export-rules.md`](m4a-export-rules.md): the draft naming, layout, identity, duplicate, path-length, and overwrite rules (v3, aligned with the accepted archive ADR).
 - [`m4a-dependency-research.md`](m4a-dependency-research.md): RTF de-encapsulation, HTML-to-Markdown converters, and supporting crates.
@@ -64,7 +64,7 @@ Done with this version: [`m4a-export-rules.md`](m4a-export-rules.md) v3 and [`m4
 
 ### M4b-1 — mechanical module split
 
-Status: **built clean with 66 tests passing (v0.1.20).** Remaining: the byte-identical output check below, to be recorded here.
+Status: **verified (v0.1.20).** Clean build, 66 tests passing, and byte-identical output against the pre-split build (tag v0.1.19) on the 29-file `.msg` corpus and `tsp-tester.pst`: default report (850 bytes, 33 lines), `--verify` (2,705 bytes, 82 lines, `structural_gate_violations=0`), and the PST diagnostic (1,092 bytes, 44 lines), all identical, with empty stderr.
 
 Move `main.rs` into modules along the seams the README documents: CLI, shared vocabulary, PST diagnostic, MSG report, custom parser (structure, decoding, extraction), verification. No behavior change.
 
@@ -72,15 +72,18 @@ Gate: default `.msg` output, `--verify` output, and PST output byte-identical be
 
 ### M4b-2 — pure naming and planning modules
 
-New modules with no I/O and no PST or MSG types:
+Status: **drafted (uncompiled), awaiting the owner's first build.** Two new modules, `src/naming.rs` and `src/plan.rs`, with no I/O and no PST or MSG types. New dependencies: `unicode-normalization` and, dev-only, `proptest`.
 
-- `naming`: sanitize (N-rules), UTF-16 length measurement, shortening (L4/L5), collision keys (U1), suffix assignment (U2-U8; uniform zero-padded ` (nn)`, per-group width).
-- `plan`: given a tree of names, timestamps, identifiers, content hashes, and a policy (budget, root length), produce every final path with flags and counters.
+- `naming`: `sanitize_component` (N2-N8), `is_valid_component`, `split_extension` (N10), `is_special_attachment_name` (N6), `shorten_to` (L5), `collision_key` (U1), the suffix helpers, and `assign_namespace` (U2-U5: natural names claim first, folders before messages, then time and identifier, zero-padded ` (nn)` widened per group, reserved names such as `folder.json`).
+- `plan`: `plan_export(tree, policy)` plans a whole tree (folders, message directories, `attachments/` files, embedded messages up to the depth cap) against the 259-unit path and 247-unit directory limits with worst-case child reservation, and reports content-free counters; `verify_plan` re-derives uniqueness, name validity, budgets, and recorded lengths from scratch.
+- Both carry `#![allow(dead_code)]` until M4b-3 wires them to `--dry-run`; remove it then.
 
-Gate:
-- Unit tests for every rule, including astral-plane characters counted as two units, a directory named `NUL`, trailing dots and spaces, NFC versus NFD names, case-only differences, empty names, `folder.json` and `.tsp-tmp` collisions, attachment-file versus embedded-directory collisions, and suffix widths (a natural `Budget (02)` surviving; groups of 2, 99, 100, 999, 1,000, and 1,500).
-- **Property tests** (`proptest`) over arbitrary names and trees: sanitizing is idempotent; no final component contains a reserved character; every path is within budget; no two entries in a namespace share a collision key; a plain text sort of a group's final names equals its (time, identifier) order; output is identical across runs and independent of input order.
-- Each research check (C-01 to C-18 as applicable) exists as a named plan counter.
+Not yet implemented, reported instead of hidden: flattening of over-budget folder chains (rule L4 step 4) and the identity-name fallback (step 5). When even the floor names cannot fit, `budget_exceeded` counts the entries.
+
+Gate (to be confirmed on Windows):
+- Unit tests for every rule, including astral-plane characters counted as two units, `NUL` as a directory name, trailing dots and spaces, NFC versus NFD, case-only differences, empty names, `folder.json` collisions, attachment-file versus embedded-directory collisions, and suffix widths for groups of 2, 9, 10, 99, 100, 101, 999, 1,000, and 1,500.
+- Property tests (`proptest`): sanitizing is idempotent and always yields a valid component; shortening never exceeds the limit; assignment is unique, deterministic, and independent of input order; plans of arbitrary two-level trees pass every gate and ignore source order.
+- The build, `clippy -D warnings`, and the full test suite (66 existing tests plus the new ones) pass.
 
 ### M4b-3 — naming census and folder-identity spike (counts only)
 

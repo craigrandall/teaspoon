@@ -2,10 +2,12 @@
 
 mod cli;
 mod msg_report;
+mod naming;
 mod oxmsg_classify;
 mod oxmsg_decode;
 mod oxmsg_extract;
 mod oxmsg_structure;
+mod plan;
 mod pst;
 mod shared;
 #[cfg(test)]

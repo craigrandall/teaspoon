@@ -1,8 +1,8 @@
-# M4a draft — export naming, layout, and overwrite rules (v3)
+# M4a draft — export naming, layout, and overwrite rules (v3.1)
 
 Status: **proposed draft, nothing implemented or verified.** This is the working specification for the naming, identity, and overwrite decisions the M4 plan calls M4a. It completes what the accepted ADR [Deterministic Markdown archive](../../ADRs/deterministic-markdown-archive.md) explicitly left open (message identity, filename sanitization, collision handling, attachment relationships). **It does not change that ADR's layout**: one folder per message containing `message.md`, `metadata.json`, and an `attachments/` subfolder. Every "verify" tag marks a claim taken from documentation or memory that has not been checked against this project's fixtures or Windows.
 
-Revision history: v1 (2026-09-30) proposed a different layout (`<subject>.md` plus `<subject> - attachments/`). The project owner decided to keep the accepted ADR's layout, so v2 adapted every rule to it and withdrew the ` - attachments` folder requirement (`attachments/` is a literal name). v3 (2026-09-30) records the owner's decisions on Q7-Q11: one uniform zero-padded ` (nn)` duplicate suffix (no ` - Copy`), export roots for non-PST inputs including mirrored subdirectories, SHA-256 of the source recorded by default, and content identity moved out of names into metadata.
+Revision history: v1 (2026-09-30) proposed a different layout (`<subject>.md` plus `<subject> - attachments/`). The project owner decided to keep the accepted ADR's layout, so v2 adapted every rule to it and withdrew the ` - attachments` folder requirement (`attachments/` is a literal name). v3.1 (2026-10-01) aligns the rules with the first implementation (M4b-2): U+2028/2029 become spaces, folders sort before messages in a shared namespace, and rule N6 is implemented. v3 (2026-09-30) records the owner's decisions on Q7-Q11: one uniform zero-padded ` (nn)` duplicate suffix (no ` - Copy`), export roots for non-PST inputs including mirrored subdirectories, SHA-256 of the source recorded by default, and content identity moved out of names into metadata.
 
 Sources: the owner's requirements and decisions (2026-09-30); the external research "Support for linting a PST, anticipating a Windows filesystem for message export" (2026-09-29; *the research*); Microsoft's Win32 naming documentation and MS-PST; the existing ADRs.
 
@@ -105,10 +105,9 @@ Applied to PST folder names, message directory names, attachment file names, and
 | `< > : " \| ? *` | replace with `_` |
 | `/` and `\` | replace with `-` |
 | C0 controls U+0000-U+001F, DEL U+007F, C1 controls U+0080-U+009F | delete, flag |
-| U+2028/2029, bidi controls U+202A-202E and U+2066-2069, zero-width characters U+200B-200D and U+FEFF | delete, flag |
-| Leading/trailing Unicode whitespace (including U+00A0, U+3000) | trim |
+| Bidi controls U+202A-202E and U+2066-2069, zero-width characters U+200B-200D and U+FEFF | delete, flag |
+| Whitespace of any kind, including tabs, newlines, U+0085, U+00A0, U+2028/2029, and U+3000 | becomes a space, then runs collapse; leading and trailing spaces are trimmed |
 | Trailing `.` or space (after all other steps) | trim repeatedly |
-| Runs of whitespace | collapse to one space |
 
 The replacement table is fixed permanently: changing it would rename every exported directory.
 
@@ -116,7 +115,7 @@ The replacement table is fixed permanently: changing it would rename every expor
 
 **N5. Dot names.** A component that becomes `.` or `..` is treated as empty (N8).
 
-**N6. Explorer-special and tool-special names.** Attachment names equal (case-insensitively) to `desktop.ini`, `thumbs.db`, `autorun.inf`, or beginning with `~$` get a leading `_`. Verify the list. Executable attachment types written to disk may be quarantined by antivirus; document it.
+**N6. Explorer-special and tool-special names.** Attachment names equal (case-insensitively) to `desktop.ini`, `thumbs.db`, `autorun.inf`, or beginning with `~$` get a leading `_` (flag `SpecialNameProtected`). Verify the list. Executable attachment types written to disk may be quarantined by antivirus; document it.
 
 **N7. Idempotence.** `sanitize(sanitize(x)) == sanitize(x)`. Property-tested.
 
@@ -162,9 +161,9 @@ A directory is one namespace on Windows: a file and a directory cannot share a n
 
 **U2. Natural names claim first.** Within a namespace, compute every item's natural name (sanitized, truncated). Non-colliding natural names are final. Only then are colliding items renamed, so a message genuinely called `Budget (2)` keeps its name and a generated suffix skips over it.
 
-**U3. Deterministic order.** Items in a collision group are ordered by (message time ascending, then the item's stable identifier ascending). The first keeps the natural name; the k-th item gets suffix number k. For folders the order is the folder identifier (section 9). Order never depends on scan order, scheduling, or the clock. Message time is delivery time, then submit time, then a fixed value that sorts last. Because the suffix is zero-padded and follows this order, a plain text sort reproduces chronological order within a group.
+**U3. Deterministic order.** Items in a collision group are ordered by (kind, then message time ascending with missing times last, then the item's stable identifier ascending); folders rank before messages, so a folder keeps its bare name against a message with the same name. The first keeps the natural name; the k-th item gets suffix number k. For folders the order is the folder identifier (section 9). Order never depends on scan order, scheduling, or the clock. Message time is delivery time, then submit time, then a fixed value that sorts last. Because the suffix is zero-padded and follows this order, a plain text sort reproduces chronological order within a group.
 
-**U4. Suffix scheme (decision A11).** One scheme for folders, messages, and attachments:
+**U4. Suffix scheme (decision A11).** One scheme for folders, messages, and attachments (a stem that ends in a space loses it before the suffix is added, so no double space appears):
 
 - The first item in a group keeps the bare name. The k-th item (k >= 2) is named `<name> (kk)`, where `kk` is k zero-padded to `max(2, digits of the group size)`. A group of 30 uses ` (02)` to ` (30)`; a group of 1,500 uses ` (0002)` to ` (1500)`.
 - The number is the item's *position* in the group (first item is 1, implicit), not a count of copies. The second item is ` (02)`, matching Windows's ` (2)`, and the number does not claim the item is a copy.
