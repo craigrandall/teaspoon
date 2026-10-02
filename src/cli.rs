@@ -29,6 +29,21 @@ pub(crate) struct Args {
     /// needed to triage it. PST input is unaffected.
     #[arg(long)]
     pub(crate) verify: bool,
+
+    /// Directory an export will be written to. Until the export writer
+    /// exists (M4c) it is only used with `--dry-run`; without `--dry-run`
+    /// the program stops with an explanation and writes nothing.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) out: Option<PathBuf>,
+
+    /// Plan an export of the input into `--out` without writing anything,
+    /// and print only content-free counts (the naming census): how many
+    /// names need sanitizing or shortening, how many collide, how long the
+    /// longest path is, and whether every planned path fits the Windows
+    /// budget. A directory input is planned recursively, mirroring its
+    /// subdirectories as folders.
+    #[arg(long, requires = "out", conflicts_with = "verify")]
+    pub(crate) dry_run: bool,
 }
 
 pub(crate) enum InputKind {

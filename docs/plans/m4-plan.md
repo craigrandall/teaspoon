@@ -1,6 +1,6 @@
 # M4 plan (v4) — normalized model and deterministic Markdown archive
 
-Status: **M4a-1 decided; M4b-1 verified (v0.1.20); M4b-2 drafted (uncompiled) and awaiting its first build.** Version 4, revised 2026-09-30 after the project owner's decisions on the remaining open questions (Q7-Q11). Nothing here has been implemented; every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
+Status: **M4a-1 decided; M4b-1 and M4b-2 verified; M4b-3 drafted (uncompiled) and awaiting its first build.** Version 4, revised 2026-09-30 after the project owner's decisions on the remaining open questions (Q7-Q11). Nothing here has been implemented; every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
 
 - [`m4a-export-rules.md`](m4a-export-rules.md): the draft naming, layout, identity, duplicate, path-length, and overwrite rules (v3, aligned with the accepted archive ADR).
 - [`m4a-dependency-research.md`](m4a-dependency-research.md): RTF de-encapsulation, HTML-to-Markdown converters, and supporting crates.
@@ -72,28 +72,37 @@ Gate: default `.msg` output, `--verify` output, and PST output byte-identical be
 
 ### M4b-2 — pure naming and planning modules
 
-Status: **drafted (uncompiled), awaiting the owner's first build.** Two new modules, `src/naming.rs` and `src/plan.rs`, with no I/O and no PST or MSG types. New dependencies: `unicode-normalization` and, dev-only, `proptest`.
+Status: **verified.** Clean build and 109 tests passing (66 existing plus 43 new). Two new modules, `src/naming.rs` and `src/plan.rs`, with no I/O and no PST or MSG types. New dependencies: `unicode-normalization` and, dev-only, `proptest`.
 
 - `naming`: `sanitize_component` (N2-N8), `is_valid_component`, `split_extension` (N10), `is_special_attachment_name` (N6), `shorten_to` (L5), `collision_key` (U1), the suffix helpers, and `assign_namespace` (U2-U5: natural names claim first, folders before messages, then time and identifier, zero-padded ` (nn)` widened per group, reserved names such as `folder.json`).
 - `plan`: `plan_export(tree, policy)` plans a whole tree (folders, message directories, `attachments/` files, embedded messages up to the depth cap) against the 259-unit path and 247-unit directory limits with worst-case child reservation, and reports content-free counters; `verify_plan` re-derives uniqueness, name validity, budgets, and recorded lengths from scratch.
-- Both carry `#![allow(dead_code)]` until M4b-3 wires them to `--dry-run`; remove it then.
+- Both carry `#![allow(dead_code)]`. M4b-3 wires them to `--dry-run`, but several fields (entry flags, original names, source IDs) are only consumed by the export writer, so the allow is removed in M4c.
 
 Not yet implemented, reported instead of hidden: flattening of over-budget folder chains (rule L4 step 4) and the identity-name fallback (step 5). When even the floor names cannot fit, `budget_exceeded` counts the entries.
 
-Gate (to be confirmed on Windows):
+Gate (met on Windows):
 - Unit tests for every rule, including astral-plane characters counted as two units, `NUL` as a directory name, trailing dots and spaces, NFC versus NFD, case-only differences, empty names, `folder.json` collisions, attachment-file versus embedded-directory collisions, and suffix widths for groups of 2, 9, 10, 99, 100, 101, 999, 1,000, and 1,500.
 - Property tests (`proptest`): sanitizing is idempotent and always yields a valid component; shortening never exceeds the limit; assignment is unique, deterministic, and independent of input order; plans of arbitrary two-level trees pass every gate and ignore source order.
 - The build, `clippy -D warnings`, and the full test suite (66 existing tests plus the new ones) pass.
 
 ### M4b-3 — naming census and folder-identity spike (counts only)
 
-Add `tsp <input> --out <dir> --dry-run`: runs the planning phase over a PST or `.msg` input and prints only counts in the stable `key=value` vocabulary, with `plan_gate_violations`, in the `--verify` style. It writes nothing.
+Status: **drafted (uncompiled), awaiting the owner's first build.** New modules `src/dry_run.rs`, `src/source_msg.rs`, `src/source_pst.rs`; `src/cli.rs` gains `--out <DIR>` and `--dry-run`; `src/main.rs` dispatches to the dry run.
 
-Keys (proposed): names needing sanitization by class; reserved-name hits; trailing-dot and trailing-space hits; empty subjects; components truncated; maximum component and path lengths in UTF-16 units; maximum relative path; maximum folder depth; folders flattened; collision groups (messages, folders, attachments); the largest collision group and the number of groups of 100 or more; subdirectories mirrored (directory inputs); messages missing `PidTagInternetMessageId`; duplicate `PidTagInternetMessageId`; attachments without names; attachment name collisions; budget exceeded; maximum entries per directory.
+`tsp <input> --out <dir> --dry-run` reads a PST, a `.msg` file, or a directory of `.msg` files (planned recursively, mirroring subdirectories), plans the export, and prints only counts in the stable `key=value` vocabulary: `plan_*` keys from the planner, `plan_gate_*` keys and `plan_gate_violations` from the independent re-check, `source_*` keys for what the source contained, and `folder_identity_*` keys for the spike. It writes nothing. `--out` without `--dry-run` stops with a message, because the writer arrives in M4c.
 
-Spike: determine what `outlook-pst` v1.2.0 exposes as a folder identifier (NID, `PidTagRecordKey`, EntryID) and record it.
+Folder-identity spike, answered from the crate's source (not yet from a run): `outlook-pst` v1.2.0 exposes, for every folder, its node ID (`FolderProperties::node_id()`, unique within the PST), its display name, and a computed `PidTagEntryId` (property 0x0FFF, built from the store UID and the node ID). It exposes no separate record-key property for folders. The dry run reports how many folders yielded each.
 
-Gate: the census runs on the 29-message `.msg` set, the 57-message PST, and every fixture available; the counts are reviewed with the owner; the folder-identity question is answered (available, not available, or partly).
+Subject marker: `PidTagSubject` may begin with U+0001 followed by one more character recording the prefix length (the crate's own examples strip it). Both builders remove those two characters and count them (`source_subject_markers_stripped`).
+
+Limits reported, not hidden: PST attachment names come from the attachment table, which may carry only the short (8.3) name (`source_attachment_tables_with_long_name_column` says how often a long-name column exists), and PST embedded-message attachments are planned as plain files and counted (`source_embedded_attachments_not_opened`).
+
+Gate:
+- The census runs on the 29-message `.msg` directory and `tsp-tester.pst`, with `plan_gate_violations=0` and `plan_budget_exceeded=0` on both.
+- Predicted counts from the earlier diagnostics (to be confirmed): PST `plan_folders=9` (the diagnostic's 10 includes the IPM root), `plan_messages=57`, `plan_attachment_files=79`, `source_open_errors=0`; `.msg` directory `plan_messages=29`, `plan_embedded_messages=1`, `plan_attachment_files=29` (27 by-value, 1 OLE, and 1 attachment inside the embedded message), `source_open_errors=0`.
+- The counts are reviewed with the owner, and the fixtures received so far are added.
+- The folder-identity question is answered from the run (what the `folder_identity_*` keys show).
+- Output of the existing modes is unchanged (re-run `verify-split.ps1`).
 
 ### M4a-2 — accept the new ADRs
 
