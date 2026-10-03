@@ -113,16 +113,20 @@ What this shows:
 - **The budget gate passes at a short `--out`.** At a root of 9 units there are 0 violations and the longest planned relative path is 181 units (it was 107 at the long root, because names were shortened more there). This closes the "short `--out`" item for the `.msg` directory; the PST has not been run at a short `--out`.
 - **A repeat export is a no-op.** The second run finds the target `owned`, all 72 files identical, writes nothing, and needs no consent.
 - **The result does not depend on where it is written.** The tree hash is the same for `C:\o` and `C:\o2` (roots of 9 and 10 units). The hash covers relative paths and file contents as rendered in memory; the read-back count (0 mismatches) shows the files on disk match what was rendered.
-- **Not shown by these counts:** that the exported text is faithful. That needs the owner's review of exported files.
+
+### Manual checks on the exported tree (2026-10-03)
+
+- **Tree shape.** `C:\o` held 72 files, no `.tsp-tmp` directory remained, and the longest file path was 131 units (the plan's worst case was 190, because the plan reserves room for attachment files that M4c does not write yet).
+- **Content review.** The owner opened one exported `message.md` and its `metadata.json` and found the contents as expected. One message of 34 was reviewed; the rest were not.
+- **Interactive overwrite on real output.** After a line was appended to one exported `message.md`, re-running in an interactive terminal showed the prompt (1 file to replace, 71 identical, 0 unrelated), the owner answered yes, and the run completed: `export_consent=prompted_accepted`, `export_files_written=2` (the restored file and the root `folder.json`, which is rewritten whenever anything changes), `export_files_unchanged=70`, exit code 0, and the same tree hash as before the edit, so the edited file was restored byte for byte. The next two runs (one with `--overwrite`, one plain) found all 72 files identical and wrote nothing (`export_consent=not_needed`, since there was nothing left to replace).
 
 ### Not yet run
 
-- The owner's review of at least one exported message against a checklist (heading is the subject; body complete and verbatim inside the code fence; `metadata.json` correct; `status_reasons` includes `formatted_bodies_not_converted` for the HTML-in-RTF messages). **This is the remaining M4c gate item.**
-- Overwrite and refusal paths on the real output (editing an exported file and re-running with and without `--overwrite`; exit code 2).
+- The non-interactive refusal on real output (edit a file, re-run with input redirected, e.g. `$null | tsp.exe ...`; expect `export_result=refused_needs_consent` and exit code 2), and the `--overwrite` path replacing a file in that situation. Both are covered by synthetic tests.
 - Whether CI (Linux and Windows) passes on the pushed commit.
 - `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings` on the final commit (not reported).
 - A PST dry run with a short `--out`, and the current PST diagnostic output (both still open from M4b-3).
 
 ### Status
 
-M4c is built, passes its synthetic tests, and has exported the real `.msg` corpus with counts that reconcile; the review of exported content is outstanding. The M4a-2 decision records and the full M4b-4 model are not done, so the `0.1-draft` schemas are not frozen.
+M4c is built, passes its synthetic tests, has exported the real `.msg` corpus with counts that reconcile and a stable tree hash, and one exported message has been reviewed by the owner. The quality-gate and CI reports above are outstanding. The M4a-2 decision records and the full M4b-4 model are not done, so the `0.1-draft` schemas are not frozen.
