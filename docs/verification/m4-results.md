@@ -60,7 +60,7 @@ All other keys (`source_open_errors`, `source_non_mail_items`, `source_associate
 ### What the numbers show
 
 - **Internal consistency.** For both inputs, root units plus the longest relative path equals the longest path (146 + 107 = 253; 152 + 114 = 266). The root differs by 6 units because `tsp-tester` is six characters longer than `msgs`.
-- **PST over-budget entries are the expected effect of the long output path.** At a root of 152 units, four entries cannot fit in 259 even at the planner's name floors, and the gate reports exactly those four (`plan_budget_exceeded=4`, `plan_gate_over_budget=4`, `plan_gate_violations=4`). The `.msg` run, with a root of 146 and a longest relative path of 107, fits (253 ≤ 259). The planner therefore reports a problem rather than hiding it; M4c's export refuses to run on such a plan. **Not yet run:** a dry run with a short `--out`, which should show 0 violations on both inputs.
+- **PST over-budget entries are the expected effect of the long output path.** At a root of 152 units, four entries cannot fit in 259 even at the planner's name floors, and the gate reports exactly those four (`plan_budget_exceeded=4`, `plan_gate_over_budget=4`, `plan_gate_violations=4`). The `.msg` run, with a root of 146 and a longest relative path of 107, fits (253 ≤ 259). The planner therefore reports a problem rather than hiding it; M4c's export refuses to run on such a plan. **Not yet run:** a PST dry run with a short `--out`, which should show 0 violations. (For the `.msg` directory, the M4c export below ran at a short `--out` with 0 violations.)
 - **Nameless attachments match the embedded messages the PST side cannot open.** `source_attachments_without_name`, `source_embedded_attachments_not_opened`, and `plan_names_fallback` are all 3 on the PST, and the planner names those entries by fallback.
 - **Collision handling works on real names.** The PST has 3 collision groups (largest 16) and `plan_gate_collisions=0`.
 - **Folder identity is available on the PST.** Both a node ID and an entry ID were readable for all 11 folders walked, none unavailable. The planned folder count is 10 and 11 were examined, which is consistent with one folder (the root) being identified but not exported; this has not been confirmed separately.
@@ -86,13 +86,43 @@ The M4b-3 plan predicted, from earlier diagnostics, 9 planned folders, 57 messag
 
 Synthetic `.msg` files built at test time, no personal data. The two golden files (`tests/golden/hello/message.md`, `metadata.json`) are compared byte for byte, both against the pure renderer and against the files an export writes. Other tests cover: the exact output layout; two exports to different directories being byte-identical; a second identical export writing nothing and needing no consent; a directory input mirroring subdirectories and numbering duplicate subjects; a trailing separator on the input not renaming the archive; unusable characters in a subject being replaced and recorded; attachments being counted and flagged, with no `attachments/` directory written; a message with no plain-text body; the consent matrix (changed files refused without consent, declined at the prompt, accepted at the prompt, replaced with `--overwrite`); unrelated files being left alone; a directory `tsp` did not create being refused even with `--overwrite`; an empty existing target being accepted; an archive of a different source being refused; an over-budget plan writing nothing; an over-long `--out` being an error; a leftover staged file from an interrupted run being cleaned up; a `.pst` export being refused as not implemented; and the command-line flag rules. One test (over-budget) failed on the first run because of an arithmetic error in the test's own setup, was corrected, and all others passed on the first run.
 
+### First export of the real `.msg` corpus (2026-10-03)
+
+`tsp "<fixtures>\msgs" --out C:\o` (the directory of 29 top-level `.msg` files plus 3 subdirectories), then the same command again, then the same input to `C:\o2`. Output directories were created beforehand and empty.
+
+| Key | Run 1 (`C:\o`) | Run 2 (`C:\o`, repeat) | Run 3 (`C:\o2`) |
+|---|---|---|---|
+| `export_root_units` | 9 | 9 | 10 |
+| `plan_entries_total` / folders / messages | 74 / 3 / 34 | same | same |
+| `plan_attachment_files` / `plan_embedded_messages` | 34 / 3 | same | same |
+| `plan_budget_exceeded` / `plan_gate_violations` | 0 / 0 | 0 / 0 | 0 / 0 |
+| `plan_max_relative_path_units` | 181 | 181 | 181 |
+| `export_target_state` | absent | owned | absent |
+| `export_preflight_to_create` / identical / to_replace / blocked / unrelated | 72 / 0 / 0 / 0 / 0 | 0 / 72 / 0 / 0 / 0 | 72 / 0 / 0 / 0 / 0 |
+| `export_consent` | not_needed | not_needed | not_needed |
+| `export_result` | completed | completed | completed |
+| `export_files_written` / unchanged | 72 / 0 | 0 / 72 | 72 / 0 |
+| `export_folder_files` / `export_message_directories` | 4 / 34 | 4 / 34 | 4 / 34 |
+| `export_attachments_not_extracted` / `export_embedded_messages_not_extracted` | 34 / 3 | 34 / 3 | 34 / 3 |
+| `export_bodies_plain_present` / empty / absent | 34 / 0 / 0 | 34 / 0 / 0 | 34 / 0 / 0 |
+| `export_readback_mismatches` | 0 | 0 | 0 |
+| `export_tree_sha256` | `96da290e…793ad` | identical | identical |
+
+What this shows:
+- **The counts reconcile with the dry run.** 72 files = 4 `folder.json` (the root and 3 mirrored subdirectories) + 34 messages × 2; 74 planned entries = 3 + 34 + 34 + 3. Every one of the 34 messages has a plain-text body.
+- **The budget gate passes at a short `--out`.** At a root of 9 units there are 0 violations and the longest planned relative path is 181 units (it was 107 at the long root, because names were shortened more there). This closes the "short `--out`" item for the `.msg` directory; the PST has not been run at a short `--out`.
+- **A repeat export is a no-op.** The second run finds the target `owned`, all 72 files identical, writes nothing, and needs no consent.
+- **The result does not depend on where it is written.** The tree hash is the same for `C:\o` and `C:\o2` (roots of 9 and 10 units). The hash covers relative paths and file contents as rendered in memory; the read-back count (0 mismatches) shows the files on disk match what was rendered.
+- **Not shown by these counts:** that the exported text is faithful. That needs the owner's review of exported files.
+
 ### Not yet run
 
-- A real-corpus export: `tsp <one corpus .msg or the msgs directory> --out <short path>`, the re-run (expected to write nothing), the same-tree-hash check across two output directories, and the owner's review of one exported message against a checklist. **This is the remaining M4c gate item.**
+- The owner's review of at least one exported message against a checklist (heading is the subject; body complete and verbatim inside the code fence; `metadata.json` correct; `status_reasons` includes `formatted_bodies_not_converted` for the HTML-in-RTF messages). **This is the remaining M4c gate item.**
+- Overwrite and refusal paths on the real output (editing an exported file and re-running with and without `--overwrite`; exit code 2).
 - Whether CI (Linux and Windows) passes on the pushed commit.
 - `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings` on the final commit (not reported).
-- A dry run with a short `--out`, and the current PST diagnostic output (both still open from M4b-3).
+- A PST dry run with a short `--out`, and the current PST diagnostic output (both still open from M4b-3).
 
 ### Status
 
-M4c is built and passes its synthetic tests; its real-corpus gate is open. The M4a-2 decision records and the full M4b-4 model are not done, so the `0.1-draft` schemas are not frozen.
+M4c is built, passes its synthetic tests, and has exported the real `.msg` corpus with counts that reconcile; the review of exported content is outstanding. The M4a-2 decision records and the full M4b-4 model are not done, so the `0.1-draft` schemas are not frozen.
