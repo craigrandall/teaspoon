@@ -4,7 +4,7 @@ Standalone Rust tooling for deterministic, loss-aware mining of Outlook `.pst` a
 
 Shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of this project's tool), which is "pst" backwards. (ツ)
 
-`tsp` inspects Outlook mail containers (`.pst` files, single `.msg` files, or a directory of `.msg` files) and prints a **privacy-safe inventory**: counts and structural facts only. It never prints message bodies, subject lines, sender/recipient addresses, attachment names or bytes, folder names, file paths, or any other free-form content. Its output is designed to be safe to share and safe to diff across versions.
+`tsp` inspects Outlook mail containers (`.pst` files, single `.msg` files, or a directory of `.msg` files) and prints a **privacy-safe inventory**: counts and structural facts only. It never prints message bodies, subject lines, sender/recipient addresses, attachment names or bytes, folder names, file paths, or any other free-form content. Its output is designed to be safe to share and safe to diff across versions. Since M4c it can also **export** `.msg` input to a Markdown archive in a directory you name; the archive holds message content, but what `tsp` prints stays counts-only.
 
 ## Current status
 
@@ -16,6 +16,8 @@ Shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of 
 - Zero-byte and by-reference attachments were explicitly excluded as fixture goals (empirically impractical to compose / obsolete in modern email) — see `docs/verification/m1-results.md` for the documented rationale. The classification code for both remains.
 - Opening/traversing embedded-message or OLE attachment *content* was investigated (P4c) and found not achievable through `outlook-pst` v1.2.0's public API — accepted as M1's practical ceiling, not a defect. `tsp` correctly detects and counts these attachments on the PST side; it can't open them.
 - HTML-in-RTF detection (MS-OXRTFEX `\fromhtml1` encapsulation) is implemented and confirmed correct against real data — see `docs/verification/m1-results.md`.
+
+This is deliberately **not** the production miner and does not yet emit Markdown or extract body/attachment content.
 
 **M2 — MSG ingestion spike: complete.** `tsp` dispatches on its input: a `.pst` file uses the PST path; a single `.msg` file or a directory of `.msg` files (scanned non-recursively) uses the MSG path. M2 built that path on the `msg_parser` crate, mirroring M1's structure. Body-type detection, recipient/attachment classification, and the zero-byte/subdirectory-visibility fixes were all confirmed correct against real data. Opening an embedded-message attachment as a nested message (M2c) was investigated across two independent real attempts and found not achievable through `msg_parser`, for a root cause never identified. That ceiling was later removed by the custom parser (M3e). See `docs/verification/m2-results.md` for the full evidence trail.
 
@@ -34,13 +36,12 @@ Shorthand for teaspoon (i.e. the name of this project) is tsp (i.e. the name of 
   - A corpus-gated regression test re-runs the both-paths comparison and the structural gates on demand (see [Build and run](#build-and-run)). It skips unless `TSP_FIXTURE_DIR` is set. It has been run against the 29-file corpus with the variable set, and passed.
 - **M3g (verified):** `--oxmsg` and `--extract` were removed; passing either is now a command-line error. The structural breakdown that `--oxmsg` printed is now printed by `--verify` only when a structural gate is nonzero. The build was clean, all 66 tests passed, and the full-corpus `--verify` output is identical to the run before the flags were removed (so the breakdown, which prints only on a violation, has not been exercised on real data).
 
-**M4 — normalized model and deterministic Markdown archive: in progress.** Planning decisions are made (`docs/plans/m4-plan.md`, with the naming and layout rules in `docs/plans/m4a-export-rules.md` and the crate research in `docs/plans/m4a-dependency-research.md`); the layout stays the one chosen by the accepted ADR "Deterministic Markdown archive". Done and verified so far, as of v0.1.22:
+**M4 — normalized model and deterministic Markdown archive: in progress.** Planning decisions are made (`docs/plans/m4-plan.md`, with the naming and layout rules in `docs/plans/m4a-export-rules.md` and the crate research in `docs/plans/m4a-dependency-research.md`); the layout stays the one chosen by the accepted ADR "Deterministic Markdown archive". Status as of the `v0.1.23.1` tag:
 
-- **M4b-1 (module split):** no behavior change; output byte-identical to the previous build (v0.1.20).
-- **M4b-2 (naming rules and export planner):** `naming.rs` and `plan.rs` implement the sanitizing, truncation, collision, and path-budget rules as pure code, with property tests.
-- **M4b-3 (`--dry-run`, v0.1.22):** `tsp <input> --out <dir> --dry-run` plans an export without writing anything and prints a content-free naming census. Built clean with 117 tests passing; the default, `--verify`, and PST outputs are byte-identical to v0.1.19 (checked by `verify-split.ps1`). The census was run on the `.msg` corpus (recursive) and on the PST fixture. Results, and the open question about PST counts that differ from the earlier diagnostic, are in `docs/verification/m4-results.md`.
+- **M4b-1 (module split), M4b-2 (naming rules and export planner), M4b-3 (`--dry-run` naming census):** done and verified on Windows (v0.1.22), with open items recorded in `docs/verification/m4-results.md`: the PST dry-run counts (10 folders, 60 messages, 84 attachment files) differ from the earlier PST diagnostic's figures and are not yet reconciled, and a dry run with a short `--out` has not been recorded.
+- **M4c (walking skeleton; built, 155 tests passing, tagged `v0.1.23.1`):** `tsp <msg|dir> --out <dir>` exports `.msg` input: per folder a `folder.json`, per message a directory with `message.md` (the subject as a heading and the plain-text body in a code fence) and `metadata.json`, and a root `folder.json` that marks the archive as created by `tsp`. It plans names with the M4b planner and refuses a plan that breaks a gate, compares the plan with what is already on disk, asks before replacing files it generated earlier (or requires `--overwrite`), never touches what it did not create, writes through a staging directory, reads everything back, and prints counts only. The file formats are **drafts** (`schema_version` `0.1-draft`). Verified so far: the build, the unit tests (golden files, determinism, the overwrite matrix, the budget gate), and unchanged diagnostic and census output. **Not yet run: an export of real corpus messages.**
 
-**Nothing is exported yet.** `--out` currently works only together with `--dry-run`; writing a Markdown archive is the next stage (M4c, a walking skeleton for plain-text `.msg` input). The stages after that are in the plan.
+**Not exported yet:** attachments and embedded messages (counted and recorded as not extracted), sender, recipients and headers, HTML and RTF bodies, and `.pst` input. The stages after M4c are in the plan.
 
 See `docs/verification/m3-results.md` for the full evidence trail of M3, including the run commands and the field-by-field diff table.
 
@@ -66,9 +67,11 @@ cargo run --release -- --verify .\folder-of-msgs\    # differential check agains
 cargo run --release -- --verify .\sample.msg
 cargo run --release -- .\sample.pst --out .\tsp-out --dry-run        # plan an export; print the naming census
 cargo run --release -- .\folder-of-msgs\ --out .\tsp-out --dry-run
+cargo run --release -- .\sample.msg --out .\tsp-out                  # export (.msg input only so far)
+cargo run --release -- .\folder-of-msgs\ --out .\tsp-out --overwrite
 ```
 
-`cargo test` runs the unit tests (117 as of v0.1.22): classification, decoding (including the `PT_STRING8` code page chain and synthetic ANSI `.msg` fixtures built at test time), counters, every verify-comparison outcome, the structural gates, and the naming and planning rules (including property tests).
+`cargo test` runs the unit tests (155 as of `v0.1.23.1`): classification, decoding (including the `PT_STRING8` code page chain and synthetic ANSI `.msg` fixtures built at test time), counters, every verify-comparison outcome, the structural gates, the naming and planning rules (including property tests), the archive renderers (against committed golden files in `tests/golden/`), and the export writer (against synthetic `.msg` files built at test time).
 
 One test is gated on a local corpus. Real `.msg` fixtures are deliberately not in this repository, so `fixture_corpus_verify_is_clean` runs only when `TSP_FIXTURE_DIR` points at a directory of `.msg` files, and otherwise skips with a note:
 
@@ -81,11 +84,11 @@ It asserts zero mismatches on every comparable field and zero on every structura
 
 Input may be:
 
-- a `.pst` file — full PST diagnostic,
+- a `.pst` file — full PST diagnostic (and `--dry-run`; export is not implemented),
 - a `.msg` file — MSG diagnostic through the custom MS-OXMSG parser,
 - a directory — every `.msg` file directly inside it is scanned  
 (non-recursive; skipped subdirectories are reported as  
-`subdirectories_skipped`). With `--dry-run`, a directory is instead planned **recursively**, mirroring its subdirectories as folders.
+`subdirectories_skipped`). With `--dry-run` or an export, a directory is instead handled **recursively**, mirroring its subdirectories as folders.
 
 Real PST/MSG fixtures are required to perform the behavioral portion of any milestone. No personal mail data is embedded in this repository.
 
@@ -97,19 +100,43 @@ CI (`.github/workflows/ci.yml`) runs format, check, clippy (`-D warnings`), test
 |---|---|
 | `tsp <input>` | Default diagnostic: PST input uses the PST path; `.msg` input uses the custom MS-OXMSG extraction path. |
 | `tsp --verify <msg input>` | Differential verification: runs the custom extraction path and `msg_parser` (the oracle) over the same files and prints match/mismatch counts per field — never the values compared — followed by the custom path's structural gate counters and `structural_gate_violations`. When any gate is nonzero, a `structural_breakdown=follows` marker and the privacy-safe structural breakdown are printed as well, to make the violation triageable. |
-| `tsp <input> --out <dir> --dry-run` | Plans an export of the input into `<dir>` without writing anything, and prints content-free counts (`plan_*` for the plan and its gates, `source_*` for facts about the source, `folder_identity_*` for PST folder identity availability). Shows how many names need sanitizing or shortening, how many collide, the longest planned path against the Windows budget (259 UTF-16 units), and whether any gate is violated. `--out` without `--dry-run` is not usable yet (M4c). |
+| `tsp <input> --out <dir> --dry-run` | Plans an export of the input into `<dir>` without writing anything, and prints content-free counts (`plan_*` for the plan and its gates, `source_*` for facts about the source, `folder_identity_*` for PST folder identity availability). Shows how many names need sanitizing or shortening, how many collide, the longest planned path against the Windows budget (259 UTF-16 units), and whether any gate is violated. |
+| `tsp <msg or dir> --out <dir>` | Exports `.msg` input to `<dir>/<input name>/` (see Export below). Prints counts only (`export_*` keys, plus the plan keys). Exit code 0 on success, 2 when it refused and wrote nothing, 1 on an error. `.pst` input stops with a "not implemented" error. |
+| `--overwrite` | Consent, without asking, to replace files that an earlier export by `tsp` generated and that this export would change. Without it, `tsp` asks (interactive terminal) or refuses with exit code 2 (not interactive). |
+| `--no-source-hash` | Do not record the SHA-256 of the source in the archive root's `folder.json`. |
 
 The transitional `--oxmsg` (structural diagnostic) and `--extract` (alias of the default) flags were removed in M3g. Passing either is a command-line error.
 
+## Export (M4c)
+
+`tsp <msg|dir> --out <dir>` writes:
+
+```text
+<dir>/<input name>/
+  folder.json            archive root: marks the directory as created by tsp, source (kind, name, size,
+                         optional SHA-256), counts, status (incomplete while running, complete at the end)
+  <subdirectory>/        one per mirrored subdirectory, each with a folder.json
+  <subject>/             one directory per message, named from its subject (sanitized, shortened, numbered
+    message.md             if names collide)
+    metadata.json
+```
+
+- `message.md` is the subject as a heading, then the plain-text body verbatim inside a code fence (provisional; the body policy is decided in M4e). A message with no plain-text body gets the heading alone.
+- `metadata.json` records the source file name (never a path), subject, Internet message ID, time, how the directory name was derived, which body forms exist, the number of attachments **not extracted**, and a status of `partial` with the reasons (always that the envelope is not extracted yet; also unextracted attachments and unconverted HTML/RTF bodies when they apply).
+- Everything is deterministic: no absolute paths and no export-time values, so exporting the same input twice gives byte-identical trees. The output reports `export_tree_sha256`, one hash over the whole tree, so two runs can be compared at a glance.
+- Safety: the target `<dir>/<input name>/` must be absent, empty, or an archive that `tsp` wrote for the same source (same kind and name; the content hash is deliberately not compared, so re-exporting a changed source works). A directory `tsp` did not create, or an archive of a different source, is refused even with `--overwrite`. Files this export would change are replaced only with consent. Unrelated files inside an archive are left alone and counted.
+- A plan that breaks a gate (for example a path over the 259-unit budget) is refused before anything is written; choose a shorter `--out`. The output path itself must leave room for the `.tsp-tmp` staging directory (about 239 units at most).
+- Each file is written under a short numeric name in `<dir>/.tsp-tmp/` and renamed into place, so a partly written file never appears under its final name. The archive as a whole is not all-or-nothing. After writing, everything is read back and compared (`export_readback_mismatches`).
+
 ## Output format
 
-Reports are `key=value` lines (plus grouped `key field=value` lines for per-class / per-scope breakdowns). Keys are a **stable output vocabulary**: they are unchanged across versions so that outputs from different versions and modes can be diffed mechanically. The default `.msg` report is identical in shape to the report the `msg_parser`-based default produced before M3f, with one deliberate extra key (`attachments_data_stream_missing`, a custom-path-only anomaly signal; 0 on the verification corpus). The `--dry-run` report adds its own `plan_*`, `source_*`, and `folder_identity_*` keys.
+Reports are `key=value` lines (plus grouped `key field=value` lines for per-class / per-scope breakdowns). Keys are a **stable output vocabulary**: they are unchanged across versions so that outputs from different versions and modes can be diffed mechanically. The default `.msg` report is identical in shape to the report the `msg_parser`-based default produced before M3f, with one deliberate extra key (`attachments_data_stream_missing`, a custom-path-only anomaly signal; 0 on the verification corpus). The `--dry-run` report adds its own `plan_*`, `source_*`, and `folder_identity_*` keys, and an export prints `export_*` keys (target state, preflight counts, consent, result, files written, bodies by kind, read-back mismatches, tree hash).
 
 Every counter is either an aggregate count, a bounded MAPI vocabulary value (message classes, property IDs/types, attach methods, recipient types, property-set labels, CLSIDs, code page numbers), or a size in bytes — never user content. Anything the tool cannot classify is counted (`*_unrecognized*`, `*_errors`, `*_unknown`, `entry_accounting_gap_total`, `*_unsupported_codepage*`) rather than silently dropped, so nothing disappears without a trace.
 
 ## Architecture (modules under `src/`)
 
-Since v0.1.20 the code is split into modules (every item is `pub(crate)` and each module imports exactly what it uses); v0.1.21–v0.1.22 added the planning modules:
+Since v0.1.20 the code is split into modules (every item is `pub(crate)` and each module imports exactly what it uses); the planning modules were added by v0.1.22 and the export modules in v0.1.23:
 
 1. **`main.rs`** — module declarations and `main()`, which dispatches on the arguments and input kind.
 2. **`cli.rs`** — `Args`, `InputKind`, `classify_input`.
@@ -123,30 +150,37 @@ Since v0.1.20 the code is split into modules (every item is `pub(crate)` and eac
 10. **`verify.rs`** — differential verification: comparison types, `collect_msg_verify_totals`, `print_msg_verify_report`, the structural gates (`structural_gate_values`).
 11. **`naming.rs`** — pure naming rules for archive paths: sanitizing, Unicode normalization, truncation to a unit budget (UTF-16 units, never splitting a character), reserved-name handling, and the collision key.
 12. **`plan.rs`** — the pure export planner and its verifier: from a source tree (`SourceFolder`, `SourceMessage`, `SourceAttachment`) and a `Policy` (root length, 259-unit budget) it produces the list of planned entries with final names, flags, and counters, and `verify_plan` checks the gates (collisions, over-budget paths, invalid names, unit mismatches). No I/O.
-13. **`source_msg.rs`** / **`source_pst.rs`** — read a `.msg` input (file or recursive directory) or a PST into the planner's source tree, plus the content-free source census. Names are read into memory only.
-14. **`dry_run.rs`** — `--dry-run`: plan, verify, and print the census; also the input-name helpers (`root_stem`, `root_units`) and subject-marker handling.
-15. **`tests.rs`** — most unit tests: classification, decoding, counters, every verify-comparison outcome, synthetic ANSI fixtures, structural gates, retired-flag handling, and the corpus-gated regression test. The newer modules keep their tests beside their code.
+13. **`source_msg.rs`** / **`source_pst.rs`** — read a `.msg` input (file or recursive directory) or a PST into the planner's source tree, plus the content-free source census. `source_msg.rs` also maps each message to its file and re-reads one message's content for export (`read_message_content`).
+14. **`dry_run.rs`** — `--dry-run`: plan, verify, and print the census; also the input-name helpers (`root_stem`, `input_leaf_name`, `root_units`, `classify_source`) and subject-marker handling.
+15. **`model.rs`** — the seed of the normalized model: `MessageContent` (subject, Internet message ID, time, plain-text body, which other body forms exist). The full model is M4b-4.
+16. **`archive.rs`** — pure rendering of `message.md`, `metadata.json`, and `folder.json` (draft schemas); no I/O.
+17. **`export.rs`** — the export writer: renders the archive in memory, preflights against the target, applies the consent rules, writes through `.tsp-tmp`, reads back, and prints the `export_*` report.
+18. **`tests.rs`** — most of the older unit tests: classification, decoding, counters, every verify-comparison outcome, synthetic ANSI fixtures, structural gates, retired-flag handling, and the corpus-gated regression test. The newer modules keep their tests beside their code.
 
-External crates: `outlook-pst` (PST), `cfb` (generic MS-CFB container), `compressed-rtf` (MS-OXRTFCP), `msg_parser` (oracle for `--verify` only), `unicode-normalization` (naming), `clap`, `anyhow`; `proptest` for tests.
+External crates: `outlook-pst` (PST), `cfb` (generic MS-CFB container), `compressed-rtf` (MS-OXRTFCP), `msg_parser` (oracle for `--verify` only), `unicode-normalization` (naming), `serde` and `serde_json` (the archive's JSON), `sha2` (SHA-256 for the source and tree hashes), `clap`, `anyhow`; `proptest` for tests.
 
 ## Privacy design rules
 
 - Never print input paths, display names, subjects, bodies, addresses, attachment filenames, or entry IDs — including in error messages.
 - Message-class names, property IDs/types, CLSIDs, and code page numbers are treated as bounded vocabularies, not content, and may be reported by value.
-- `--verify`, `--dry-run`, and the default extraction read real content (and, for planning, names) into memory to compute booleans, counts, and match counts, but never print it.
-- Loss must be explicit: every unreadable, unrecognized, or unresolvable item increments its own counter.
+- `--verify`, `--dry-run`, export, and the default extraction read real content (and, for planning, names) into memory to compute booleans, counts, and match counts, but never print it.
+- An export writes message content only into the directory the user names, and records no absolute path and no export-time value in the archive.
+- Loss must be explicit: every unreadable, unrecognized, or unresolvable item increments its own counter, and an export records what it did not extract.
 
 ## Known limitations
 
-- Neither M1 nor M2 nor M3 yet proves complete extraction fidelity. Markdown rendering, attachment byte preservation, named-property normalization (decoding and resolution verified on the MSG side; nothing yet feeds the normalized model), and body extraction remain future work. No archive is written yet (M4c onward).
+- Neither M1 nor M2 nor M3 yet proves complete extraction fidelity. The export (M4c) is a walking skeleton: it writes plain-text bodies only; attachments, embedded messages, sender/recipients/headers, HTML and RTF bodies, and PST input are not exported (each is counted or recorded as not extracted). Named-property normalization (decoding and resolution verified on the MSG side) feeds nothing yet.
+- The export has not yet been run on real corpus messages; it is verified by synthetic tests only. The file formats are drafts (`0.1-draft`) until the M4a-2 ADRs freeze them.
+- The export renders the whole archive in memory before writing, and replaces files one at a time rather than all-or-nothing (an interrupted run leaves the root `folder.json` marked `incomplete`). Both are revisited in M4h.
 - `msg_parser` exposes only To/Cc/Bcc, so an ORIG-classified recipient (sender, MS-OXOMSG value 0) cannot be detected through it; the PST side and the custom path both track it.
 - `PT_STRING8` decoding implements Windows-1252, ISO-8859-1, US-ASCII, and UTF-8. Any other code page decodes only all-ASCII input (and only for a known ASCII-superset code page) and is otherwise reported as unsupported; no text is produced. The corpus contains no `PT_STRING8` value, so decoding has been exercised only by synthetic fixtures. (Code page *resolution* has met real data: all 29 corpus files resolved from a real code page property.) See `docs/verification/m3-results.md`.
 - PST table reads assume `PidTagRecipientType` / `PidTagAttachMethod` / `PidTagAttachSize` arrive as 32-bit integers; a different encoding falls into the "unknown" bucket rather than miscounting, but the assumption has never been falsified by contrary data.
 - Embedded messages are opened one level deep only. The PST side cannot open them at all (P4c); in a PST dry run they are counted as `source_embedded_attachments_not_opened` and planned as plain attachment files.
 - The structural breakdown that `--verify` prints when a gate fires has never fired on real data, because the corpus is clean; it is exercised only by a test that prints it for empty totals.
-- The planner shortens names only down to fixed floors. When a very long `--out` path leaves too little room, entries are reported over budget (`plan_gate_over_budget`) rather than shortened further; the PST fixture shows this with a deliberately long output path (see `docs/verification/m4-results.md`). No dry run with a short output path has been recorded yet.
+- The planner shortens names only down to fixed floors. When a very long `--out` path leaves too little room, entries are reported over budget (`plan_gate_over_budget`) rather than shortened further, and an export refuses such a plan; the PST fixture shows this with a deliberately long output path (see `docs/verification/m4-results.md`). No dry run with a short output path has been recorded yet.
 - The PST dry-run counts (10 folders, 60 messages, 84 attachment files) differ from the earlier PST diagnostic figures (10 folders including the root, 57 messages, 79 attachments). The difference has not been reconciled.
 - All MSG verification runs against one 29-file corpus (plus its subdirectories for the dry run), with `msg_parser` as the only oracle. No comparison against an independent PST implementation, or against `libpff`/`libpst` for either format, has been run.
+- `naming.rs` and `plan.rs` still carry `#![allow(dead_code)]`; removing it, now that the writer uses them, has not been tried.
 
 ## Change history
 
@@ -165,3 +199,4 @@ Background dates below refer to the project's own verification timeline; the und
 - **2026-09-29 (M3g)** — Removed the transitional `--oxmsg` and `--extract` flags and `run_oxmsg_diagnostic`. The structural breakdown is now printed by `--verify` only when a structural gate is nonzero. Verified on Windows: clean build, 66 tests passing, `fixture_corpus_verify_is_clean` run against the corpus and passed, and the full-corpus `--verify` output identical to the pre-removal run. M3 is complete.
 - **v0.1.20 (M4b-1)** — Module split with no behavior change: `main.rs` became eleven files. Build clean, 66 tests passing; output byte-identical to the previous build.
 - **v0.1.22 (M4b-3, 2026-10-02)** — `--dry-run` and the naming census (with `naming.rs`, `plan.rs`, `source_msg.rs`, `source_pst.rs`, `dry_run.rs`). Build clean, 117 tests passing, default / `--verify` / PST output byte-identical to v0.1.19. Also fixed `root_stem` for Windows paths. Evidence: `docs/verification/m4-results.md`.
+- **v0.1.23 / `v0.1.23.1` (M4c, 2026-10-03)** — The first export: `--out` without `--dry-run` writes a Markdown archive for `.msg` input, with `--overwrite` and `--no-source-hash` (new `model.rs`, `archive.rs`, `export.rs`; new dependencies `serde`, `serde_json`, `sha2`). `root_stem` now ignores trailing path separators. Build clean, 155 tests passing; default / `--verify` / PST output still byte-identical to v0.1.19 and the dry-run census unchanged. Not yet run on real corpus messages. Evidence: `docs/verification/m4-results.md`.
