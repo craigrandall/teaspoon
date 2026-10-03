@@ -73,12 +73,12 @@ pub(crate) fn strip_subject_marker(s: &str) -> (&str, bool) {
     }
 }
 
-enum SourceKind {
+pub(crate) enum SourceKind {
     Pst,
     Msg,
 }
 
-fn classify_source(input: &Path) -> Result<SourceKind> {
+pub(crate) fn classify_source(input: &Path) -> Result<SourceKind> {
     if input.is_dir() {
         return Ok(SourceKind::Msg);
     }
@@ -96,28 +96,30 @@ fn classify_source(input: &Path) -> Result<SourceKind> {
     }
 }
 
+/// The last component of the input as written: the file name, or the directory name.
+///
+/// Taken from the raw input string rather than via `Path::file_name`: on Windows `:` is an
+/// alternative path separator, so `Path::new("a:b.pst").file_stem()` yields `"b"`, silently
+/// dropping the `a:` part. Trailing separators are ignored first, so `C:\mail\msgs\` and
+/// `C:\mail\msgs` give the same name (without that, the last "component" would be empty).
+pub(crate) fn input_leaf_name(input: &Path) -> String {
+    let raw = input.to_string_lossy();
+    let trimmed = raw.trim_end_matches(['/', '\\']);
+    trimmed.rsplit(['/', '\\']).next().unwrap_or("").to_string()
+}
+
 /// Name of the export root directory: the input's file stem (or directory
 /// name), sanitized.
 ///
-/// The name is extracted from the raw input string rather than via
-/// `Path::file_name`/`Path::file_stem`: on Windows `:` is an alternative path
-/// separator, so `Path::new("a:b.pst").file_stem()` yields `"b"`, silently
-/// dropping the `a:` part. Taking the last `/`- or `\`-separated component of
-/// the string ourselves keeps such names intact on every platform. The
-/// extension is likewise stripped manually, mirroring `Path::file_stem`
-/// semantics: a trailing `.ext` is removed only when the part before the dot
-/// is non-empty, so a dotfile like `.pst` is preserved as-is.
+/// The extension is stripped manually, mirroring `Path::file_stem` semantics: a trailing `.ext`
+/// is removed only when the part before the dot is non-empty, so a dotfile like `.pst` is
+/// preserved as-is.
 pub(crate) fn root_stem(input: &Path) -> String {
-    let raw = input.to_string_lossy();
+    let name = input_leaf_name(input);
 
-    // Last component of the path, per the raw string (not Path parsing,
-    // which may treat ':' as a separator on Windows).
-    let name = raw.rsplit(['/', '\\']).next().unwrap_or("");
-
-    // Strip the extension like `Path::file_stem` would.
     let stem = match name.rsplit_once('.') {
         Some((before, _)) if !before.is_empty() => before,
-        _ => name,
+        _ => name.as_str(),
     };
 
     sanitize_component(stem, "archive").name
@@ -291,6 +293,20 @@ mod tests {
         assert_eq!(root_stem(Path::new("a:b.pst")), "a_b");
         assert_eq!(root_stem(Path::new(".pst")), ".pst");
         assert_eq!(root_stem(Path::new("")), "archive");
+    }
+
+    #[test]
+    fn trailing_separators_do_not_change_the_root_name() {
+        assert_eq!(root_stem(Path::new("dir/msgs/")), "msgs");
+        assert_eq!(root_stem(Path::new("dir\\msgs\\")), "msgs");
+        assert_eq!(root_stem(Path::new("dir/msgs")), "msgs");
+        assert_eq!(
+            root_stem(Path::new("C:\\mail\\Archive 2019.pst")),
+            "Archive 2019"
+        );
+        assert_eq!(input_leaf_name(Path::new("a/b.msg")), "b.msg");
+        assert_eq!(input_leaf_name(Path::new("a\\msgs\\")), "msgs");
+        assert_eq!(input_leaf_name(Path::new("")), "");
     }
 
     #[test]

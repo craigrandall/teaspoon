@@ -1,7 +1,10 @@
-//! `tsp`: privacy-safe inventory of Outlook `.pst` and `.msg` files (the teaspoon miner).
+//! `tsp`: privacy-safe inventory and Markdown export of Outlook `.pst` and `.msg` files (the teaspoon miner).
 
+mod archive;
 mod cli;
 mod dry_run;
+mod export;
+mod model;
 mod msg_report;
 mod naming;
 mod oxmsg_classify;
@@ -17,11 +20,14 @@ mod source_pst;
 mod tests;
 mod verify;
 
+use std::io::IsTerminal;
+
 use anyhow::Result;
 use clap::Parser;
 
 use crate::cli::{classify_input, Args, InputKind};
 use crate::dry_run::run_dry_run;
+use crate::export::{prompt_for_consent, run_export, ExportOptions, ExportStatus};
 use crate::oxmsg_extract::run_msg_extract;
 use crate::pst::run_pst_diagnostic;
 use crate::verify::run_msg_verify;
@@ -30,10 +36,20 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     if let Some(out) = &args.out {
-        if !args.dry_run {
-            anyhow::bail!("exporting is not implemented yet; add --dry-run to plan an export");
+        if args.dry_run {
+            return run_dry_run(&args.input, out);
         }
-        return run_dry_run(&args.input, out);
+        let options = ExportOptions {
+            overwrite: args.overwrite,
+            source_hash: !args.no_source_hash,
+            interactive: std::io::stdin().is_terminal(),
+        };
+        return match run_export(&args.input, out, &options, &mut prompt_for_consent)? {
+            ExportStatus::Completed => Ok(()),
+            // Nothing was written; the reason was printed. Exit code 2 is "refused", as
+            // distinct from 1 (an error).
+            ExportStatus::Refused => std::process::exit(2),
+        };
     }
 
     match classify_input(&args.input)? {

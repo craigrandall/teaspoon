@@ -1,7 +1,12 @@
 //! Builds the planner's source tree from `.msg` input (M4b-3): subjects, times, attachment names,
 //! and embedded messages, read through the custom MS-OXMSG layer. A directory input mirrors its
 //! subdirectories as folders. Names are read into memory only; nothing is printed.
+//!
+//! M4c adds two things for the export writer: the map from each top-level message's source ID to
+//! the `.msg` file it came from, and [`read_message_content`], which re-reads one message's
+//! content when the writer needs it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -11,6 +16,7 @@ use crate::dry_run::{
     PROP_ATTACH_LONG_FILENAME, PROP_DELIVERY_TIME, PROP_INTERNET_MESSAGE_ID, PROP_SUBJECT,
     PROP_SUBMIT_TIME,
 };
+use crate::model::{BodyAvailability, MessageContent, PlainBody};
 use crate::oxmsg_classify::{
     cfb_entry_name, classify_oxmsg_entry, OxmsgEntryKind, OxmsgEntryScope,
     EMBEDDED_OBJECT_STORAGE_NAME,
@@ -19,9 +25,9 @@ use crate::oxmsg_decode::{
     decode_fixed_value, decode_properties_stream, extract_string8_codepage,
     properties_stream_header_len, read_stream_bytes, DecodedFixedValue,
 };
-use crate::oxmsg_extract::read_string_property;
+use crate::oxmsg_extract::{extract_body_flags, read_string_property};
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
-use crate::shared::{CompoundFile, PROP_ATTACH_METHOD};
+use crate::shared::{CompoundFile, PROP_ATTACH_METHOD, PROP_BODY};
 
 /// Deepest directory nesting mirrored (guards against link loops).
 const MAX_DIRECTORY_DEPTH: usize = 64;
@@ -29,18 +35,26 @@ const MAX_DIRECTORY_DEPTH: usize = 64;
 const MAX_EMBEDDED_READ_DEPTH: usize = 8;
 const ATTACH_METHOD_EMBEDDED: i32 = 5;
 
+/// Source ID of each top-level message (one that came from a `.msg` file of its own) to that file.
+pub(crate) type MsgFileMap = BTreeMap<u64, PathBuf>;
+
 struct Builder {
     next_id: u64,
     census: SourceCensus,
     ids: InternetIdTracker,
+    files: MsgFileMap,
 }
 
-/// Builds the source tree for a single `.msg` file or a directory of them (recursively).
-pub(crate) fn build_msg_tree(input: &Path) -> Result<(SourceFolder, SourceCensus)> {
+/// Builds the source tree for a single `.msg` file or a directory of them (recursively), plus the
+/// map from each message's source ID to its file.
+pub(crate) fn build_msg_export_source(
+    input: &Path,
+) -> Result<(SourceFolder, SourceCensus, MsgFileMap)> {
     let mut b = Builder {
         next_id: 0,
         census: SourceCensus::default(),
         ids: InternetIdTracker::default(),
+        files: MsgFileMap::new(),
     };
     let root = if input.is_dir() {
         b.folder_from_dir(input, 0)?
@@ -56,7 +70,13 @@ pub(crate) fn build_msg_tree(input: &Path) -> Result<(SourceFolder, SourceCensus
         }
         folder
     };
-    Ok((root, b.census))
+    Ok((root, b.census, b.files))
+}
+
+/// Builds the source tree for a single `.msg` file or a directory of them (recursively).
+pub(crate) fn build_msg_tree(input: &Path) -> Result<(SourceFolder, SourceCensus)> {
+    let (root, census, _files) = build_msg_export_source(input)?;
+    Ok((root, census))
 }
 
 fn is_msg_file(path: &Path) -> bool {
@@ -107,7 +127,10 @@ impl Builder {
     fn message_from_file(&mut self, path: &Path) -> Option<SourceMessage> {
         match cfb::open(path) {
             Ok(mut comp) => {
-                Some(self.read_message(&mut comp, Path::new("/"), OxmsgEntryScope::Message, 0))
+                let message =
+                    self.read_message(&mut comp, Path::new("/"), OxmsgEntryScope::Message, 0);
+                self.files.insert(message.id, path.to_path_buf());
+                Some(message)
             }
             Err(_) => {
                 self.census.open_errors += 1;
@@ -205,6 +228,41 @@ impl Builder {
     }
 }
 
+/// Reads what the export writes for one top-level message (M4c): subject, Internet message ID,
+/// time, the plain-text body, and which other body forms exist. Content stays in memory and goes
+/// only into the archive directory the user named.
+pub(crate) fn read_message_content(path: &Path) -> Result<MessageContent> {
+    let mut comp = cfb::open(path).context("failed to open a .msg file for export")?;
+    let base = Path::new("/");
+    let header_len = properties_stream_header_len(OxmsgEntryScope::Message).unwrap_or(32);
+    let codepage = extract_string8_codepage(&mut comp, base, header_len).codepage;
+
+    let subject = read_string_property(&mut comp, base, PROP_SUBJECT, codepage)
+        .map(|raw| strip_subject_marker(&raw).0.to_string());
+    let internet_message_id =
+        read_string_property(&mut comp, base, PROP_INTERNET_MESSAGE_ID, codepage)
+            .filter(|id| !id.trim().is_empty());
+    let time_filetime = message_time(&mut comp, base, header_len);
+    let plain_body = match read_string_property(&mut comp, base, PROP_BODY, codepage) {
+        None => PlainBody::Absent,
+        Some(text) if text.trim().is_empty() => PlainBody::Empty,
+        Some(text) => PlainBody::Text(text),
+    };
+    let flags = extract_body_flags(&mut comp);
+
+    Ok(MessageContent {
+        subject,
+        internet_message_id,
+        time_filetime,
+        plain_body,
+        bodies: BodyAvailability {
+            html_native: flags.has_html_native,
+            html_via_rtf: flags.has_html_via_rtf,
+            rtf: flags.has_rtf,
+        },
+    })
+}
+
 /// Delivery time, falling back to submit time, as FILETIME ticks.
 fn message_time(comp: &mut CompoundFile, base: &Path, header_len: usize) -> Option<i64> {
     let bytes = read_stream_bytes(comp, &base.join("__properties_version1.0"))?;
@@ -263,8 +321,8 @@ mod tests {
         stream.flush().expect("flush stream");
     }
 
-    /// A message with a marker-prefixed subject, a delivery time, one file attachment, and one
-    /// embedded message.
+    /// A message with a marker-prefixed subject, a delivery time, a plain-text body, one file
+    /// attachment, and one embedded message.
     fn write_synthetic_msg(path: &Path) {
         let mut comp = cfb::create(path).expect("create CFB");
         let ticks: u64 = 133_000_000_000_000_000;
@@ -276,6 +334,7 @@ mod tests {
             "/__substg1.0_0037001F",
             &utf16("\u{1}\u{4}RE: Hello"),
         );
+        put(&mut comp, "/__substg1.0_1000001F", &utf16("Body text"));
 
         comp.create_storage("/__attach_version1.0_#00000000")
             .expect("create attachment storage");
@@ -378,6 +437,42 @@ mod tests {
         assert!(names.contains(&"RE_ Hello/attachments/Inner".to_string()));
         assert!(names.contains(&"sub".to_string()));
         assert!(names.contains(&"sub/RE_ Hello".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn each_top_level_message_is_mapped_to_its_file() {
+        let dir = temp_dir("files");
+        std::fs::create_dir_all(dir.join("sub")).expect("create subdirectory");
+        write_synthetic_msg(&dir.join("a.msg"));
+        write_synthetic_msg(&dir.join("sub").join("b.msg"));
+
+        let (tree, _census, files) = build_msg_export_source(&dir).expect("build source");
+        assert_eq!(files.len(), 2);
+        let top = tree.messages[0].id;
+        let nested = tree.folders[0].messages[0].id;
+        assert_eq!(files.get(&top), Some(&dir.join("a.msg")));
+        assert_eq!(files.get(&nested), Some(&dir.join("sub").join("b.msg")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn message_content_is_read_for_export() {
+        let dir = temp_dir("content");
+        let file = dir.join("m.msg");
+        write_synthetic_msg(&file);
+
+        let content = read_message_content(&file).expect("read content");
+        assert_eq!(content.subject.as_deref(), Some("RE: Hello"));
+        assert_eq!(content.time_filetime, Some(133_000_000_000_000_000));
+        assert_eq!(content.internet_message_id, None);
+        assert_eq!(content.plain_body, PlainBody::Text("Body text".to_string()));
+        assert!(!content.bodies.html_native);
+        assert!(!content.bodies.html_via_rtf);
+        assert!(!content.bodies.rtf);
+
+        std::fs::write(dir.join("broken.msg"), b"not a compound file").expect("write broken");
+        assert!(read_message_content(&dir.join("broken.msg")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

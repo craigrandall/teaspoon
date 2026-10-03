@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1-draft",
+  "kind": "message",
+  "source_file": "m.msg",
+  "subject": "Hello World",
+  "internet_message_id": null,
+  "time_filetime": 133000000000000000,
+  "directory": {
+    "original": "Hello World",
+    "adjustments": []
+  },
+  "body": {
+    "plain_text": "present",
+    "markdown": "fenced_text_provisional",
+    "html_native": false,
+    "html_via_rtf": false,
+    "rtf": false
+  },
+  "attachments_not_extracted": 0,
+  "status": "partial",
+  "status_reasons": [
+    "envelope_not_extracted"
+  ]
+}

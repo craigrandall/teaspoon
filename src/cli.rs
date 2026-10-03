@@ -12,7 +12,7 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(
     name = "tsp",
-    about = "Privacy-safe inventory for the teaspoon Outlook message miner (PST or MSG)"
+    about = "Privacy-safe inventory and Markdown export for Outlook PST and MSG files (the teaspoon miner)"
 )]
 pub(crate) struct Args {
     /// A .pst file, a single .msg file, or a directory of .msg files to inspect.
@@ -30,10 +30,12 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) verify: bool,
 
-    /// Directory an export will be written to. Until the export writer
-    /// exists (M4c) it is only used with `--dry-run`; without `--dry-run`
-    /// the program stops with an explanation and writes nothing.
-    #[arg(long, value_name = "DIR")]
+    /// Directory to export into. The archive is written to `<DIR>/<input name>/`: one
+    /// directory per message holding `message.md` and `metadata.json`, a `folder.json` in every
+    /// folder, and a `folder.json` at the archive root that marks the directory as created
+    /// by `tsp`. Exporting `.msg` input works; a `.pst` export arrives with M4i. Standard output
+    /// stays content-free (counts only). With `--dry-run` nothing is written.
+    #[arg(long, value_name = "DIR", conflicts_with = "verify")]
     pub(crate) out: Option<PathBuf>,
 
     /// Plan an export of the input into `--out` without writing anything,
@@ -44,6 +46,18 @@ pub(crate) struct Args {
     /// subdirectories as folders.
     #[arg(long, requires = "out", conflicts_with = "verify")]
     pub(crate) dry_run: bool,
+
+    /// Consent, without asking, to replace files that an earlier export by `tsp` generated
+    /// and that this export would change. Without it, `tsp` asks (interactive terminal) or
+    /// stops with exit code 2 (not interactive). It never touches files it did not generate and
+    /// never writes into a directory it did not create.
+    #[arg(long, requires = "out", conflicts_with = "dry_run")]
+    pub(crate) overwrite: bool,
+
+    /// Do not compute the SHA-256 of the source file(s) recorded in the archive root's
+    /// `folder.json`.
+    #[arg(long, requires = "out")]
+    pub(crate) no_source_hash: bool,
 }
 
 pub(crate) enum InputKind {
