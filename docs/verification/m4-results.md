@@ -60,7 +60,7 @@ All other keys (`source_open_errors`, `source_non_mail_items`, `source_associate
 ### What the numbers show
 
 - **Internal consistency.** For both inputs, root units plus the longest relative path equals the longest path (146 + 107 = 253; 152 + 114 = 266). The root differs by 6 units because `tsp-tester` is six characters longer than `msgs`.
-- **PST over-budget entries are the expected effect of the long output path.** At a root of 152 units, four entries cannot fit in 259 even at the planner's name floors, and the gate reports exactly those four (`plan_budget_exceeded=4`, `plan_gate_over_budget=4`, `plan_gate_violations=4`). The `.msg` run, with a root of 146 and a longest relative path of 107, fits (253 ≤ 259). The planner therefore reports a problem rather than hiding it; what an export does about it is an M4c decision. **Not yet run:** a dry run with a short `--out`, which should show 0 violations on both inputs.
+- **PST over-budget entries are the expected effect of the long output path.** At a root of 152 units, four entries cannot fit in 259 even at the planner's name floors, and the gate reports exactly those four (`plan_budget_exceeded=4`, `plan_gate_over_budget=4`, `plan_gate_violations=4`). The `.msg` run, with a root of 146 and a longest relative path of 107, fits (253 ≤ 259). The planner therefore reports a problem rather than hiding it; M4c's export refuses to run on such a plan. **Not yet run:** a dry run with a short `--out`, which should show 0 violations on both inputs.
 - **Nameless attachments match the embedded messages the PST side cannot open.** `source_attachments_without_name`, `source_embedded_attachments_not_opened`, and `plan_names_fallback` are all 3 on the PST, and the planner names those entries by fallback.
 - **Collision handling works on real names.** The PST has 3 collision groups (largest 16) and `plan_gate_collisions=0`.
 - **Folder identity is available on the PST.** Both a node ID and an entry ID were readable for all 11 folders walked, none unavailable. The planned folder count is 10 and 11 were examined, which is consistent with one folder (the root) being identified but not exported; this has not been confirmed separately.
@@ -73,6 +73,26 @@ The M4b-3 plan predicted, from earlier diagnostics, 9 planned folders, 57 messag
 - For the `.msg` directory the likely explanation is scope: the earlier counts covered the 29 top-level files, while the dry run plans recursively and mirrors 3 subdirectories. The split of the extra 5 messages and 2 embedded messages across those subdirectories has not been checked.
 - For the PST there is **no confirmed explanation**: +1 folder, +3 messages, +5 attachment files. Either the fixture changed after the earlier diagnostic, or the planner walks something the diagnostic does not. The current PST diagnostic output (`tsp tsp-tester.pst`) is needed to settle it, and the PST export stage (M4i) is gated on the archive reconciling with the diagnostic.
 
+## M4c: walking skeleton (built 2026-10-03; tag `v0.1.23.1`, `Cargo.toml` version `0.1.23`)
+
+### Build and regression
+
+- Built clean; **155 tests pass** (117 existing plus 38 new); committed and tagged `v0.1.23.1`. Added dependencies: `serde`, `serde_json`, `sha2`.
+- `verify-split.ps1` again against v0.1.19: default, `--verify`, and PST outputs **IDENTICAL**, with the same sizes as before (850 / 2705 / 1092 bytes; 33 / 82 / 44 lines; stderr 0).
+- The `--verify` run over the 29 `.msg` fixtures (`verify4.txt`) has the same key values as `verify3.txt`.
+- Both `--dry-run` censuses, run again with the same very long `--out`, are **identical to the v0.1.22 census** in every key (the PST still reports 4 over-budget entries at that path). Adding the export path therefore changed neither the planner's results nor the diagnostics.
+
+### What the new tests cover
+
+Synthetic `.msg` files built at test time, no personal data. The two golden files (`tests/golden/hello/message.md`, `metadata.json`) are compared byte for byte, both against the pure renderer and against the files an export writes. Other tests cover: the exact output layout; two exports to different directories being byte-identical; a second identical export writing nothing and needing no consent; a directory input mirroring subdirectories and numbering duplicate subjects; a trailing separator on the input not renaming the archive; unusable characters in a subject being replaced and recorded; attachments being counted and flagged, with no `attachments/` directory written; a message with no plain-text body; the consent matrix (changed files refused without consent, declined at the prompt, accepted at the prompt, replaced with `--overwrite`); unrelated files being left alone; a directory `tsp` did not create being refused even with `--overwrite`; an empty existing target being accepted; an archive of a different source being refused; an over-budget plan writing nothing; an over-long `--out` being an error; a leftover staged file from an interrupted run being cleaned up; a `.pst` export being refused as not implemented; and the command-line flag rules. One test (over-budget) failed on the first run because of an arithmetic error in the test's own setup, was corrected, and all others passed on the first run.
+
+### Not yet run
+
+- A real-corpus export: `tsp <one corpus .msg or the msgs directory> --out <short path>`, the re-run (expected to write nothing), the same-tree-hash check across two output directories, and the owner's review of one exported message against a checklist. **This is the remaining M4c gate item.**
+- Whether CI (Linux and Windows) passes on the pushed commit.
+- `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings` on the final commit (not reported).
+- A dry run with a short `--out`, and the current PST diagnostic output (both still open from M4b-3).
+
 ### Status
 
-M4b-1, M4b-2, and M4b-3 are done and verified, with the open items above. The M4a-2 decision records and the M4b-4 model types, which the plan places before M4c, are not done.
+M4c is built and passes its synthetic tests; its real-corpus gate is open. The M4a-2 decision records and the full M4b-4 model are not done, so the `0.1-draft` schemas are not frozen.
