@@ -126,9 +126,39 @@ path before anything is written.
 ```
 
 The planner and the naming rules depend on no adapter module; the source
-readers are the only code that knows about PST or MSG here. A future writer
-(M4c onward) will consume the same plan, so what `--dry-run` reports is what
-an export would do. Nothing is written by any code in this boundary.
+readers are the only code that knows about PST or MSG here. Nothing is
+written by any code in this boundary.
+
+## M4c boundary: the first writer (`.msg` input, plain-text body)
+
+M4c consumes the same plan and writes an archive. It is a walking skeleton:
+one thin path from a `.msg` input to files on disk, with the pieces that will
+grow later already separated.
+
+```text
+.msg file / directory
+ |
+ +-- source_msg.rs   source tree + map: message source ID -> its .msg file
+ |
+ +-- plan.rs         the same plan `--dry-run` reports; export refuses a plan
+ |                   that breaks a gate (exit code 2, nothing written)
+ |
+ +-- source_msg.rs   `read_message_content`: re-reads one message when the
+ |                   writer needs it -> model.rs `MessageContent`
+ |
+ +-- archive.rs      pure rendering, no I/O: message.md, metadata.json,
+ |                   folder.json (draft schema "0.1-draft")
+ |
+ +-- export.rs       render everything in memory -> preflight against the
+                     target (counts only) -> consent -> write through
+                     <out>/.tsp-tmp -> read back -> content-free report
+```
+
+- `model.rs` is only the seed of the normalized model (M4b-4): subject, Internet message ID, time, the plain-text body, and which other body forms exist. It imports no adapter module.
+- `archive.rs` has no I/O, so what is written is testable byte for byte (two golden files are committed under `tests/golden/`).
+- `export.rs` never overwrites or deletes what it did not generate: the target must be absent, empty, or a directory whose root `folder.json` was written by `tsp` for the same source; its own files are replaced only with consent (`--overwrite` or a yes at the prompt).
+- Each file is replaced atomically (written under a short numeric name in `.tsp-tmp`, then renamed). The archive as a whole is not all-or-nothing: the root `folder.json` is first written as `incomplete` and replaced with the `complete` version last, so an interrupted run is recognizable.
+- Not exported yet: attachments and embedded messages (counted and recorded as not extracted), sender/recipients/headers, HTML and RTF bodies, and `.pst` input.
 
 ## Verification structure
 
@@ -145,9 +175,11 @@ and [ADR: independent differential verification](../ADRs/independent-differentia
 The PST side has no independent-oracle comparison yet.
 
 The planner is verified differently: `verify_plan` is a gate over every plan
-(its violation count prints under `--dry-run`), unit and property tests cover
-the naming and planning rules, and `verify-split.ps1` checks that a refactor
-leaves the existing outputs byte-identical to an earlier tag.
+(its violation count prints under `--dry-run` and gates `export`), unit and
+property tests cover the naming and planning rules, and `verify-split.ps1`
+checks that a change leaves the existing outputs byte-identical to an earlier
+tag. The writer is verified by synthetic tests (golden files, determinism,
+the overwrite matrix); a run on real corpus messages is still to be done.
 
 ## Code layout
 
@@ -159,9 +191,10 @@ The code lives in `src/`, one module per seam:
 - `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, `oxmsg_extract` — the custom MS-OXMSG parser, from naming conventions through extraction.
 - `verify` — the `--verify` comparison and structural gates.
 - `naming`, `plan` — the pure naming rules and export planner (M4b).
-- `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b).
-- `tests` — most unit tests; the newer modules keep theirs beside their code.
+- `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also re-reads message content for export.
+- `model`, `archive`, `export` — the seed model, the pure renderers, and the writer with its preflight and consent rules (M4c).
+- `tests` — most of the older unit tests; the newer modules keep theirs beside their code.
 
 The README lists the contents of each module.
 
-Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `dry_run` ties the readers, the planner, and the report together. Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. `naming.rs` and `plan.rs` still carry `#![allow(dead_code)]`, because their items are used only by the dry run and tests until the writer exists; it is meant to go when M4c lands. The normalized model module (M4b-4) has not been written.
+Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. `naming.rs` and `plan.rs` still carry `#![allow(dead_code)]`; the plan was to drop it when the writer landed, and it has not been tried yet. The full normalized model (M4b-4) has not been written.
