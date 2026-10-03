@@ -1,9 +1,10 @@
-# M4 plan (v4) — normalized model and deterministic Markdown archive
+# M4 plan (v4.1) — normalized model and deterministic Markdown archive
 
-Status: **M4a-1 decided; M4b-1 and M4b-2 verified; M4b-3 drafted (uncompiled) and awaiting its first build.** Version 4, revised 2026-09-30 after the project owner's decisions on the remaining open questions (Q7-Q11). Nothing here has been implemented; every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
+Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c is next (a draft exists outside the repository and has not been built).** Version 4.1, revised 2026-10-03 from version 4 (2026-09-30, after the project owner's decisions on Q7-Q11) to record the M4b verification results. The export itself is not implemented; every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
 
 - [`m4a-export-rules.md`](m4a-export-rules.md): the draft naming, layout, identity, duplicate, path-length, and overwrite rules (v3, aligned with the accepted archive ADR).
 - [`m4a-dependency-research.md`](m4a-dependency-research.md): RTF de-encapsulation, HTML-to-Markdown converters, and supporting crates.
+- [`../verification/m4-results.md`](../verification/m4-results.md): the evidence recorded so far.
 
 ## Decisions in force (project owner, 2026-09-30)
 
@@ -21,6 +22,7 @@ Status: **M4a-1 decided; M4b-1 and M4b-2 verified; M4b-3 drafted (uncompiled) an
 - Path length is handled up front, using UTF-16 code unit counts and worst-case child reservation.
 - Approved dependencies: `serde`, `serde_json`, `sha2`, `unicode-normalization`, and `proptest` (dev-only). The HTML-to-Markdown bake-off is approved.
 - The owner will create the priority fixtures separately.
+- 2026-10-03: the owner directed that M4c proceed next. M4a-2 (the ADRs) and M4b-4 (the model types) come before M4c in this plan and are not done; see the M4c section for how that is handled.
 
 ## What changed from v3
 
@@ -39,13 +41,14 @@ Status: **M4a-1 decided; M4b-1 and M4b-2 verified; M4b-3 drafted (uncompiled) an
 
 Turn what the two adapters read into a durable archive: a Windows-safe directory tree mirroring the source's folders, one directory per message named from its subject, with `message.md`, `metadata.json`, and `attachments/`, plus a `folder.json` per folder carrying identity, provenance, and loss status. M4 is the first milestone where `tsp` writes message content to disk; stdout stays counts-only.
 
-## Where M3 leaves us
+## Where the code stands (v0.1.22)
 
 - The MSG adapter decodes typed properties, value streams, named properties, recipients, attachments (methods, content IDs, emptiness), and one level of embedded message. It reads content into memory and prints only counts.
 - The PST adapter is a counter-only diagnostic over `outlook-pst` v1.2.0. It cannot open embedded-message or OLE attachments (P4c).
 - `msg_parser` is an oracle for comparable MSG fields; no PST oracle has been run.
-- No normalized model, body extraction for output, renderer, or writer exists. As of v0.1.20 the code is eleven modules under `src/` (split from a 5,070-line `main.rs`).
-- Fixtures: 29 `.msg` files (27 carry HTML only inside RTF; 23 attachments carry a content ID; 1 embedded message; 1 zero-byte attachment; no `PT_STRING8` value) and one enhanced PST (57 messages, 79 attachments).
+- The pure naming rules and export planner exist (`naming.rs`, `plan.rs`), and `--dry-run` plans an export of a PST, a `.msg`, or a directory of `.msg` files and prints a content-free census. 117 tests pass.
+- No normalized model, body extraction for output, renderer, or writer exists. `--out` works only together with `--dry-run`.
+- Fixtures: 29 `.msg` files at the top of the fixture directory (27 carry HTML only inside RTF; 23 attachments carry a content ID; 1 embedded message; 1 zero-byte attachment; no `PT_STRING8` value), more `.msg` files in 3 subdirectories (which the recursive dry run includes), and one enhanced PST.
 
 ## Working rules (unchanged)
 
@@ -87,26 +90,28 @@ Gate (met on Windows):
 
 ### M4b-3 — naming census and folder-identity spike (counts only)
 
-Status: **drafted (uncompiled), awaiting the owner's first build.** New modules `src/dry_run.rs`, `src/source_msg.rs`, `src/source_pst.rs`; `src/cli.rs` gains `--out <DIR>` and `--dry-run`; `src/main.rs` dispatches to the dry run.
+Status: **built and verified on Windows (v0.1.22, 2026-10-02), with open items below.** Build clean, 117 tests passing. New modules `src/dry_run.rs`, `src/source_msg.rs`, `src/source_pst.rs`; `src/cli.rs` gains `--out <DIR>` and `--dry-run`; `src/main.rs` dispatches to the dry run. The owner also fixed `root_stem` for Windows paths. Full results: [`../verification/m4-results.md`](../verification/m4-results.md).
 
 `tsp <input> --out <dir> --dry-run` reads a PST, a `.msg` file, or a directory of `.msg` files (planned recursively, mirroring subdirectories), plans the export, and prints only counts in the stable `key=value` vocabulary: `plan_*` keys from the planner, `plan_gate_*` keys and `plan_gate_violations` from the independent re-check, `source_*` keys for what the source contained, and `folder_identity_*` keys for the spike. It writes nothing. `--out` without `--dry-run` stops with a message, because the writer arrives in M4c.
 
-Folder-identity spike, answered from the crate's source (not yet from a run): `outlook-pst` v1.2.0 exposes, for every folder, its node ID (`FolderProperties::node_id()`, unique within the PST), its display name, and a computed `PidTagEntryId` (property 0x0FFF, built from the store UID and the node ID). It exposes no separate record-key property for folders. The dry run reports how many folders yielded each.
+Folder-identity spike: `outlook-pst` v1.2.0 exposes, for every folder, its node ID (`FolderProperties::node_id()`, unique within the PST), its display name, and a computed `PidTagEntryId` (property 0x0FFF, built from the store UID and the node ID). It exposes no separate record-key property for folders. **Answered from the run:** on `tsp-tester.pst`, a node ID and an entry ID were both available for all 11 folders walked and none were unavailable (`folder_identity_nid_available=11`, `folder_identity_entry_id_available=11`, `folder_identity_unavailable=0`).
 
-Subject marker: `PidTagSubject` may begin with U+0001 followed by one more character recording the prefix length (the crate's own examples strip it). Both builders remove those two characters and count them (`source_subject_markers_stripped`).
+Subject marker: `PidTagSubject` may begin with U+0001 followed by one more character recording the prefix length (the crate's own examples strip it). Both builders remove those two characters and count them (`source_subject_markers_stripped`; 60 on the PST fixture, 0 in the `.msg` directory).
 
-Limits reported, not hidden: PST attachment names come from the attachment table, which may carry only the short (8.3) name (`source_attachment_tables_with_long_name_column` says how often a long-name column exists), and PST embedded-message attachments are planned as plain files and counted (`source_embedded_attachments_not_opened`).
+Limits reported, not hidden: PST attachment names come from the attachment table, which may carry only the short (8.3) name (`source_attachment_tables_with_long_name_column` says how often a long-name column exists; 9 on the PST fixture), and PST embedded-message attachments are planned as plain files and counted (`source_embedded_attachments_not_opened`; 3).
 
-Gate:
-- The census runs on the 29-message `.msg` directory and `tsp-tester.pst`, with `plan_gate_violations=0` and `plan_budget_exceeded=0` on both.
-- Predicted counts from the earlier diagnostics (to be confirmed): PST `plan_folders=9` (the diagnostic's 10 includes the IPM root), `plan_messages=57`, `plan_attachment_files=79`, `source_open_errors=0`; `.msg` directory `plan_messages=29`, `plan_embedded_messages=1`, `plan_attachment_files=29` (27 by-value, 1 OLE, and 1 attachment inside the embedded message), `source_open_errors=0`.
-- The counts are reviewed with the owner, and the fixtures received so far are added.
-- The folder-identity question is answered from the run (what the `folder_identity_*` keys show).
-- Output of the existing modes is unchanged (re-run `verify-split.ps1`).
+Gate, against the run:
+- **`plan_gate_violations=0` and `plan_budget_exceeded=0` on both inputs: met for the `.msg` directory; not met for the PST at the long output path used** (4 over-budget entries at a root of 152 units, longest path 266 against 259). This is the budget gate working as designed under a deliberately long `--out`; it still has to be shown at a short `--out`, which has not been run.
+- **Predicted counts: not matched.** Predicted PST `plan_folders=9`, `plan_messages=57`, `plan_attachment_files=79`; census 10 / 60 / 84. Predicted `.msg` directory 29 / 1 / 29; census 34 / 3 / 34, explained by the recursive scan including 3 subdirectories (not itemized). The PST difference is unreconciled; it needs the current PST diagnostic output.
+- The counts are reviewed with the owner, and the fixtures received so far are added: reviewed in the 2026-10-03 session; the fixture list is unchanged.
+- The folder-identity question is answered from the run (above).
+- Output of the existing modes is unchanged: met (`verify-split.ps1`: default, `--verify`, and PST outputs IDENTICAL to v0.1.19).
 
 ### M4a-2 — accept the new ADRs
 
 Using the census, accept up to five ADRs that **complete** the archive ADR: (1) export naming, collisions, and path budgets; (2) message and folder identity and provenance; (3) output posture (`--out`, `--dry-run`, consent, ownership by `folder.json`); (4) body and formatting-loss policy; (5) `metadata.json` / `folder.json` schemas and per-item status. The archive ADR gets a cross-reference in "More Information" (status and layout unchanged).
+
+Status: not started.
 
 Gate: ADRs accepted by the owner; a hand-written example archive for one corpus message (private content replaced) that follows them and passes the plan's own invariants.
 
@@ -114,9 +119,13 @@ Gate: ADRs accepted by the owner; a hand-written example archive for one corpus 
 
 `OutlookItem` and parts: provenance, properties (typed, raw bag preserved), recipients, bodies (each variant with raw bytes and detected encoding), attachments (data source and status), embedded items, named properties, diagnostics. Pure data.
 
+Status: not started.
+
 Gate: invariants tested; a table mapping each existing counter category to its model field.
 
 ### M4c — walking skeleton on synthetic input
+
+Status: **not in the repository.** The owner directed on 2026-10-03 that M4c proceed ahead of M4a-2 and M4b-4. A draft has been written but not yet built, and it is delivered outside the repository until the owner commits it. It uses a deliberately small seed of the model and **draft** `0.1-draft` schemas for `metadata.json` and `folder.json`, so that the ADRs can freeze schemas the skeleton has actually produced. This document will be updated with the build results.
 
 A thin path end to end for the simplest case: a synthetic plain-text `.msg` (built at test time, as the ANSI tests do) with no attachments through model, plan, consent, staged write, and read-back, producing `<stem>/<subject>/message.md`, `metadata.json`, and the root and folder `folder.json`.
 
@@ -178,9 +187,9 @@ Gate: run-twice byte-identical trees on the corpus (single tree-hash line); faul
 
 Known constraint P4c: attachment bytes and embedded-message content are unreachable through `outlook-pst` v1.2.0's public API. Options: (1) accept and flag: archive attachment metadata, mark bytes not extracted (recommended first); (2) go below the public API; (3) raise the gap upstream (recommended in parallel).
 
-Work: PST messages through the same body pipeline; folder hierarchy into the layout; folder identity per the spike; ANSI PST support if `outlook-pst` provides it.
+Work: PST messages through the same body pipeline; folder hierarchy into the layout; folder identity per the spike (both identifiers were available on the fixture); ANSI PST support if `outlook-pst` provides it.
 
-Gate: the diagnostic's counts reconcile with the archive (57 messages and 79 attachments accounted for as extracted or flagged); plan counters match census counters; a `libpff` or `libpst` differential is scoped even if executed later.
+Gate: the diagnostic's counts reconcile with the archive (every message and attachment accounted for as extracted or flagged; the expected totals depend on resolving the open count difference recorded in M4b-3); plan counters match census counters; a `libpff` or `libpst` differential is scoped even if executed later.
 
 ### M4j — end-to-end verification and close
 
@@ -200,7 +209,7 @@ Gate: all earlier gates re-run on the final build; every coverage-matrix row for
 
 ## Fixtures (owner is creating these separately)
 
-Results reach me as the output of your runs (`tsp <pst>`, then the census), plus a short note on how each was made; the PST files do not need to be sent. Priority is by risk removed. At least 1-3 are wanted before M4b-3.
+Results reach me as the output of your runs (`tsp <pst>`, then the census), plus a short note on how each was made; the PST files do not need to be sent. Priority is by risk removed.
 
 | Priority | Fixture | Why | How to create |
 |---|---|---|---|
@@ -226,13 +235,14 @@ Crate boundaries become worthwhile only for a concrete reason: another program e
 ## Principal risks
 
 - **Naming policy** (M4a/M4b). Naming decides re-export stability; a wrong choice forces re-exporting archives. Mitigation: pure engine, census before the ADRs are accepted, property tests.
-- **Module split without a compiler** (M4b-1). Visibility, import, and test-placement errors are likely on the first build. Mitigation: a mechanical, scripted split; an equivalence check of item bodies before delivery; the owner's compiler output drives fixes.
-- **Path budget in a directory-per-message layout.** Every message is a directory, so the 248 rule and worst-case child reservation bind tightly; long subjects plus long attachment names will be truncated often on long roots. Mitigation: budget from the real root, report truncation counts, `--max-relative-path`, guidance to export near a drive root.
+- **Path budget in a directory-per-message layout.** Every message is a directory, so the 248 rule and worst-case child reservation bind tightly; long subjects plus long attachment names will be truncated often on long roots. The PST fixture already shows entries that cannot fit at a root of 152 units (4 of 154). Mitigation: budget from the real root, report truncation counts, `--max-relative-path`, guidance to export near a drive root; decide what an export does with over-budget entries (M4c refuses to export a plan that breaks a gate).
 - **Bodies** (M4e). De-encapsulation and HTML-to-Markdown quality on Word HTML; partly subjective. Mitigation: bake-off, content-preservation check, verbatim body kept.
 - **PST attachments** (M4i). Blocked by the public API.
-- **Folder identity.** The NID-derived identifier may not be exposed by `outlook-pst`; the fallback ordering is deterministic but weaker.
+- **PST counts unreconciled.** The planner and the earlier PST diagnostic disagree on the fixture's size (see M4b-3); until resolved, the M4i reconciliation gate has no trusted baseline.
+- **Folder identity.** Both identifiers were readable on the fixture; the NID-derived identifier is still unproven across other producers. The fallback ordering is deterministic but weaker.
 - **Content-hash definition** (Q11) now affects only the `identical_to` metadata, not any name, so a poor first definition is cheap to correct.
-- **Very large duplicate groups.** Thousands of same-subject messages in one folder widen their suffix and rename the group once when it crosses 99 or 999 members. Mitigation: per-group width, census counts of large groups.
+- **Very large duplicate groups.** Thousands of same-subject messages in one folder widen their suffix and rename the group once when it crosses 99 or 999 members. Mitigation: per-group width, census counts of large groups (the fixture's largest group is 16).
+- **Schemas frozen too early or too late.** M4c produces draft schemas ahead of the ADRs on purpose; the risk is treating them as final. They carry `schema_version` `0.1-draft`.
 - **Uninformative file names.** Every message is called `message.md`, so search results and editor tabs show the folder only as context. Accepted with the ADR; `message.md` can open with a title line (body-policy ADR).
 - **Single-producer corpus.** Addressed by the fixture table.
 - **Windows-only behavior** is verifiable only on Windows; CI covers unit tests on Linux and Windows.
@@ -240,6 +250,6 @@ Crate boundaries become worthwhile only for a concrete reason: another program e
 
 ## Decisions still needed from the owner
 
-1. Fixtures 1-3 before M4b-3 (the owner is creating them).
-2. Q11, the content-hash definition, before M4g (not before).
-3. First build of the M4b-1 module split, with compiler output for any errors.
+1. The current PST diagnostic output (`tsp tsp-tester.pst`) to reconcile the PST counts, and one dry run with a short `--out` to show the budget gate at 0.
+2. Whether M4c's draft schemas and overwrite rules are acceptable as written once built; the ADRs (M4a-2) follow.
+3. Q11, the content-hash definition, before M4g (not before).
