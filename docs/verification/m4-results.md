@@ -25,7 +25,7 @@ Build clean, 66 tests passing. Output byte-identical to the previous build.
 
 ### The census
 
-Run with a deliberately very long `--out` (a dummy path of about 130 units) so that the budget gates are exercised.
+Run with a deliberately very long `--out` (an absolute output path of 141 units, so the roots were 146 and 152) so that the budget gates are exercised.
 
 | Key | `.msg` directory (recursive) | `tsp-tester.pst` |
 |---|---|---|
@@ -70,7 +70,7 @@ All other keys (`source_open_errors`, `source_non_mail_items`, `source_associate
 
 The M4b-3 plan predicted, from earlier diagnostics, 9 planned folders, 57 messages, and 79 attachments for the PST, and 29 messages, 1 embedded message, and 29 attachments for the `.msg` directory. The census reports 10 / 60 / 84 and 34 / 3 / 34.
 
-- For the `.msg` directory the difference is explained by scope: the earlier counts covered the 29 top-level files, while the dry run plans recursively and mirrors 3 subdirectories. The split of the extra 5 messages and 2 embedded messages across those subdirectories has not been checked.
+- For the `.msg` directory the likely explanation is scope: the earlier counts covered the 29 top-level files, while the dry run plans recursively and mirrors 3 subdirectories. The split of the extra 5 messages and 2 embedded messages across those subdirectories has not been checked.
 - For the PST there is **no confirmed explanation**: +1 folder, +3 messages, +5 attachment files. Either the fixture changed after the earlier diagnostic, or the planner walks something the diagnostic does not. The current PST diagnostic output (`tsp tsp-tester.pst`) is needed to settle it, and the PST export stage (M4i) is gated on the archive reconciling with the diagnostic.
 
 ### Status
