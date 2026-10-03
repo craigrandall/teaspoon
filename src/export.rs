@@ -21,8 +21,9 @@ use sha2::{Digest, Sha256};
 
 use crate::archive::{
     adjustment_names, message_metadata, render_message_md, to_json, ChildRecord, FolderMetadata,
-    NameRecord, RootCounts, RootRecord, RootSpec, SourceRecord, FOLDER_JSON_NAME, KIND_ARCHIVE_ROOT,
-    MESSAGE_MD_NAME, METADATA_JSON_NAME, STATUS_COMPLETE, STATUS_INCOMPLETE, TOOL_NAME,
+    NameRecord, RootCounts, RootRecord, RootSpec, SourceRecord, FOLDER_JSON_NAME,
+    KIND_ARCHIVE_ROOT, MESSAGE_MD_NAME, METADATA_JSON_NAME, STATUS_COMPLETE, STATUS_INCOMPLETE,
+    TOOL_NAME,
 };
 use crate::dry_run::{classify_source, input_leaf_name, root_stem, root_units, SourceKind};
 use crate::model::PlainBody;
@@ -344,7 +345,11 @@ fn source_record(input: &Path, files: &MsgFileMap, hash: bool) -> Result<SourceR
         kind: "msg_directory",
         name,
         size_bytes: total,
-        sha256: if hash { Some(hex(listing.finalize())) } else { None },
+        sha256: if hash {
+            Some(hex(listing.finalize()))
+        } else {
+            None
+        },
         sha256_scope: "listing_of_exported_msg_files",
     })
 }
@@ -647,7 +652,8 @@ fn prepare_staging(staging: &Path) -> Result<()> {
             for entry in entries.filter_map(|e| e.ok()) {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
-                let leftover = is_file && !name.is_empty() && name.chars().all(|c| c.is_ascii_digit());
+                let leftover =
+                    is_file && !name.is_empty() && name.chars().all(|c| c.is_ascii_digit());
                 if !leftover {
                     bail!("the staging directory .tsp-tmp already holds entries this tool did not create; remove it and retry");
                 }
@@ -954,7 +960,10 @@ mod tests {
     /// Every file under `root` as (relative path with `/`, bytes), sorted.
     fn tree_files(root: &Path) -> BTreeMap<String, Vec<u8>> {
         fn walk(dir: &Path, prefix: &str, into: &mut BTreeMap<String, Vec<u8>>) {
-            for entry in std::fs::read_dir(dir).expect("read dir").filter_map(|e| e.ok()) {
+            for entry in std::fs::read_dir(dir)
+                .expect("read dir")
+                .filter_map(|e| e.ok())
+            {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let rel = if prefix.is_empty() {
                     name
@@ -979,7 +988,12 @@ mod tests {
 
     fn hello(dir: &Path) -> PathBuf {
         let file = dir.join("m.msg");
-        write_msg(&file, "Hello World", Some("Line one\r\nLine two\r\n"), false);
+        write_msg(
+            &file,
+            "Hello World",
+            Some("Line one\r\nLine two\r\n"),
+            false,
+        );
         file
     }
 
@@ -991,7 +1005,10 @@ mod tests {
         let input = hello(&dir);
         let out = dir.join("out");
 
-        assert_eq!(export(&input, &out, &opts(false, false)), ExportStatus::Completed);
+        assert_eq!(
+            export(&input, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
 
         let files = tree_files(&out);
         let names: Vec<&str> = files.keys().map(String::as_str).collect();
@@ -1011,7 +1028,10 @@ mod tests {
             lf(&String::from_utf8(files["m/Hello World/metadata.json"].clone()).unwrap()),
             lf(include_str!("../tests/golden/hello/metadata.json"))
         );
-        assert!(!out.join(STAGING_DIR).exists(), "staging directory is removed");
+        assert!(
+            !out.join(STAGING_DIR).exists(),
+            "staging directory is removed"
+        );
 
         let root: serde_json::Value =
             serde_json::from_slice(&files["m/folder.json"]).expect("root is JSON");
@@ -1033,8 +1053,14 @@ mod tests {
         let input = hello(&dir);
         let out_a = dir.join("a");
         let out_b = dir.join("b");
-        assert_eq!(export(&input, &out_a, &opts(false, false)), ExportStatus::Completed);
-        assert_eq!(export(&input, &out_b, &opts(false, false)), ExportStatus::Completed);
+        assert_eq!(
+            export(&input, &out_a, &opts(false, false)),
+            ExportStatus::Completed
+        );
+        assert_eq!(
+            export(&input, &out_b, &opts(false, false)),
+            ExportStatus::Completed
+        );
         assert_eq!(tree_files(&out_a), tree_files(&out_b));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1047,7 +1073,10 @@ mod tests {
         export(&input, &out, &opts(false, false));
         let before = tree_files(&out);
         // Not interactive, no --overwrite: still fine, because nothing would change.
-        assert_eq!(export(&input, &out, &opts(false, false)), ExportStatus::Completed);
+        assert_eq!(
+            export(&input, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
         assert_eq!(tree_files(&out), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1059,10 +1088,18 @@ mod tests {
         std::fs::create_dir_all(src.join("Projects")).unwrap();
         write_msg(&src.join("a.msg"), "Status", Some("one"), false);
         write_msg(&src.join("b.msg"), "Status", Some("two"), false);
-        write_msg(&src.join("Projects").join("c.msg"), "Status", Some("three"), false);
+        write_msg(
+            &src.join("Projects").join("c.msg"),
+            "Status",
+            Some("three"),
+            false,
+        );
         let out = dir.join("out");
 
-        assert_eq!(export(&src, &out, &opts(false, false)), ExportStatus::Completed);
+        assert_eq!(
+            export(&src, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
         let files = tree_files(&out);
         for expected in [
             "mail/folder.json",
@@ -1089,7 +1126,10 @@ mod tests {
         write_msg(&src.join("a.msg"), "Hi", Some("x"), false);
         let with_slash = PathBuf::from(format!("{}{}", src.display(), std::path::MAIN_SEPARATOR));
         let out = dir.join("out");
-        assert_eq!(export(&with_slash, &out, &opts(false, false)), ExportStatus::Completed);
+        assert_eq!(
+            export(&with_slash, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
         assert!(out.join("mail").join("Hi").join("message.md").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1100,7 +1140,10 @@ mod tests {
         let file = dir.join("s.msg");
         write_msg(&file, "Re: a/b?", Some("x"), false);
         let out = dir.join("out");
-        assert_eq!(export(&file, &out, &opts(false, false)), ExportStatus::Completed);
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
 
         let files = tree_files(&out);
         let meta_key = files
@@ -1112,7 +1155,10 @@ mod tests {
         let meta: serde_json::Value = serde_json::from_slice(&files[&meta_key]).unwrap();
         assert_eq!(meta["directory"]["original"], "Re: a/b?");
         assert_eq!(meta["subject"], "Re: a/b?");
-        assert!(!meta["directory"]["adjustments"].as_array().unwrap().is_empty());
+        assert!(!meta["directory"]["adjustments"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1122,10 +1168,16 @@ mod tests {
         let file = dir.join("a.msg");
         write_msg(&file, "With file", Some("see attached"), true);
         let out = dir.join("out");
-        assert_eq!(export(&file, &out, &opts(false, false)), ExportStatus::Completed);
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
 
         let files = tree_files(&out);
-        assert!(!files.keys().any(|k| k.contains("attachments")), "M4c writes no attachments");
+        assert!(
+            !files.keys().any(|k| k.contains("attachments")),
+            "M4c writes no attachments"
+        );
         let meta: serde_json::Value =
             serde_json::from_slice(&files["a/With file/metadata.json"]).unwrap();
         assert_eq!(meta["attachments_not_extracted"], 1);
@@ -1148,7 +1200,10 @@ mod tests {
         let file = dir.join("n.msg");
         write_msg(&file, "Empty one", None, false);
         let out = dir.join("out");
-        assert_eq!(export(&file, &out, &opts(false, false)), ExportStatus::Completed);
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
         let files = tree_files(&out);
         assert_eq!(
             lf(&String::from_utf8(files["n/Empty one/message.md"].clone()).unwrap()),
@@ -1173,7 +1228,10 @@ mod tests {
 
         // Not interactive, no --overwrite: refused, file untouched.
         std::fs::write(&target, b"edited by hand").unwrap();
-        assert_eq!(export(&input, &out, &opts(false, false)), ExportStatus::Refused);
+        assert_eq!(
+            export(&input, &out, &opts(false, false)),
+            ExportStatus::Refused
+        );
         assert_eq!(std::fs::read(&target).unwrap(), b"edited by hand");
 
         // Interactive and the user says no: refused, file untouched.
@@ -1195,7 +1253,10 @@ mod tests {
 
         // --overwrite: replaced without asking.
         std::fs::write(&target, b"edited again").unwrap();
-        assert_eq!(export(&input, &out, &opts(true, false)), ExportStatus::Completed);
+        assert_eq!(
+            export(&input, &out, &opts(true, false)),
+            ExportStatus::Completed
+        );
         assert_eq!(std::fs::read(&target).unwrap(), good);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1207,10 +1268,20 @@ mod tests {
         let out = dir.join("out");
         export(&input, &out, &opts(false, false));
         std::fs::write(out.join("m").join("notes.txt"), b"mine").unwrap();
-        std::fs::write(out.join("m").join("Hello World").join("extra.txt"), b"also mine").unwrap();
+        std::fs::write(
+            out.join("m").join("Hello World").join("extra.txt"),
+            b"also mine",
+        )
+        .unwrap();
 
-        assert_eq!(export(&input, &out, &opts(false, false)), ExportStatus::Completed);
-        assert_eq!(std::fs::read(out.join("m").join("notes.txt")).unwrap(), b"mine");
+        assert_eq!(
+            export(&input, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+        assert_eq!(
+            std::fs::read(out.join("m").join("notes.txt")).unwrap(),
+            b"mine"
+        );
         assert_eq!(
             std::fs::read(out.join("m").join("Hello World").join("extra.txt")).unwrap(),
             b"also mine"
@@ -1227,9 +1298,15 @@ mod tests {
         std::fs::write(out.join("m").join("keep.txt"), b"not yours").unwrap();
 
         // Even with --overwrite.
-        assert_eq!(export(&input, &out, &opts(true, false)), ExportStatus::Refused);
+        assert_eq!(
+            export(&input, &out, &opts(true, false)),
+            ExportStatus::Refused
+        );
         assert_eq!(tree_files(&out).len(), 1);
-        assert_eq!(std::fs::read(out.join("m").join("keep.txt")).unwrap(), b"not yours");
+        assert_eq!(
+            std::fs::read(out.join("m").join("keep.txt")).unwrap(),
+            b"not yours"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1239,8 +1316,15 @@ mod tests {
         let input = hello(&dir);
         let out = dir.join("out");
         std::fs::create_dir_all(out.join("m")).unwrap();
-        assert_eq!(export(&input, &out, &opts(false, false)), ExportStatus::Completed);
-        assert!(out.join("m").join("Hello World").join("message.md").exists());
+        assert_eq!(
+            export(&input, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+        assert!(out
+            .join("m")
+            .join("Hello World")
+            .join("message.md")
+            .exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1256,7 +1340,10 @@ mod tests {
         let other = dir.join("other").join("m");
         std::fs::create_dir_all(&other).unwrap();
         write_msg(&other.join("x.msg"), "Different", Some("y"), false);
-        assert_eq!(export(&other, &out, &opts(true, false)), ExportStatus::Refused);
+        assert_eq!(
+            export(&other, &out, &opts(true, false)),
+            ExportStatus::Refused
+        );
         assert_eq!(tree_files(&out), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1272,7 +1359,10 @@ mod tests {
         let pad = 236usize.saturating_sub(base + 1);
         assert!(pad > 0, "the temp directory path is too long for this test");
         let out = dir.join("o".repeat(pad));
-        assert_eq!(export(&input, &out, &opts(false, false)), ExportStatus::Refused);
+        assert_eq!(
+            export(&input, &out, &opts(false, false)),
+            ExportStatus::Refused
+        );
         assert!(!out.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1293,13 +1383,20 @@ mod tests {
         let out = dir.join("out");
         std::fs::create_dir_all(out.join(STAGING_DIR)).unwrap();
         std::fs::write(out.join(STAGING_DIR).join("7"), b"stale").unwrap();
-        assert_eq!(export(&input, &out, &opts(false, false)), ExportStatus::Completed);
+        assert_eq!(
+            export(&input, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
         assert!(!out.join(STAGING_DIR).exists());
 
         // Anything else in the staging directory is not ours: stop.
         std::fs::create_dir_all(out.join(STAGING_DIR)).unwrap();
         std::fs::write(out.join(STAGING_DIR).join("mine.txt"), b"x").unwrap();
-        std::fs::write(out.join("m").join("Hello World").join("message.md"), b"changed").unwrap();
+        std::fs::write(
+            out.join("m").join("Hello World").join("message.md"),
+            b"changed",
+        )
+        .unwrap();
         assert!(run_export(&input, &out, &opts(true, false), &mut never_asked).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1307,8 +1404,13 @@ mod tests {
     #[test]
     fn exporting_a_pst_is_not_implemented_yet() {
         let out = std::env::temp_dir().join("tsp-exp-never-created");
-        let err = run_export(Path::new("x.pst"), &out, &opts(false, false), &mut never_asked)
-            .unwrap_err();
+        let err = run_export(
+            Path::new("x.pst"),
+            &out,
+            &opts(false, false),
+            &mut never_asked,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("not implemented"));
     }
 
@@ -1397,9 +1499,15 @@ mod tests {
                 .is_err()
         );
         assert!(Args::try_parse_from(["tsp", "x.msg", "--out", "o", "--verify"]).is_err());
-        let args =
-            Args::try_parse_from(["tsp", "x.msg", "--out", "o", "--overwrite", "--no-source-hash"])
-                .unwrap();
+        let args = Args::try_parse_from([
+            "tsp",
+            "x.msg",
+            "--out",
+            "o",
+            "--overwrite",
+            "--no-source-hash",
+        ])
+        .unwrap();
         assert!(args.overwrite && args.no_source_hash && !args.dry_run);
     }
 }
