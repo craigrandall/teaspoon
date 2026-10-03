@@ -1,8 +1,8 @@
-# M4a draft — export naming, layout, and overwrite rules (v3.3)
+# M4a draft — export naming, layout, and overwrite rules (v3.4)
 
-Status: **proposed draft. The naming, path-budget, and uniqueness rules (sections 4-6, N/L/U) are implemented as pure code (`naming.rs`, `plan.rs`; M4b-2, verified by unit and property tests) and exercised by the `--dry-run` census (M4b-3, v0.1.22; results in [`../verification/m4-results.md`](../verification/m4-results.md)). The layout, consent, metadata, and lifecycle rules (sections 2, 3, 8) are not implemented yet.** This is the working specification for the naming, identity, and overwrite decisions the M4 plan calls M4a. It completes what the accepted ADR [Deterministic Markdown archive](../../ADRs/deterministic-markdown-archive.md) explicitly left open (message identity, filename sanitization, collision handling, attachment relationships). **It does not change that ADR's layout**: one folder per message containing `message.md`, `metadata.json`, and an `attachments/` subfolder. Every "verify" tag marks a claim taken from documentation or memory that has not been checked against this project's fixtures or Windows. The rules are not yet accepted as ADRs (M4a-2).
+Status: **proposed draft. The naming, path-budget, and uniqueness rules (sections 4-6, N/L/U) are implemented as pure code (`naming.rs`, `plan.rs`; M4b-2, verified by unit and property tests) and exercised by the `--dry-run` census (M4b-3, v0.1.22). The consent, staging, and write rules of sections 2 and 8 and a first version of the layout and metadata files (sections 3, 3.2) are implemented for `.msg` input in M4c (v0.1.23, tag v0.1.23.1; synthetic tests pass, no real-corpus export run yet). Results: [`../verification/m4-results.md`](../verification/m4-results.md). The full metadata schemas, attachments, PST export, `--long-paths`, and `--max-relative-path` are not implemented.** This is the working specification for the naming, identity, and overwrite decisions the M4 plan calls M4a. It completes what the accepted ADR [Deterministic Markdown archive](../../ADRs/deterministic-markdown-archive.md) explicitly left open (message identity, filename sanitization, collision handling, attachment relationships). **It does not change that ADR's layout**: one folder per message containing `message.md`, `metadata.json`, and an `attachments/` subfolder. Every "verify" tag marks a claim taken from documentation or memory that has not been checked against this project's fixtures or Windows. The rules are not yet accepted as ADRs (M4a-2).
 
-Revision history: v1 (2026-09-30) proposed a different layout (`<subject>.md` plus `<subject> - attachments/`). The project owner decided to keep the accepted ADR's layout, so v2 adapted every rule to it and withdrew the ` - attachments` folder requirement (`attachments/` is a literal name). v3.3 (2026-10-03) records the status of implementation and the census results; no rule changed. v3.2 (2026-10-02) adds the subject-prefix marker to N1 and records what the crate source shows about folder identity and attachment names (M4b-3). v3.1 (2026-10-01) aligned the rules with the first implementation (M4b-2): U+2028/2029 become spaces, folders sort before messages in a shared namespace, and rule N6 is implemented. v3 (2026-09-30) records the owner's decisions on Q7-Q11: one uniform zero-padded ` (nn)` duplicate suffix (no ` - Copy`), export roots for non-PST inputs including mirrored subdirectories, SHA-256 of the source recorded by default, and content identity moved out of names into metadata.
+Revision history: v1 (2026-09-30) proposed a different layout (`<subject>.md` plus `<subject> - attachments/`). The project owner decided to keep the accepted ADR's layout, so v2 adapted every rule to it and withdrew the ` - attachments` folder requirement (`attachments/` is a literal name). v3.4 (2026-10-03) records what M4c implemented and where it chose differently from the draft text (marked "as built" below). v3.3 (2026-10-03) recorded the status of implementation and the census results; no rule changed. v3.2 (2026-10-02) adds the subject-prefix marker to N1 and records what the crate source shows about folder identity and attachment names (M4b-3). v3.1 (2026-10-01) aligned the rules with the first implementation (M4b-2): U+2028/2029 become spaces, folders sort before messages in a shared namespace, and rule N6 is implemented. v3 (2026-09-30) records the owner's decisions on Q7-Q11: one uniform zero-padded ` (nn)` duplicate suffix (no ` - Copy`), export roots for non-PST inputs including mirrored subdirectories, SHA-256 of the source recorded by default, and content identity moved out of names into metadata.
 
 Sources: the owner's requirements and decisions (2026-09-30); the external research "Support for linting a PST, anticipating a Windows filesystem for message export" (2026-09-29; *the research*); Microsoft's Win32 naming documentation and MS-PST; the existing ADRs.
 
@@ -26,23 +26,25 @@ Sources: the owner's requirements and decisions (2026-09-30); the external resea
 
 ```text
 tsp <input>                          # unchanged: content-free diagnostic
-tsp <input> --out <dir>              # export
+tsp <input> --out <dir>              # export                                              (implemented for .msg input, M4c)
 tsp <input> --out <dir> --dry-run    # project the export, report counts, write nothing   (implemented, v0.1.22)
-tsp <input> --out <dir> --overwrite  # non-interactive consent to replace files this tool would generate
-tsp <input> --out <dir> --no-source-hash   # skip the SHA-256 of the source file
-tsp <input> --out <dir> --long-paths       # opt in to paths beyond 259 units
-tsp <input> --out <dir> --max-relative-path N   # cap relative paths for archives that will move
+tsp <input> --out <dir> --overwrite  # non-interactive consent to replace files this tool would generate   (implemented, M4c)
+tsp <input> --out <dir> --no-source-hash   # skip the SHA-256 of the source file           (implemented, M4c)
+tsp <input> --out <dir> --long-paths       # opt in to paths beyond 259 units              (not implemented)
+tsp <input> --out <dir> --max-relative-path N   # cap relative paths for archives that will move   (not implemented)
 ```
 
-Only `--out` with `--dry-run` exists today.
+Exit codes (as built): 0 completed, 2 refused with nothing written, 1 an error.
 
-Consent behavior (requirement 6):
+Consent behavior (requirement 6, as built in M4c):
 
-- Preflight compares the plan with what is already under `<dir>/<stem>/` and reports **counts only**: items that would be created, items that already match, items that would be replaced, and entries present that this export would not touch.
-- Interactive terminal: print the counts and ask `Continue? [y/N]`; anything but an explicit yes exits with code 2 and writes nothing.
+- Preflight compares the plan with what is already under `<dir>/<stem>/` and reports **counts only**: files that would be created, files that already match, files that would be replaced, planned paths that something else occupies (`blocked`), and entries present that this export would not touch.
+- No consent is needed when nothing would be replaced, including a repeat of an unchanged export (which writes nothing).
+- Interactive terminal and files to replace: print the counts on standard error and ask `Continue? [y/N]`; anything but an explicit yes exits with code 2 and writes nothing.
 - Not interactive (stdin is not a terminal): treated as "no" unless `--overwrite` was given.
 - `tsp` only replaces files that its own plan generates. It never deletes entries it did not create. Deleting stale generated entries would be a separate `--clean` with its own consent; propose deferring it.
-- Ownership is recognized by `folder.json` (section 3.2). If the target stem directory exists but its root `folder.json` records a different source, preflight reports `target_source_mismatch` and treats it as a stronger warning.
+- Ownership is recognized by the root `folder.json` (section 3.2). **As built:** a target directory that exists, is not empty, and has no root `folder.json` written by `tsp` is refused, even with `--overwrite`; a root `folder.json` for a different source (different kind or name) is refused, even with `--overwrite` (the draft text called this "a stronger warning"). Source identity is kind plus name; the source hash is not compared, so re-exporting a changed source is allowed with consent.
+- A plan that breaks a gate (collisions, an over-budget path, invalid names) is refused before any preflight, with nothing written.
 - Writes go to a staging area and are moved into place (section 8).
 
 ## 3. Layout
@@ -68,6 +70,8 @@ Consent behavior (requirement 6):
       folder.json
 ```
 
+(As built in M4c, for `.msg` input: everything above except `attachments/`, which is never created yet.)
+
 ### 3.1 What maps to what
 
 | PST | Filesystem |
@@ -79,16 +83,16 @@ Consent behavior (requirement 6):
 | Embedded message | A message directory (with its own `message.md`, `metadata.json`, `attachments/`) inside the parent's `attachments/`; depth-capped (section 7) |
 | Identity and provenance | `metadata.json` (messages) and `folder.json` (folders) |
 
-Inputs other than a PST (decision Q9): a directory of `.msg` files exports to `<out>/<directory name>/`, **mirroring its subdirectories as folders** (each with a `folder.json`) with one message directory per `.msg` file; a single `.msg` exports to `<out>/<msg file stem>/` containing one message directory. The name of the source file goes into provenance, never into the message directory name. Mirroring subdirectories applies to export only: the diagnostic's non-recursive scan (which reports `subdirectories_skipped`) is unchanged, and the export plan reports how many subdirectories it mirrored (`source_subdirectories_mirrored`; implemented in the dry run).
+Inputs other than a PST (decision Q9): a directory of `.msg` files exports to `<out>/<directory name>/`, **mirroring its subdirectories as folders** (each with a `folder.json`) with one message directory per `.msg` file; a single `.msg` exports to `<out>/<msg file stem>/` containing one message directory. The name of the source file goes into provenance, never into the message directory name. Mirroring subdirectories applies to export only: the diagnostic's non-recursive scan (which reports `subdirectories_skipped`) is unchanged, and the export plan reports how many subdirectories it mirrored (`source_subdirectories_mirrored`; implemented). A trailing path separator on the input does not change the name (`C:\mail\msgs\` and `C:\mail\msgs` both give `msgs`).
 
 ### 3.2 Metadata files
 
-- **`metadata.json`** (message): as in the accepted ADR, it carries whatever the normalized model captured, including properties Markdown cannot render, extraction diagnostics, recipients, attachment records (including `inline: true/false`, content hash, status), provenance, the message's identity, its content SHA-256, and `identical_to` (identities of earlier messages with the same content hash).
-- **`folder.json`** (folder): original display name and original path, the folder's identifier (section 9), applied renames and truncations (with reasons), counts, and an index of child entries (kind, directory name, identity, and for messages the content SHA-256). The index supports overwrite preflight and read-back verification without scanning file contents.
-- **Root `folder.json`**: additionally the source (file name, size, and its SHA-256 unless `--no-source-hash` was given), tool version, schema version, the path budget used (and `--long-paths` or `--max-relative-path` if set), the longest relative path, and archive-wide summary counts.
-- Schemas are versioned, ordered, and free of absolute paths and export-time values so two exports of the same input are byte-identical.
+- **`metadata.json`** (message): as in the accepted ADR, it carries whatever the normalized model captured, including properties Markdown cannot render, extraction diagnostics, recipients, attachment records (including `inline: true/false`, content hash, status), provenance, the message's identity, its content SHA-256, and `identical_to` (identities of earlier messages with the same content hash). **As built (draft `0.1-draft`):** `schema_version`, `kind`, `source_file` (the `.msg` file's name or its `/`-separated path relative to the input directory, never absolute), `subject`, `internet_message_id`, `time_filetime`, `directory` (the original name and the adjustments the naming rules made, as snake_case labels), `body` (plain text `present`/`empty`/`absent`, how it is written, and whether native HTML, HTML-in-RTF, and RTF forms exist), `attachments_not_extracted`, `status` (always `partial` in M4c), and `status_reasons`. The remaining fields above arrive with M4d-M4g.
+- **`folder.json`** (folder): original display name and original path, the folder's identifier (section 9), applied renames and truncations (with reasons), counts, and an index of child entries (kind, directory name, identity, and for messages the content SHA-256). The index supports overwrite preflight and read-back verification without scanning file contents. **As built:** `schema_version`, `kind`, `directory` (original name and adjustments), and `children` (kind and directory name only). Identity, counts, and hashes arrive with M4g.
+- **Root `folder.json`**: additionally the source (file name, size, and its SHA-256 unless `--no-source-hash` was given), tool version, schema version, the path budget used (and `--long-paths` or `--max-relative-path` if set), the longest relative path, and archive-wide summary counts. **As built:** `kind` is `archive_root`, and a `root` object holds `tool` (`teaspoon`), `tool_version`, `status` (`incomplete` while an export runs and after an interrupted one, `complete` after), `source` (`kind` `msg_file` or `msg_directory`, `name`, `size_bytes`, `sha256`, and its scope: the file, or for a directory the hash of the sorted `<relative path>\t<file hash>` lines), `max_path_units_allowed`, `planned_longest_relative_path_units`, and `counts`.
+- Schemas are versioned, ordered, and free of absolute paths and export-time values so two exports of the same input are byte-identical. M4c's schemas are marked `0.1-draft` and are frozen only by the M4a-2 ADRs.
 
-**Reserved names.** `folder.json` is reserved in every folder directory, and the staging name `.tsp-tmp` is reserved directly under `<out>`. A child directory whose collision key equals a reserved key is renamed by the uniqueness rules (N9). Message directories contain only the three fixed names, so no subject-derived name can collide there. (In the code today, `folder.json` is reserved by the planner; `.tsp-tmp` is not, because nothing stages files yet.)
+**Reserved names.** `folder.json` is reserved in every folder directory, and the staging name `.tsp-tmp` is reserved directly under `<out>`. A child directory whose collision key equals a reserved key is renamed by the uniqueness rules (N9). Message directories contain only the three fixed names, so no subject-derived name can collide there. (In the code today, `folder.json` is reserved by the planner. `.tsp-tmp` is not reserved by the planner: it lives beside the archive root, not inside it, and the only way it could clash is an input whose sanitized name is exactly `.tsp-tmp`, which is untested.)
 
 **Why metadata alongside, and not in a hidden store or one root manifest** (a question the owner delegated): (1) the ADR's stated benefit is that each message "can be inspected, diffed, or moved as a unit", and a separate store or a single manifest breaks that; (2) a hidden directory is dropped by some copy tools and is one more tool-owned name to protect; (3) a single root manifest is a single point of failure and grows with the archive. The cost is one small file per folder, which is negligible next to the two or three files per message.
 
@@ -147,7 +151,7 @@ Because this layout makes **every message a directory**, the 248 rule is the bin
 
 So `D <= 245` for `metadata.json`, and `D + 13 + A <= 259` when the message has attachments. Attachment names are first limited to 100 units including extension (stem floor 16), then message directory names are shortened. The stem for the PST root directory and staging names also count.
 
-**L4. Truncation order.** When the projected path exceeds the budget: (1) shorten attachment stems to at most 100, then as needed to a floor of 16; (2) shorten message directory names, longest first, to a floor of 24; (3) shorten folder names, deepest first, to a floor of 16; (4) flatten: join an over-budget chain of folders into one directory name `Parent - Child - Grandchild` and record the original path in each `folder.json` (research option 4); (5) last resort: `msg-<8 hex of the identity hash>` for the message directory, flagged. Every step is deterministic; the budget and each decision are recorded in the metadata. **Implemented: steps 1-3. Not implemented: steps 4 and 5.** When the floors are not enough, the planner counts the entry as over budget (`plan_budget_exceeded`) instead of flattening; the PST fixture shows 4 such entries at a root of 152 units.
+**L4. Truncation order.** When the projected path exceeds the budget: (1) shorten attachment stems to at most 100, then as needed to a floor of 16; (2) shorten message directory names, longest first, to a floor of 24; (3) shorten folder names, deepest first, to a floor of 16; (4) flatten: join an over-budget chain of folders into one directory name `Parent - Child - Grandchild` and record the original path in each `folder.json` (research option 4); (5) last resort: `msg-<8 hex of the identity hash>` for the message directory, flagged. Every step is deterministic; the budget and each decision are recorded in the metadata. **Implemented: steps 1-3. Not implemented: steps 4 and 5.** When the floors are not enough, the planner counts the entry as over budget (`plan_budget_exceeded`) instead of flattening; the PST fixture shows 4 such entries at a root of 152 units, and an export refuses such a plan (section 2).
 
 **L5. How to shorten.** Cut at a code point boundary that is not inside a surrogate pair or combining sequence, never inside a grapheme cluster, then append `…` (U+2026, one unit).
 
@@ -180,7 +184,7 @@ A directory is one namespace on Windows: a file and a directory cannot share a n
 
 **U8. Reserved keys.** `folder.json` and, under `<out>`, `.tsp-tmp` take part in U1.
 
-**U9. Final check.** After planning, rebuild every namespace's collision keys and assert there are no duplicates. A violation is a bug, and the export refuses to start. (Implemented as `verify_plan`; the census reports `plan_gate_collisions`, 0 on both fixtures, which include 3 collision groups on the PST.)
+**U9. Final check.** After planning, rebuild every namespace's collision keys and assert there are no duplicates. A violation is a bug, and the export refuses to start. (Implemented as `verify_plan`; the census reports `plan_gate_collisions`, 0 on both fixtures, which include 3 collision groups on the PST. An export refuses a plan with any gate violation.)
 
 **Stability.** Re-exporting an unchanged PST gives the same names. If messages are added, later positions in a group can shift, and a group that crosses 99 or 999 members is renamed once; the stable identity in `metadata.json` is what lets a later tool match directories to messages.
 
@@ -190,19 +194,19 @@ The accepted layout has none of the problems of a `<subject> - attachments` sibl
 
 1. **The attachment path is the longest path** (L3). A subject that fits as a message directory may not leave room for a long attachment name, so the reservation is computed from the longest attachment actually present.
 2. **Embedded messages recurse.** A forwarded chain repeats `<subject>\attachments\` at every level. Proposal: a depth cap (default 3); beyond it, the embedded message is written, flagged, into the deepest legal level as a flat directory named `Embedded - <subject>`, and the flag records the original nesting. Also stop cycles (corrupt files).
-3. **Created only when needed.** `attachments/` is created only if at least one file or embedded message directory is written. An attachment that cannot be extracted (PST attachment bytes, OLE objects) still appears in `metadata.json` with its status and reason.
+3. **Created only when needed.** `attachments/` is created only if at least one file or embedded message directory is written. An attachment that cannot be extracted (PST attachment bytes, OLE objects) still appears in `metadata.json` with its status and reason. (M4c writes no attachments; it counts them and records `attachments_not_extracted`.)
 4. **Inline attachments (decision Q6).** Signature logos and pasted pictures stay in `attachments/` and carry `inline: true` in `metadata.json`; the corpus has 23 content-ID attachments among 29, so many messages will have an `attachments/` holding only `image001.png`. Keeping them is the faithful choice, and the flag lets a reader or tool filter them.
 5. **Attachment name hygiene** applies (N4, N6, N8, N10). Executable attachments may be quarantined by antivirus.
 
 ## 8. Export lifecycle
 
 1. **Plan (pure).** Walk the source; apply N, L, and U rules; produce every directory and file with final names, lengths, and flags. No I/O. The same code serves `--dry-run`. (Implemented.)
-2. **Gate.** Check plan invariants (U9, budgets) and print counts-only findings in the `--verify` style, under keys such as `plan_names_sanitized`, `plan_names_truncated`, `plan_collision_groups`, `plan_max_path_units`, `plan_budget_exceeded`, `plan_gate_violations`. (Implemented in `--dry-run`.)
-3. **Preflight against the target** and consent (section 2). (Not implemented.)
-4. **Write** into a staging directory `<out>/.tsp-tmp/` (short fixed name so staging paths never exceed final paths) and move into place. Same-volume rename is cheap; replacing an existing file needs the Windows replace-on-rename behavior (verify what `std::fs::rename` does on Windows when the target exists). (Not implemented.)
-5. **Verify** by reading back and comparing with the plan; remove `.tsp-tmp`. (Not implemented.)
+2. **Gate.** Check plan invariants (U9, budgets) and print counts-only findings in the `--verify` style, under keys such as `plan_names_sanitized`, `plan_names_truncated`, `plan_collision_groups`, `plan_max_path_units`, `plan_budget_exceeded`, `plan_gate_violations`. (Implemented in `--dry-run`; an export stops here if a gate is violated.)
+3. **Preflight against the target** and consent (section 2). (Implemented in M4c. The whole archive is rendered in memory first so existing files can be compared with what would be written; streaming is an M4h item.)
+4. **Write** into a staging directory `<out>/.tsp-tmp/` (short fixed name so staging paths never exceed final paths) and move into place. **As built:** each file is written under a numeric name (`1`, `2`, ...) in `.tsp-tmp` and renamed to its final path; `std::fs::rename` replaces an existing file on Windows (the tests rely on it; replacement of an existing file on a real corpus run is still to be observed). The root `folder.json` is first written as `incomplete` and replaced by the `complete` version last. Leftover numeric files from an interrupted run are removed at the start; any other entry in `.tsp-tmp` stops the export. The `--out` path must be short enough (about 239 units) that a staged path cannot exceed 259. Only files whose content differs are written. This is per-file atomic, not whole-archive atomic.
+5. **Verify** by reading back and comparing with the plan; remove `.tsp-tmp`. (Implemented in M4c: every generated file is read back and compared, `export_readback_mismatches`; a mismatch is an error.)
 
-File modification times: set to the message time when valid and representable (Windows cannot represent times before 1601, and PSTs can contain placeholders such as the year 4500), otherwise leave as written. Times are excluded from determinism comparisons.
+File modification times: set to the message time when valid and representable (Windows cannot represent times before 1601, and PSTs can contain placeholders such as the year 4500), otherwise leave as written. Times are excluded from determinism comparisons. (Not implemented; files get the time they were written.)
 
 ## 9. Folder identity
 
@@ -210,7 +214,7 @@ File modification times: set to the message time when valid and representable (W
 - So a folder identifier is unique within one PST and distinguishable across different PSTs by the Provider UID, but it is not a free-standing GUID. Two byte-identical copies of a PST share all of it.
 - `outlook-pst` v1.2.0 exposes, per folder, `FolderProperties::node_id()` (the NID), `display_name()`, and a computed `PidTagEntryId` (0x0FFF); it exposes no separate record key for folders. This comes from reading the crate source. **Run result (M4b-3, `tsp-tester.pst`):** a NID and an EntryID were both available for all 11 folders walked and none were unavailable (`folder_identity_nid_available=11`, `folder_identity_entry_id_available=11`, `folder_identity_unavailable=0`). Other producers are untested.
 
-Use: (1) **ordering key** for U3/U6 (NID ascending); (2) **recorded in `folder.json`** (NID, EntryID hex, Provider UID, original display name, parent NID, original path); (3) **never in the visible name** except through the ` (n)` rule when siblings collide; (4) if the identifier cannot be obtained, fall back to (display name, position in the hierarchy table, content count) and flag `folder_identity_fallback`; that order is deterministic for a given file but not meaningful across files.
+Use: (1) **ordering key** for U3/U6 (NID ascending); (2) **recorded in `folder.json`** (NID, EntryID hex, Provider UID, original display name, parent NID, original path); (3) **never in the visible name** except through the ` (n)` rule when siblings collide; (4) if the identifier cannot be obtained, fall back to (display name, position in the hierarchy table, content count) and flag `folder_identity_fallback`; that order is deterministic for a given file but not meaningful across files. (M4c records none of the identity fields yet; they arrive with the PST export and M4g.)
 
 **Message identity** (the item the accepted ADR deferred): the directory name is for humans and is not the identity. Identity is the source identifier (for a PST message: NID plus the store's Provider UID), recorded in `metadata.json` together with `PidTagInternetMessageId` when present, and the content hash. Missing or duplicated Internet message IDs therefore cannot affect naming, which resolves the ADR's deferred question for folder naming. (The census confirms duplicates are common: 4 of 34 messages in the `.msg` directory and 20 of 60 in the PST share an Internet message ID with another message.)
 
@@ -250,13 +254,13 @@ The accepted ADR [Deterministic Markdown archive](../../ADRs/deterministic-markd
 
 1. **Export naming, collisions, and path budgets** (sections 4-6).
 2. **Message and folder identity and provenance** (section 9; fills the ADR's deferred identity item).
-3. **Output posture** (`--out`, `--dry-run`, consent, ownership by `folder.json`, stdout content-free).
+3. **Output posture** (`--out`, `--dry-run`, consent, ownership by `folder.json`, stdout content-free). M4c's consent rules, as built in section 2, are the starting point.
 4. **Body and formatting-loss policy** (M4e).
-5. **`metadata.json` / `folder.json` schemas and per-item status** (M4g).
+5. **`metadata.json` / `folder.json` schemas and per-item status** (M4g). M4c's draft schemas, as built in section 3.2, are the starting point.
 
 ## 12. Scope of what is exported (decision Q5)
 
-Everything reachable from the IPM subtree, including Deleted Items. Every item gets a message directory: mail (`IPM.Note*`) with a body in `message.md`; other classes (appointments, contacts, tasks, notes, reports, meeting requests) get `message.md` with a short metadata summary and status `partial: non-mail item` until they have a renderer. Skipped and counted, never silently: associated (hidden) items, search folders (virtual), and anything outside the IPM subtree (orphans, recoverable items). Counts appear in the root `folder.json` and in the stdout summary.
+Everything reachable from the IPM subtree, including Deleted Items. Every item gets a message directory: mail (`IPM.Note*`) with a body in `message.md`; other classes (appointments, contacts, tasks, notes, reports, meeting requests) get `message.md` with a short metadata summary and status `partial: non-mail item` until they have a renderer. Skipped and counted, never silently: associated (hidden) items, search folders (virtual), and anything outside the IPM subtree (orphans, recoverable items). Counts appear in the root `folder.json` and in the stdout summary. (Not implemented for export yet; M4c handles `.msg` input only.)
 
 ## 13. Open questions
 
