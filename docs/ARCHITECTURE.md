@@ -100,6 +100,36 @@ counts, and prints none of it. Like M1, this boundary stops before the
 normalized domain model. The MSG adapter now decodes the values such a model
 would be built from, but nothing yet assembles them into a normalized item.
 
+## M4b boundary: planning an export without writing one
+
+M4b adds the part of the export that needs no I/O: deciding every name and
+path before anything is written.
+
+```text
+.pst / .msg input
+ |
+ +-- source reader               (source_pst.rs / source_msg.rs)
+ |     reads names, times, attachment names, embedded messages into a
+ |     source tree, plus a content-free census of what it saw
+ |
+ +-- naming rules                (naming.rs: sanitize, normalize, truncate to
+ |                                a UTF-16 unit budget, reserved names,
+ |                                collision key)
+ |
+ +-- export planner              (plan.rs: pure; source tree + Policy -> planned
+ |     entries with final names, flags, counters)
+ |
+ +-- plan verifier               (plan.rs `verify_plan`: collisions, over-budget
+ |                                paths, invalid names, unit mismatches)
+ |
+ +-- --dry-run report            (dry_run.rs: counts only)
+```
+
+The planner and the naming rules depend on no adapter module; the source
+readers are the only code that knows about PST or MSG here. A future writer
+(M4c onward) will consume the same plan, so what `--dry-run` reports is what
+an export would do. Nothing is written by any code in this boundary.
+
 ## Verification structure
 
 `tsp --verify` runs the custom MSG path and `msg_parser` over the same files
@@ -114,8 +144,24 @@ and [ADR: independent differential verification](../ADRs/independent-differentia
 
 The PST side has no independent-oracle comparison yet.
 
+The planner is verified differently: `verify_plan` is a gate over every plan
+(its violation count prints under `--dry-run`), unit and property tests cover
+the naming and planning rules, and `verify-split.ps1` checks that a refactor
+leaves the existing outputs byte-identical to an earlier tag.
+
 ## Code layout
 
-The code lives in `src/`, one module per seam (v0.1.20): `cli` (arguments and input classification), `shared` (vocabulary, the encapsulated-HTML check, shared counters), `pst` (the PST diagnostic), `msg_report` (the shared MSG report), `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, and `oxmsg_extract` (the custom MS-OXMSG parser, from naming conventions through extraction), `verify` (the `--verify` comparison and structural gates), `tests`, and `main` (dispatch). The README lists the contents of each module.
+The code lives in `src/`, one module per seam:
 
-Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules. Every item is `pub(crate)` because the split was mechanical, so the module boundaries are organizational, not yet a designed API. The planned model, naming, and planning modules (M4b) are meant to depend on no adapter module.
+- `cli` — arguments and input classification; `main` — dispatch.
+- `shared` — vocabulary, the encapsulated-HTML check, shared counters.
+- `pst` — the PST diagnostic; `msg_report` — the shared MSG report.
+- `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, `oxmsg_extract` — the custom MS-OXMSG parser, from naming conventions through extraction.
+- `verify` — the `--verify` comparison and structural gates.
+- `naming`, `plan` — the pure naming rules and export planner (M4b).
+- `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b).
+- `tests` — most unit tests; the newer modules keep theirs beside their code.
+
+The README lists the contents of each module.
+
+Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `dry_run` ties the readers, the planner, and the report together. Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. `naming.rs` and `plan.rs` still carry `#![allow(dead_code)]`, because their items are used only by the dry run and tests until the writer exists; it is meant to go when M4c lands. The normalized model module (M4b-4) has not been written.
