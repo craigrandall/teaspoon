@@ -1,5 +1,5 @@
 ---
-status: "proposed"
+status: "accepted"
 date: 2026-10-04
 decision-makers: Craig
 consulted: Claude (Anthropic)
@@ -8,7 +8,7 @@ informed: n/a — single-developer project
 
 # Export naming, collisions, and path budgets
 
-*Status history: proposed 2026-10-04 (drafted from the M4a rules, the M4b-2 implementation, and the M4b-3 / M4c results). Becomes accepted when the owner says so.*
+*Status history: proposed 2026-10-04 (drafted from the M4a rules, the M4b-2 implementation, and the M4b-3 / M4c results); accepted 2026-10-04 by the owner. Acceptance records the decision; the items listed under Confirmation as not yet confirmed remain open.*
 
 ## Context and Problem Statement
 
