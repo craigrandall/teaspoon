@@ -1,10 +1,11 @@
-# M4 plan (v4.4) — normalized model and deterministic Markdown archive
+# M4 plan (v4.5) — normalized model and deterministic Markdown archive
 
-Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c complete (tag v0.1.23.1, 2026-10-03): built, 155 tests, fmt/clippy/CI clean, and verified on the real `.msg` corpus.** Version 4.4, revised 2026-10-03 from version 4.3 to close M4c. Every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
+Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c complete (tag v0.1.23.1, 2026-10-03); M4a-2 drafted (2026-10-04): four ADRs proposed and awaiting the owner's acceptance, the fifth deferred to M4e.** Version 4.5, revised 2026-10-04 from version 4.4 to record M4a-2. Every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
 
 - [`m4a-export-rules.md`](m4a-export-rules.md): the draft naming, layout, identity, duplicate, path-length, and overwrite rules (v3.4, aligned with the accepted archive ADR).
 - [`m4a-dependency-research.md`](m4a-dependency-research.md): RTF de-encapsulation, HTML-to-Markdown converters, and supporting crates.
 - [`../verification/m4-results.md`](../verification/m4-results.md): the evidence recorded so far.
+- [`../examples/m4c-example-archive.md`](../examples/m4c-example-archive.md): a worked example of the M4c draft format against the proposed ADRs.
 
 ## Decisions in force (project owner, 2026-09-30)
 
@@ -23,6 +24,11 @@ Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) 
 - Approved dependencies: `serde`, `serde_json`, `sha2`, `unicode-normalization`, and `proptest` (dev-only). The HTML-to-Markdown bake-off is approved.
 - The owner will create the priority fixtures separately.
 - 2026-10-03: the owner directed that M4c proceed ahead of M4a-2 (the ADRs) and M4b-4 (the model types), which this plan places before it. Neither is done; M4c used a small seed of the model and **draft** schemas so that the ADRs can freeze what the skeleton has actually produced.
+- 2026-10-04: the owner directed that M4a-2 be taken next.
+
+## What changed from v4.4
+
+M4a-2 was drafted. Four ADRs were written as proposed (naming, identity, output posture, archive file contract); the fifth (body and formatting-loss policy) was not drafted because it depends on the HTML-to-Markdown comparison (M4e-0) and would otherwise be invented. The fifth ADR in the earlier list ("`metadata.json` / `folder.json` schemas and per-item status") was narrowed to the *rules every archive file must follow and how schemas evolve*; the field-level schemas stay drafts until M4g, because they depend on work not done yet. A worked example archive was added.
 
 ## What changed from v4.3
 
@@ -126,11 +132,19 @@ Gate, against the run:
 
 ### M4a-2 — accept the new ADRs
 
-Using the census, accept up to five ADRs that **complete** the archive ADR: (1) export naming, collisions, and path budgets; (2) message and folder identity and provenance; (3) output posture (`--out`, `--dry-run`, consent, ownership by `folder.json`); (4) body and formatting-loss policy; (5) `metadata.json` / `folder.json` schemas and per-item status. The archive ADR gets a cross-reference in "More Information" (status and layout unchanged).
+Status: **drafted 2026-10-04; four ADRs proposed, awaiting the owner's acceptance; the fifth deferred.** The ADRs *complete* the archive ADR and do not supersede it; the archive ADR now carries a cross-reference (status and decision unchanged).
 
-Status: not started. M4c now supplies what ADR 3 and ADR 5 need to be concrete (the consent rules and the draft schemas).
+| ADR | File | Status |
+|---|---|---|
+| Export naming, collisions, and path budgets | `ADRs/export-naming-collisions-and-path-budgets.md` | proposed |
+| Message and folder identity and provenance | `ADRs/message-and-folder-identity-and-provenance.md` | proposed (the PST identifiers and the content hash are decided but not yet written by any code) |
+| Export output posture: consent, ownership, and counts-only output | `ADRs/export-output-posture-consent-and-ownership.md` | proposed |
+| Archive file contract and schema evolution | `ADRs/archive-file-contract-and-schema-evolution.md` | proposed (decides the file rules and the evolution policy; field-level schemas stay `0.1-draft` until M4g) |
+| Body and formatting-loss policy | — | **not drafted**: it needs the HTML-to-Markdown comparison (M4e-0) and the de-encapsulation work (M4e-1); M4c's fenced-text body is explicitly provisional |
 
-Gate: ADRs accepted by the owner; a hand-written example archive for one corpus message (private content replaced) that follows them and passes the plan's own invariants. The archive that M4c writes can serve as the starting point.
+Following the ADR guidance in `ADRs/_README.md` (an ADR records a decision that is expensive to reverse, constrains later work, and had real alternatives), each ADR lists its alternatives, states what is confirmed by evidence and what is not, and records the status as the decision's, not the work's.
+
+Gate: ADRs accepted by the owner (pending); a hand-written example archive that follows them and passes the invariants — **written** as `docs/examples/m4c-example-archive.md` (the message files are the committed golden files; the two `folder.json` files are hand-assembled with placeholder numbers), with the invariants checked by hand in the document. The example is synthetic: it is not a real corpus message.
 
 ### M4b-4 — normalized model types
 
@@ -146,7 +160,7 @@ Status: **complete (v0.1.23, tag v0.1.23.1, 2026-10-03, 155 tests).** New module
 
 What it does: for `.msg` input (a file, or a directory handled recursively), plan names with the M4b planner and refuse a plan that breaks a gate; render the archive in memory (`message.md`, `metadata.json`, `folder.json`, root `folder.json`); compare it with the target (counts only); decide consent; write each file through `<out>/.tsp-tmp/<n>` and rename it into place; read everything back; print `export_*` counts and one `export_tree_sha256`. Attachments and embedded messages are counted and recorded as not extracted, and no `attachments/` directory is written. `.pst` input stops with a "not implemented" error (M4i).
 
-Decisions taken in M4c (the owner is asked to confirm them, since the ADRs have not been written):
+Decisions taken in M4c (now written up in the proposed output-posture and file-contract ADRs; the owner is asked to confirm them there):
 - **Consent.** Replacing a file the tool generated earlier needs `--overwrite` or an interactive yes; non-interactive without it, the run is refused (exit code 2). A target directory the tool did not create is refused even with `--overwrite`. An archive recorded for a different source (different kind or name) is refused even with `--overwrite`; the source hash is deliberately not part of source identity, so re-exporting a changed source is allowed with consent.
 - **Interrupted runs.** The root `folder.json` is written first as `incomplete` and replaced with the `complete` version last. Whole-archive atomicity is not provided; per-file replacement is atomic.
 - **Staging.** A short numeric name under `.tsp-tmp` (as planned for M4h), with the `--out` path limited so staged paths cannot exceed final ones. Leftover numeric files from an interrupted run are removed; anything else in `.tsp-tmp` is an error.
@@ -197,7 +211,7 @@ Gate:
 
 ### M4g — metadata, diagnostics, per-item status
 
-Implement the `metadata.json` and `folder.json` schemas from the ADR: identity and provenance, property bag, recipients, attachment records, named properties, extraction diagnostics, per-item status (complete, partial, failed, each with a closed list of reasons), applied renames and truncations, and the folder's child index, and the content SHA-256 with `identical_to` (Q11, the only open definition). Stdout summary of counts.
+Implement the `metadata.json` and `folder.json` schemas from the ADR: identity and provenance, property bag, recipients, attachment records, named properties, extraction diagnostics, per-item status (complete, partial, failed, each with a closed list of reasons), applied renames and truncations, and the folder's child index, and the content SHA-256 with `identical_to` (Q11, the only open definition). Stdout summary of counts. Freezing the first numbered `schema_version` happens here, under the evolution policy in the file-contract ADR.
 
 Gate: JSON schema tests on synthetic archives; the corpus stdout summary reconciles with `--verify` totals (every message accounted for); no absolute paths and no export-time values in any metadata file.
 
@@ -266,7 +280,8 @@ Crate boundaries become worthwhile only for a concrete reason: another program e
 - **Folder identity.** Both identifiers were readable on the fixture; the NID-derived identifier is still unproven across other producers. The fallback ordering is deterministic but weaker.
 - **Content-hash definition** (Q11) now affects only the `identical_to` metadata, not any name, so a poor first definition is cheap to correct.
 - **Very large duplicate groups.** Thousands of same-subject messages in one folder widen their suffix and rename the group once when it crosses 99 or 999 members. Mitigation: per-group width, census counts of large groups (the fixture's largest group is 16).
-- **Schemas frozen too early or too late.** M4c produces draft schemas ahead of the ADRs on purpose; the risk is treating them as final. They carry `schema_version` `0.1-draft`.
+- **Schemas frozen too early or too late.** M4c produces draft schemas ahead of the field-level freeze on purpose; the risk is treating them as final. They carry `schema_version` `0.1-draft`, and the file-contract ADR says drafts carry no compatibility promise.
+- **ADRs accepted ahead of the evidence they need.** The identity ADR decides things (PST identifiers in metadata, the content hash) that no code writes yet; the naming ADR depends on rules L4 steps 4-5, which are not implemented. The ADRs say so in their Confirmation sections.
 - **Export reviewed on a small sample.** The real corpus exported cleanly and one message was reviewed, but the corpus is one producer and the review covered one message; large bodies, unusual encodings, and long subjects beyond the fixtures are untested.
 - **Memory use.** The writer renders the whole archive in memory first; a very large mailbox will need the streaming work in M4h.
 - **Uninformative file names.** Every message is called `message.md`, so search results and editor tabs show the folder only as context. Accepted with the ADR; `message.md` can open with a title line (body-policy ADR), and M4c's draft does.
@@ -276,8 +291,8 @@ Crate boundaries become worthwhile only for a concrete reason: another program e
 
 ## Decisions still needed from the owner
 
-1. The PST items still open from M4b-3: a PST dry run with a short `--out`, and the current PST diagnostic output (`tsp tsp-tester.pst`) to reconcile the PST counts.
-2. Whether M4c's consent rules, staging, and draft schemas are acceptable as built (the ADRs, M4a-2, follow).
+1. Accept (or amend) the four proposed ADRs. In particular, confirm the decisions that go beyond the original instruction: refusing an archive of a different source even with `--overwrite`; source identity as kind plus name (not hash); refusing a non-empty directory that has no `tsp` marker; per-file rather than whole-archive atomicity for now; and the binding file rules (UTF-8 without BOM, LF, fixed field order, no absolute paths or export-time values).
+2. The PST items still open from M4b-3: a PST dry run with a short `--out`, and the current PST diagnostic output (`tsp tsp-tester.pst`) to reconcile the PST counts.
 3. Whether to try removing `#![allow(dead_code)]` now, and how to reconcile the `0.1.23` Cargo version with the `v0.1.23.1` tag.
-4. Which stage comes next: M4a-2 (the ADRs) with M4c's archive as the worked example, or M4b-4 and M4d (the full model and the envelope fields).
+4. Which stage comes next: M4b-4 and M4d (the full model and the envelope fields), or the HTML-to-Markdown bake-off (M4e-0), which unblocks the fifth ADR.
 5. Q11, the content-hash definition, before M4g (not before).
