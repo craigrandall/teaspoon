@@ -1,6 +1,6 @@
-# M4 plan (v4.3) — normalized model and deterministic Markdown archive
+# M4 plan (v4.4) — normalized model and deterministic Markdown archive
 
-Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c built, tested, and verified on the real `.msg` corpus (tag v0.1.23.1, 2026-10-03), with a few quality-gate reports outstanding (listed in the M4c section).** Version 4.3, revised 2026-10-03 from version 4.2 to record the real-corpus verification of M4c. Every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
+Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c complete (tag v0.1.23.1, 2026-10-03): built, 155 tests, fmt/clippy/CI clean, and verified on the real `.msg` corpus.** Version 4.4, revised 2026-10-03 from version 4.3 to close M4c. Every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
 
 - [`m4a-export-rules.md`](m4a-export-rules.md): the draft naming, layout, identity, duplicate, path-length, and overwrite rules (v3.4, aligned with the accepted archive ADR).
 - [`m4a-dependency-research.md`](m4a-dependency-research.md): RTF de-encapsulation, HTML-to-Markdown converters, and supporting crates.
@@ -24,9 +24,13 @@ Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) 
 - The owner will create the priority fixtures separately.
 - 2026-10-03: the owner directed that M4c proceed ahead of M4a-2 (the ADRs) and M4b-4 (the model types), which this plan places before it. Neither is done; M4c used a small seed of the model and **draft** schemas so that the ADRs can freeze what the skeleton has actually produced.
 
+## What changed from v4.3
+
+M4c is closed: `cargo fmt --check` and `cargo clippy -D warnings` reported no errors, CI succeeded, and the non-interactive refusal (exit code 2) and `--overwrite` were verified on real output. The outstanding-reports list is gone; what remains open is the PST items from M4b-3 and the two housekeeping items.
+
 ## What changed from v4.2
 
-M4c's real-corpus gate item is recorded as met (counts reconcile, repeat export writes nothing, tree hash identical across runs and output directories, the owner's review of an exported message passed, the interactive overwrite prompt works on real output). The "export untested on real messages" risk is narrowed accordingly. fmt/clippy/CI reports and the non-interactive refusal on real output are listed as outstanding.
+M4c's real-corpus gate item was recorded as met (counts reconcile, repeat export writes nothing, tree hash identical across runs and output directories, the owner's review of an exported message passed, the interactive overwrite prompt works on real output). The "export untested on real messages" risk was narrowed accordingly.
 
 ## What changed from v4.1
 
@@ -138,7 +142,7 @@ Gate: invariants tested; a table mapping each existing counter category to its m
 
 ### M4c — walking skeleton
 
-Status: **built and verified (v0.1.23, tag v0.1.23.1, 2026-10-03, 155 tests); the real-corpus gate item is met; some quality-gate reports are outstanding.** New modules `model.rs`, `archive.rs` (pure rendering), `export.rs` (preflight, consent, staged write, read-back); `source_msg.rs` gains the message-to-file map and `read_message_content`; `cli.rs` gains `--overwrite` and `--no-source-hash`; `root_stem` ignores trailing separators. New dependencies: `serde`, `serde_json`, `sha2`.
+Status: **complete (v0.1.23, tag v0.1.23.1, 2026-10-03, 155 tests).** New modules `model.rs`, `archive.rs` (pure rendering), `export.rs` (preflight, consent, staged write, read-back); `source_msg.rs` gains the message-to-file map and `read_message_content`; `cli.rs` gains `--overwrite` and `--no-source-hash`; `root_stem` ignores trailing separators. New dependencies: `serde`, `serde_json`, `sha2`.
 
 What it does: for `.msg` input (a file, or a directory handled recursively), plan names with the M4b planner and refuse a plan that breaks a gate; render the archive in memory (`message.md`, `metadata.json`, `folder.json`, root `folder.json`); compare it with the target (counts only); decide consent; write each file through `<out>/.tsp-tmp/<n>` and rename it into place; read everything back; print `export_*` counts and one `export_tree_sha256`. Attachments and embedded messages are counted and recorded as not extracted, and no `attachments/` directory is written. `.pst` input stops with a "not implemented" error (M4i).
 
@@ -150,13 +154,12 @@ Decisions taken in M4c (the owner is asked to confirm them, since the ADRs have 
 - **Status.** Every M4c message is `partial`, with reasons (envelope not extracted; attachments not extracted; formatted bodies not converted).
 - **Housekeeping not done:** `#![allow(dead_code)]` in `naming.rs` and `plan.rs`; the `Cargo.toml` version is `0.1.23` while the tag is `v0.1.23.1`.
 
-Gate:
-- Golden files committed for synthetic fixtures (no personal data), run in CI on Linux and Windows: **committed and passing locally on Windows; the CI result has not been reported.**
+Gate (all met):
+- Golden files committed for synthetic fixtures (no personal data), run in CI on Linux and Windows: **met** — committed, passing locally on Windows, and the CI workflow succeeded on the pushed commit.
 - Two exports of the same input are byte-identical (tree hash): **met** — synthetic test, and on the real `.msg` corpus the tree hash `96da290e…793ad` was identical across a first run, a repeat into the same directory, and a run into a different directory.
-- Overwrite matrix tested (empty target, identical existing files, different existing files, unrelated files, non-interactive without consent, foreign directory, other source, over-budget plan): **met by synthetic tests.** On real output, the interactive prompt was exercised (one edited file: prompt shown, accepted, file restored, tree hash unchanged, exit code 0, then all 72 files identical). The non-interactive refusal (exit code 2) and the `--overwrite` path have not been run on real output.
+- Overwrite matrix tested (empty target, identical existing files, different existing files, unrelated files, non-interactive without consent, foreign directory, other source, over-budget plan): **met** by synthetic tests, and on real output the interactive prompt (accepted), the non-interactive refusal (exit code 2, nothing written), and `--overwrite` were each exercised; the edited file was restored every time, with an unchanged tree hash.
 - One real corpus message exported and reviewed by the owner against a checklist: **met** — the whole `.msg` corpus was exported (34 messages, 72 files, 0 read-back mismatches, longest written path 131 units) and the owner reviewed one `message.md` / `metadata.json` pair and found the contents as expected. The other exported messages have not been individually reviewed.
-
-Outstanding reports (not blocking the next stage): `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings` on the committed code; the CI result; the non-interactive refusal on real output.
+- Quality gate: `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings` reported no errors.
 
 ### M4d — envelope: headers, recipients, properties
 
@@ -200,7 +203,7 @@ Gate: JSON schema tests on synthetic archives; the corpus stdout summary reconci
 
 ### M4h — writer hardening
 
-Whole-archive atomicity or an equally clear recovery story (M4c writes per file and marks the root `incomplete` until the end); streaming instead of rendering the whole archive in memory; replace-on-rename behavior verified on Windows (M4c observed it working on one real file); deterministic ordering and line endings (LF, UTF-8 without BOM); modification-time policy; partial-failure behavior (one failed message never corrupts or hides others); FAT32 directory-size warning; `--long-paths` and `--max-relative-path` options.
+Whole-archive atomicity or an equally clear recovery story (M4c writes per file and marks the root `incomplete` until the end); streaming instead of rendering the whole archive in memory; replace-on-rename behavior verified on Windows (M4c verified it on real output); deterministic ordering and line endings (LF, UTF-8 without BOM); modification-time policy; partial-failure behavior (one failed message never corrupts or hides others); FAT32 directory-size warning; `--long-paths` and `--max-relative-path` options.
 
 Gate: run-twice byte-identical trees on the corpus (single tree-hash line); fault injection (unwritable target, simulated disk full where practical, corrupt input mid-batch); results independent of input order; consent flow re-tested.
 
@@ -273,7 +276,8 @@ Crate boundaries become worthwhile only for a concrete reason: another program e
 
 ## Decisions still needed from the owner
 
-1. The outstanding reports: `cargo fmt`/`clippy`, the CI result, the non-interactive refusal on real output, a PST dry run with a short `--out`, and the current PST diagnostic output to reconcile the PST counts.
+1. The PST items still open from M4b-3: a PST dry run with a short `--out`, and the current PST diagnostic output (`tsp tsp-tester.pst`) to reconcile the PST counts.
 2. Whether M4c's consent rules, staging, and draft schemas are acceptable as built (the ADRs, M4a-2, follow).
 3. Whether to try removing `#![allow(dead_code)]` now, and how to reconcile the `0.1.23` Cargo version with the `v0.1.23.1` tag.
-4. Q11, the content-hash definition, before M4g (not before).
+4. Which stage comes next: M4a-2 (the ADRs) with M4c's archive as the worked example, or M4b-4 and M4d (the full model and the envelope fields).
+5. Q11, the content-hash definition, before M4g (not before).
