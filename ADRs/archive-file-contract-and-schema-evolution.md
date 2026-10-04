@@ -1,5 +1,5 @@
 ---
-status: "proposed"
+status: "accepted"
 date: 2026-10-04
 decision-makers: Craig
 consulted: Claude (Anthropic)
@@ -8,7 +8,7 @@ informed: n/a — single-developer project
 
 # Archive file contract and schema evolution
 
-*Status history: proposed 2026-10-04. Becomes accepted when the owner says so. This ADR decides the rules every archive file must follow and how the formats may change; it does **not** freeze the field-level schemas, which stay drafts (`0.1-draft`) until the metadata stage (M4g) has settled what they must carry.*
+*Status history: proposed 2026-10-04; accepted 2026-10-04 by the owner. This ADR decides the rules every archive file must follow and how the formats may change; it does **not** freeze the field-level schemas, which stay drafts (`0.1-draft`) until the metadata stage (M4g) has settled what they must carry.*
 
 ## Context and Problem Statement
 
