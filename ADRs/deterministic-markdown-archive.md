@@ -69,3 +69,13 @@ when `PidTagInternetMessageId` is missing or duplicated) is explicitly
 deferred and tracked as open research, not yet decided by this ADR. See
 [loss-aware-normalized-representation.md](loss-aware-normalized-representation.md)
 for how `metadata.json` is expected to carry extraction diagnostics.
+
+*Added 2026-10-04 (a link only; this ADR's status and decision are
+unchanged).* The items this ADR deferred are addressed by four further
+ADRs, currently proposed:
+[export naming, collisions, and path budgets](export-naming-collisions-and-path-budgets.md),
+[message and folder identity and provenance](message-and-folder-identity-and-provenance.md),
+[export output posture, consent, and ownership](export-output-posture-consent-and-ownership.md), and
+[archive file contract and schema evolution](archive-file-contract-and-schema-evolution.md).
+They complete this ADR and do not supersede it. A worked example is in
+[`docs/examples/m4c-example-archive.md`](../docs/examples/m4c-example-archive.md).
