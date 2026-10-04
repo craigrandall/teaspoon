@@ -1,5 +1,5 @@
 ---
-status: "proposed"
+status: "accepted"
 date: 2026-10-04
 decision-makers: Craig
 consulted: Claude (Anthropic)
@@ -8,7 +8,7 @@ informed: n/a — single-developer project
 
 # Message and folder identity and provenance
 
-*Status history: proposed 2026-10-04. Becomes accepted when the owner says so. Part of the decision is not yet implemented (see Confirmation); the status records the decision, not the work.*
+*Status history: proposed 2026-10-04; accepted 2026-10-04 by the owner. Acceptance records the decision, not the work: part of it is not yet implemented (see Confirmation).*
 
 ## Context and Problem Statement
 
