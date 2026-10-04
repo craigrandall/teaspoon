@@ -1,5 +1,5 @@
 ---
-status: "proposed"
+status: "accepted"
 date: 2026-10-04
 decision-makers: Craig
 consulted: Claude (Anthropic)
@@ -8,7 +8,7 @@ informed: n/a — single-developer project
 
 # Export output posture: consent, ownership, and counts-only output
 
-*Status history: proposed 2026-10-04. Becomes accepted when the owner says so. The behavior described here is implemented (M4c, tag v0.1.23.1) and was exercised on real output; the points the owner has not yet confirmed are listed under Confirmation.*
+*Status history: proposed 2026-10-04; accepted 2026-10-04 by the owner, including the decisions that went beyond the owner's original instruction (listed under Confirmation). The behavior described here is implemented (M4c, tag v0.1.23.1) and was exercised on real output.*
 
 ## Context and Problem Statement
 
@@ -56,7 +56,7 @@ Chosen option: "A", because it is the only option that allows safe re-export wit
 
 * Synthetic tests cover: empty and absent targets, a repeat export writing nothing, changed files refused / declined / accepted / replaced with `--overwrite`, unrelated files left alone, a foreign directory refused even with `--overwrite`, an archive of another source refused, an over-budget plan writing nothing, an over-long output path being an error, leftover staging files being cleaned up, and the flag combinations the command line accepts.
 * On the real `.msg` corpus (2026-10-03): first export 72 files written; repeat export 72 identical, 0 written; the same tree hash into a second directory; after a file was edited, the interactive prompt, the non-interactive refusal (exit code 2, nothing written), and `--overwrite` each behaved as described and restored the file with an unchanged tree hash.
-* Decisions here that go beyond the owner's original instruction ("warn and ask permission, or exit") and need explicit confirmation: refusing an archive of a *different source* even with `--overwrite`; defining source identity as kind plus name (not hash); refusing instead of adopting a non-empty directory without a marker; per-file rather than whole-archive atomicity for now.
+* Decisions here that go beyond the owner's original instruction ("warn and ask permission, or exit"), **confirmed by the owner on acceptance (2026-10-04)**: refusing an archive of a *different source* even with `--overwrite`; defining source identity as kind plus name (not hash); refusing instead of adopting a non-empty directory without a marker; per-file rather than whole-archive atomicity for now.
 * Not yet confirmed: behavior on a read-only or network target; a crash mid-write (no fault-injection test yet); a sync client touching the output while it is being written.
 
 ## Pros and Cons of the Options
