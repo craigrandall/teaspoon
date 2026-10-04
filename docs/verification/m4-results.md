@@ -73,11 +73,12 @@ The M4b-3 plan predicted, from earlier diagnostics, 9 planned folders, 57 messag
 - For the `.msg` directory the likely explanation is scope: the earlier counts covered the 29 top-level files, while the dry run plans recursively and mirrors 3 subdirectories. The split of the extra 5 messages and 2 embedded messages across those subdirectories has not been checked.
 - For the PST there is **no confirmed explanation**: +1 folder, +3 messages, +5 attachment files. Either the fixture changed after the earlier diagnostic, or the planner walks something the diagnostic does not. The current PST diagnostic output (`tsp tsp-tester.pst`) is needed to settle it, and the PST export stage (M4i) is gated on the archive reconciling with the diagnostic.
 
-## M4c: walking skeleton (built 2026-10-03; tag `v0.1.23.1`, `Cargo.toml` version `0.1.23`)
+## M4c: walking skeleton (complete 2026-10-03; tag `v0.1.23.1`, `Cargo.toml` version `0.1.23`)
 
 ### Build and regression
 
 - Built clean; **155 tests pass** (117 existing plus 38 new); committed and tagged `v0.1.23.1`. Added dependencies: `serde`, `serde_json`, `sha2`.
+- `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings` reported no errors, and the CI workflow (Linux and Windows) succeeded on the pushed commit.
 - `verify-split.ps1` again against v0.1.19: default, `--verify`, and PST outputs **IDENTICAL**, with the same sizes as before (850 / 2705 / 1092 bytes; 33 / 82 / 44 lines; stderr 0).
 - The `--verify` run over the 29 `.msg` fixtures (`verify4.txt`) has the same key values as `verify3.txt`.
 - Both `--dry-run` censuses, run again with the same very long `--out`, are **identical to the v0.1.22 census** in every key (the PST still reports 4 over-budget entries at that path). Adding the export path therefore changed neither the planner's results nor the diagnostics.
@@ -119,14 +120,13 @@ What this shows:
 - **Tree shape.** `C:\o` held 72 files, no `.tsp-tmp` directory remained, and the longest file path was 131 units (the plan's worst case was 190, because the plan reserves room for attachment files that M4c does not write yet).
 - **Content review.** The owner opened one exported `message.md` and its `metadata.json` and found the contents as expected. One message of 34 was reviewed; the rest were not.
 - **Interactive overwrite on real output.** After a line was appended to one exported `message.md`, re-running in an interactive terminal showed the prompt (1 file to replace, 71 identical, 0 unrelated), the owner answered yes, and the run completed: `export_consent=prompted_accepted`, `export_files_written=2` (the restored file and the root `folder.json`, which is rewritten whenever anything changes), `export_files_unchanged=70`, exit code 0, and the same tree hash as before the edit, so the edited file was restored byte for byte. The next two runs (one with `--overwrite`, one plain) found all 72 files identical and wrote nothing (`export_consent=not_needed`, since there was nothing left to replace).
+- **Non-interactive refusal and `--overwrite` on real output.** After appending a line to one exported `message.md` again, running with standard input redirected (`$null | tsp.exe ...`) printed "1 existing file(s) would be replaced; run interactively or add --overwrite; nothing was written", reported `export_preflight_to_replace=1`, `export_consent=non_interactive_declined`, `export_result=refused_needs_consent`, `export_files_written=0`, and exited with code 2. Re-running with `--overwrite` reported `export_consent=overwrite_flag`, `export_result=completed`, `export_files_written=2`, `export_files_unchanged=70`, and the same tree hash as every earlier run, so the file was restored. Because the replaced file already existed, this also shows that renaming over an existing file works on the owner's Windows setup.
 
 ### Not yet run
 
-- The non-interactive refusal on real output (edit a file, re-run with input redirected, e.g. `$null | tsp.exe ...`; expect `export_result=refused_needs_consent` and exit code 2), and the `--overwrite` path replacing a file in that situation. Both are covered by synthetic tests.
-- Whether CI (Linux and Windows) passes on the pushed commit.
-- `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings` on the final commit (not reported).
 - A PST dry run with a short `--out`, and the current PST diagnostic output (both still open from M4b-3).
+- The remaining 33 exported messages have not been individually reviewed, and the corpus is a single producer.
 
 ### Status
 
-M4c is built, passes its synthetic tests, has exported the real `.msg` corpus with counts that reconcile and a stable tree hash, and one exported message has been reviewed by the owner. The quality-gate and CI reports above are outstanding. The M4a-2 decision records and the full M4b-4 model are not done, so the `0.1-draft` schemas are not frozen.
+**M4c is complete.** It is built, formatted, lint-clean, and CI-green; its 155 tests pass; it exported the real `.msg` corpus with counts that reconcile and a stable tree hash; the owner reviewed an exported message; and the interactive prompt, the non-interactive refusal (exit code 2), and `--overwrite` all behaved as designed on real output. The M4a-2 decision records and the full M4b-4 model are not done, so the `0.1-draft` schemas are not frozen. The housekeeping items remain: `#![allow(dead_code)]` in `naming.rs` and `plan.rs`, and the `0.1.23` Cargo version against the `v0.1.23.1` tag.
