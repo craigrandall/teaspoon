@@ -1,6 +1,6 @@
 # Example archive (M4c draft format)
 
-This is a small, hand-built illustration of what `tsp <dir> --out <out>` writes, following the proposed ADRs ([naming](../../ADRs/export-naming-collisions-and-path-budgets.md), [identity](../../ADRs/message-and-folder-identity-and-provenance.md), [output posture](../../ADRs/export-output-posture-consent-and-ownership.md), [file contract](../../ADRs/archive-file-contract-and-schema-evolution.md)). It is synthetic: no real message content appears.
+This is a small, hand-built illustration of what `tsp <dir> --out <out>` writes, following the accepted ADRs ([naming](../../ADRs/export-naming-collisions-and-path-budgets.md), [identity](../../ADRs/message-and-folder-identity-and-provenance.md), [output posture](../../ADRs/export-output-posture-consent-and-ownership.md), [file contract](../../ADRs/archive-file-contract-and-schema-evolution.md)). It is synthetic: no real message content appears.
 
 - `Hello World/message.md` and `Hello World/metadata.json` are exactly the committed golden files in `tests/golden/hello/` (the byte-for-byte output of the code for a synthetic message).
 - The two `folder.json` files below were assembled by hand from the draft schema in `src/archive.rs`. Numbers, the tool version, and the hash are **illustrative placeholders**, not output of a run.
