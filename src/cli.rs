@@ -30,6 +30,13 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) verify: bool,
 
+    /// Compare the envelope the export extracts (subject, sender, To/Cc/Bcc recipients) against
+    /// `msg_parser` for the same .msg input, field by field. Reads real content internally and
+    /// prints only match/mismatch counts, plus counts of which envelope fields the corpus
+    /// carries -- never the values.
+    #[arg(long, conflicts_with_all = ["verify", "out", "dry_run"])]
+    pub(crate) verify_envelope: bool,
+
     /// Directory to export into. The archive is written to `<DIR>/<input name>/`: one
     /// directory per message holding `message.md` and `metadata.json`, a `folder.json` in every
     /// folder, and a `folder.json` at the archive root that marks the directory as created

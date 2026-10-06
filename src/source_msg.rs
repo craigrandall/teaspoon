@@ -25,6 +25,7 @@ use crate::oxmsg_decode::{
     decode_fixed_value, decode_properties_stream, extract_string8_codepage,
     properties_stream_header_len, read_stream_bytes, DecodedFixedValue,
 };
+use crate::oxmsg_envelope::extract_envelope;
 use crate::oxmsg_extract::{extract_body_flags, read_string_property};
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
 use crate::shared::{CompoundFile, PROP_ATTACH_METHOD, PROP_BODY};
@@ -249,6 +250,7 @@ pub(crate) fn read_message_content(path: &Path) -> Result<MessageContent> {
         Some(text) => PlainBody::Text(text),
     };
     let flags = extract_body_flags(&mut comp);
+    let envelope = extract_envelope(&mut comp);
 
     Ok(MessageContent {
         subject,
@@ -260,6 +262,7 @@ pub(crate) fn read_message_content(path: &Path) -> Result<MessageContent> {
             html_via_rtf: flags.has_html_via_rtf,
             rtf: flags.has_rtf,
         },
+        envelope,
     })
 }
 
@@ -467,6 +470,13 @@ mod tests {
         assert_eq!(content.time_filetime, Some(133_000_000_000_000_000));
         assert_eq!(content.internet_message_id, None);
         assert_eq!(content.plain_body, PlainBody::Text("Body text".to_string()));
+        assert_eq!(
+            content.envelope.delivery_time,
+            Some(133_000_000_000_000_000)
+        );
+        assert_eq!(content.envelope.submit_time, None);
+        assert_eq!(content.envelope.sender, None);
+        assert!(content.envelope.recipients.is_empty());
         assert!(!content.bodies.html_native);
         assert!(!content.bodies.html_via_rtf);
         assert!(!content.bodies.rtf);

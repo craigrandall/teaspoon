@@ -1207,7 +1207,7 @@ mod tests {
         let files = tree_files(&out);
         assert_eq!(
             lf(&String::from_utf8(files["n/Empty one/message.md"].clone()).unwrap()),
-            "# Empty one\n"
+            "# Empty one\n\n- **Date:** 2022-06-18T04:26:40Z\n"
         );
         let meta: serde_json::Value =
             serde_json::from_slice(&files["n/Empty one/metadata.json"]).unwrap();

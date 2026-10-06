@@ -9,6 +9,7 @@ mod msg_report;
 mod naming;
 mod oxmsg_classify;
 mod oxmsg_decode;
+mod oxmsg_envelope;
 mod oxmsg_extract;
 mod oxmsg_structure;
 mod plan;
@@ -19,6 +20,7 @@ mod source_pst;
 #[cfg(test)]
 mod tests;
 mod verify;
+mod verify_envelope;
 
 use std::io::IsTerminal;
 
@@ -31,6 +33,7 @@ use crate::export::{prompt_for_consent, run_export, ExportOptions, ExportStatus}
 use crate::oxmsg_extract::run_msg_extract;
 use crate::pst::run_pst_diagnostic;
 use crate::verify::run_msg_verify;
+use crate::verify_envelope::run_envelope_verify;
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -65,6 +68,8 @@ fn main() -> Result<()> {
             // flags were retired in M3g.
             if args.verify {
                 run_msg_verify(&files, subdirectories_skipped)
+            } else if args.verify_envelope {
+                run_envelope_verify(&files, subdirectories_skipped)
             } else {
                 run_msg_extract(&files, subdirectories_skipped)
             }

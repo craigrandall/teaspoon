@@ -16,9 +16,23 @@
     "html_via_rtf": false,
     "rtf": false
   },
+  "envelope": {
+    "sender": null,
+    "sent_representing": null,
+    "recipients": [],
+    "recipients_unlisted": 0,
+    "submit_time_filetime": null,
+    "delivery_time_filetime": 133000000000000000,
+    "date_utc": "2022-06-18T04:26:40Z",
+    "importance": null,
+    "sensitivity": null,
+    "conversation_topic": null,
+    "conversation_index_hex": null,
+    "transport_headers": null
+  },
   "attachments_not_extracted": 0,
   "status": "partial",
   "status_reasons": [
-    "envelope_not_extracted"
+    "other_properties_not_preserved"
   ]
 }
