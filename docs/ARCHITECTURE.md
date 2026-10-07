@@ -73,7 +73,7 @@ M1 does not create the final normalized domain model. That prevents a spike impl
 The MSG side started in M2 as a diagnostic built on the `msg_parser` crate,
 and became a custom adapter in M3. Since M3f the custom adapter is the
 production `.msg` path; `msg_parser` is used only as the oracle behind
-`--verify`.
+`--verify` (and, since M4d, `--verify-envelope`).
 
 ```text
 .msg file
@@ -97,8 +97,9 @@ production `.msg` path; `msg_parser` is used only as the oracle behind
 
 The extraction layer reads real content into memory to compute booleans and
 counts, and prints none of it. Like M1, this boundary stops before the
-normalized domain model. The MSG adapter now decodes the values such a model
-would be built from, but nothing yet assembles them into a normalized item.
+normalized domain model: the MSG adapter decodes the values such a model
+would be built from. (Since M4c and M4d, the export path assembles some of
+them into a small model; see the sections below.)
 
 ## M4b boundary: planning an export without writing one
 
@@ -154,11 +155,44 @@ grow later already separated.
                      <out>/.tsp-tmp -> read back -> content-free report
 ```
 
-- `model.rs` is only the seed of the normalized model (M4b-4): subject, Internet message ID, time, the plain-text body, and which other body forms exist. It imports no adapter module.
-- `archive.rs` has no I/O, so what is written is testable byte for byte (two golden files are committed under `tests/golden/`).
+- `model.rs` began as the seed of the normalized model (M4b-4): subject, Internet message ID, time, the plain-text body, and which other body forms exist. It imports no adapter module.
+- `archive.rs` has no I/O, so what is written is testable byte for byte (golden files are committed under `tests/golden/`).
 - `export.rs` never overwrites or deletes what it did not generate: the target must be absent, empty, or a directory whose root `folder.json` was written by `tsp` for the same source; its own files are replaced only with consent (`--overwrite` or a yes at the prompt).
 - Each file is replaced atomically (written under a short numeric name in `.tsp-tmp`, then renamed). The archive as a whole is not all-or-nothing: the root `folder.json` is first written as `incomplete` and replaced with the `complete` version last, so an interrupted run is recognizable.
-- Not exported yet: attachments and embedded messages (counted and recorded as not extracted), sender/recipients/headers, HTML and RTF bodies, and `.pst` input.
+- Not exported yet: attachments and embedded messages (counted and recorded as not extracted), HTML and RTF bodies, the remaining message properties, and `.pst` input.
+
+## M4d boundary: the envelope
+
+M4d adds who a message was from and to, and when, through the same path. The
+extraction is a separate adapter module so that the pure model and the pure
+renderers stay free of MSG details.
+
+```text
+.msg file
+ |
+ +-- oxmsg_envelope.rs   reads, from the message's properties and its recipient
+ |                       storages: sender, sent-representing identity, To/Cc/Bcc
+ |                       recipients (display name, address type, address, and
+ |                       SMTP address kept separate), submit and delivery times,
+ |                       importance, sensitivity, conversation topic and index,
+ |                       transport headers; strings via the code page chain;
+ |                       nothing derived or repaired
+ |
+ +-- source_msg.rs       `read_message_content` -> model.rs `Envelope`
+ |                       (with `Address` and `Recipient`) inside `MessageContent`
+ |
+ +-- archive.rs          pure rendering: a header list in message.md (each
+                         value in a code span; the SMTP address preferred and
+                         an Exchange distinguished name never shown) and an
+                         `envelope` object in metadata.json (stored ticks plus
+                         one UTC string; stored integers for importance and
+                         sensitivity)
+```
+
+- Property identifiers, how well each is confirmed, and the extraction rules are in [`plans/m4d-envelope-properties.md`](plans/m4d-envelope-properties.md).
+- A recipient row that is not To, Cc, or Bcc (the originator row, an unknown type, an unreadable type) is counted in `recipients_unlisted` and not listed.
+- `verify_envelope.rs` is the envelope's check: it runs the same extraction and `msg_parser` over the same files and prints match/mismatch counts for the subject, sender, and recipients. It does not touch the export path.
+- The status reason `envelope_not_extracted` was replaced by `other_properties_not_preserved`: the envelope is now written, but the rest of the property bag still is not.
 
 ## Verification structure
 
@@ -172,6 +206,16 @@ settled by majority vote (see
 [ADR: Microsoft specifications as normative authority](../ADRs/microsoft-specifications-as-normative-authority.md)
 and [ADR: independent differential verification](../ADRs/independent-differential-verification.md)).
 
+`tsp --verify-envelope` does the same for the envelope: the custom path's
+subject, sender, and recipients against `msg_parser`'s, field by field,
+reporting for each email which of the custom path's two properties
+(`PidTagEmailAddress` or the SMTP address) equalled the oracle's string. The
+fields `msg_parser` does not expose (sent-representing, times, importance,
+sensitivity, conversation fields, transport headers) are reported only as
+presence counts, so they have no independent check; they rest on the
+specification and the unit tests. Like `--verify`, it scans a directory
+non-recursively.
+
 The PST side has no independent-oracle comparison yet.
 
 The planner is verified differently: `verify_plan` is a gate over every plan
@@ -179,7 +223,9 @@ The planner is verified differently: `verify_plan` is a gate over every plan
 property tests cover the naming and planning rules, and `verify-split.ps1`
 checks that a change leaves the existing outputs byte-identical to an earlier
 tag. The writer is verified by synthetic tests (golden files, determinism,
-the overwrite matrix); a run on real corpus messages is still to be done.
+the overwrite matrix) and was run on real corpus messages at v0.1.23.1; the
+envelope output was examined on a couple of exported messages at v0.1.25.1,
+and a full corpus export for that tag has not been reported.
 
 ## Code layout
 
@@ -188,13 +234,13 @@ The code lives in `src/`, one module per seam:
 - `cli` — arguments and input classification; `main` — dispatch.
 - `shared` — vocabulary, the encapsulated-HTML check, shared counters.
 - `pst` — the PST diagnostic; `msg_report` — the shared MSG report.
-- `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, `oxmsg_extract` — the custom MS-OXMSG parser, from naming conventions through extraction.
-- `verify` — the `--verify` comparison and structural gates.
+- `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, `oxmsg_extract` — the custom MS-OXMSG parser, from naming conventions through extraction; `oxmsg_envelope` — the envelope extraction (M4d).
+- `verify` — the `--verify` comparison and structural gates; `verify_envelope` — the `--verify-envelope` comparison (M4d).
 - `naming`, `plan` — the pure naming rules and export planner (M4b).
-- `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also re-reads message content for export.
-- `model`, `archive`, `export` — the seed model, the pure renderers, and the writer with its preflight and consent rules (M4c).
+- `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also re-reads message content, including the envelope, for export.
+- `model`, `archive`, `export` — the model so far (message content and envelope), the pure renderers, and the writer with its preflight and consent rules (M4c, extended by M4d).
 - `tests` — most of the older unit tests; the newer modules keep theirs beside their code.
 
 The README lists the contents of each module.
 
-Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. `naming.rs` and `plan.rs` still carry `#![allow(dead_code)]`; the plan was to drop it when the writer landed, and it has not been tried yet. The full normalized model (M4b-4) has not been written.
+Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. The envelope modules follow the same pattern: `oxmsg_envelope` is an adapter module that depends on `oxmsg_classify`, `oxmsg_decode`, `oxmsg_extract`, and `shared` and produces `model` types (it also takes the submit and delivery time property IDs from `dry_run`, where they were first defined, which is a small layering oddity: an adapter importing from the reporting module), and `verify_envelope` depends on `model`, `source_msg`, `dry_run` (for the subject-marker stripping), and `verify` (for the shared comparison tallies). Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. `naming.rs` and `plan.rs` still carry `#![allow(dead_code)]`; the plan was to drop it when the writer landed, and it has not been tried yet. The full normalized model (M4b-4) has not been written: bodies with raw bytes, attachments, the raw property bag, named properties, and diagnostics are not modelled yet.

@@ -130,3 +130,70 @@ What this shows:
 ### Status
 
 **M4c is complete.** It is built, formatted, lint-clean, and CI-green; its 155 tests pass; it exported the real `.msg` corpus with counts that reconcile and a stable tree hash; the owner reviewed an exported message; and the interactive prompt, the non-interactive refusal (exit code 2), and `--overwrite` all behaved as designed on real output. The M4a-2 decision records and the full M4b-4 model are not done, so the `0.1-draft` schemas are not frozen. The housekeeping items remain: `#![allow(dead_code)]` in `naming.rs` and `plan.rs`, and the `0.1.23` Cargo version against the `v0.1.23.1` tag.
+
+## M4a-2: the four ADRs (accepted 2026-10-04; tag `v0.1.24`, documentation only)
+
+No code changed and nothing was run. The owner read and accepted the four ADRs (naming, collisions, and path budgets; identity and provenance; output posture, consent, and ownership; archive file contract and schema evolution). The body and formatting-loss ADR is not drafted because it depends on the HTML-to-Markdown comparison (M4e).
+
+## M4d: envelope (code at `v0.1.25`; tag `v0.1.25.1`, 2026-10-06)
+
+What was built: the envelope (sender, sent-representing, To/Cc/Bcc recipients, submit and delivery times, importance, sensitivity, conversation topic and index, transport headers) is read by the custom MS-OXMSG path (`oxmsg_envelope.rs`), held in the model (`Envelope`, `Address`, `Recipient`), shown as a header list in `message.md`, and recorded in an `envelope` object in `metadata.json` (draft schema). The status reason `envelope_not_extracted` became `other_properties_not_preserved`. A new `--verify-envelope` mode compares the subject, sender, and recipients with `msg_parser`. Property identifiers and how well each is confirmed: [`../plans/m4d-envelope-properties.md`](../plans/m4d-envelope-properties.md).
+
+### Build and regression (2026-10-06)
+
+- The owner reports that everything built and **165 tests pass** (155 existing plus 10 new); the work is committed on GitHub and tagged `v0.1.25.1`. The `v0.1.25` commit says the code was written uncompiled; `v0.1.25.1` adds the committed golden file `tests/golden/envelope/message.md` (an envelope-rich synthetic message, rendered by the pure renderer and compared byte for byte). The `hello` golden files changed with the new header list and status reason.
+- **Not reported for this round:** `cargo fmt --check`, `cargo clippy -D warnings`, and CI results, and a real-corpus export (so there is no `export_tree_sha256` for the new format; it changes with every envelope field, so the earlier `96da290e…793ad` no longer applies).
+- `verify-split.ps1` (`verify-split5.txt`), the pre-split baseline against the new build, on `tsp-tester.pst` and the 29-file `msgs` directory:
+
+| Output | Result | Size |
+|---|---|---|
+| default | IDENTICAL | 850 bytes, 33 lines |
+| `--verify` | IDENTICAL | 2705 bytes, 82 lines |
+| PST diagnostic | IDENTICAL | 1092 bytes, 44 lines |
+
+  Standard error was empty in all three. The key lines of the new `--verify` output are unchanged: `files_scanned=29`, `rtf_decompressed_bytes_mismatch=1`, `embedded_message_class_readable_total=1`, `structural_gate_violations=0`. Adding the envelope therefore changed none of the existing diagnostics. (The script's cleanup line names its baseline worktree `teaspoon_v0.1.19.1`; earlier results call the baseline v0.1.19.)
+
+### `--verify-envelope` over the 29 top-level `.msg` files (`verify-envelope1.txt`)
+
+`tsp --verify-envelope <fixtures>\msgs`. The report keys are counts only. `subdirectories_skipped=3`: the scan is non-recursive, so the 5 further messages in the 3 subdirectories (which the export includes) were not compared.
+
+| Field compared with `msg_parser` | Matched | Mismatched |
+|---|---|---|
+| subject | 29 | 0 |
+| sender name | 29 | 0 |
+| To list (length) / Cc list / Bcc list | 29 / 29 / 29 | 0 / 0 / 0 |
+| recipient name (36 recipients across the three lists) | 36 | 0 |
+| sender email | 29 (see below) | 0 |
+| recipient email | 36 (see below) | 0 |
+
+`open_errors_msg_parser=0` and `open_errors_custom=0`.
+
+Which of the custom path's two email properties equalled `msg_parser`'s single email string (an absent property is compared as an empty string, and "both" includes the case where both are empty):
+
+| | both | `PidTagEmailAddress` only | SMTP property only | neither |
+|---|---|---|---|---|
+| sender (29) | 1 | 26 | 2 | 0 |
+| recipients (36) | 0 | 33 | 3 | 0 |
+
+Presence counts, with nothing in `msg_parser` to compare against: sender 29 (`sender_missing_total=0`), sent-representing 29, submit time 29, delivery time 29, importance 29, sensitivity 11, transport headers 24, conversation topic 29, conversation index 29. `recipients_unlisted_total=0` and `exchange_without_smtp_total=0`.
+
+What this shows:
+- **No disagreement with the oracle on any compared field**, over 29 messages and 36 recipients. The differential gate for the comparable fields is met on this corpus.
+- **The email property question is partly answered.** `msg_parser`'s email string is not always `PidTagEmailAddress`: in 5 of 65 comparisons (2 senders, 3 recipients) it equals the SMTP property and not `PidTagEmailAddress`; in the other 60 it equals `PidTagEmailAddress`. That fits the reading that `msg_parser` prefers an SMTP value when one exists, but the counts cannot show it: `email_address_only` does not separate "the SMTP property is absent" from "present and different". Separating the two would settle whether `message.md`, which shows the SMTP address first, ever disagrees with `msg_parser`.
+- **The SMTP identifiers gained real-data evidence.** The SMTP-only matches (2 senders, 3 recipients) show that the properties read as the sender and recipient SMTP addresses (0x5D01, 0x39FE) carry the values `msg_parser` reports. The same holds for the sender name (0x0C1A), sender address (0x0C1F), recipient name (0x3001), and recipient address (0x3003) on every message and recipient.
+- **Some paths still have no real instance.** No message has an `EX` address without an SMTP address, no recipient row falls outside To/Cc/Bcc, and none is unlisted. Those paths are covered by unit tests only.
+- **Fields without an oracle** (sent-representing, times, importance, sensitivity, conversation fields, transport headers) are shown to be present in the corpus (above), but their values were not checked against anything independent. Sent-representing is present on all 29 messages.
+
+### Manual check
+
+The owner examined a couple of exported `message.md` and `metadata.json` pairs and found them as expected. Which messages, and how many, were not recorded.
+
+### Status
+
+**M4d is built and its differential gate is met for the fields `msg_parser` exposes** (0 mismatches), existing outputs are unchanged, and 165 tests pass. It is **not closed against the plan's own requirement** that every property identifier be confirmed against Microsoft's specifications: tier B and C identifiers remain, and the fields without an oracle rest on the specification and the unit tests. Open items:
+
+- Confirm the remaining identifiers (0x0064, 0x0065, 0x3002, the importance and sensitivity meanings, and the others listed as tier B or C) against MS-OXPROPS.
+- Separate "SMTP property absent" from "present and different" in the email tally.
+- Compare the 5 messages in the subdirectories (the scan is non-recursive).
+- Run an export of the corpus to record the new `export_tree_sha256`, and report `cargo fmt --check`, `clippy`, and CI for `v0.1.25.1`.
+- Review more exported messages, and a second producer, before treating the envelope as proven beyond one corpus.

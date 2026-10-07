@@ -48,12 +48,12 @@ The project distinguishes:
 
 | Level | PST | MSG |
 |---|---|---|
-| T0 build/static | CI on Linux and Windows | CI on Linux and Windows |
-| T1 unit | Yes | Yes: classification, decoding (including the `PT_STRING8` code page chain), counters, every verify-comparison outcome, structural gates |
-| T2 fixture | `tsp-tester.pst` (57 messages, enhanced to cover 5 of 7 identified gaps) | 29-file `.msg` corpus, plus synthetic ANSI (`PT_STRING8`) `.msg` files built at test time |
-| T3 behavioral | Not started | Not started |
-| T4 fidelity | Not started | Partial: field-by-field agreement with `msg_parser` on every comparable field |
-| T5 differential | Not started; no `libpff`/`libpst` comparison has been run | Done against `msg_parser` (`--verify`, re-run on the final M3 build), two differences triaged against the specifications; `libpff`/`libpst` not used |
+| T0 build/static | CI on Linux and Windows | CI on Linux and Windows (last reported for `v0.1.23.1`; not reported for `v0.1.25.1`) |
+| T1 unit | Yes (naming, planning, rendering) | Yes: classification, decoding (including the `PT_STRING8` code page chain), counters, every verify-comparison outcome, structural gates, the archive renderers against golden files (including an envelope-rich message), the envelope comparison rules, the export writer; 165 tests at `v0.1.25.1` |
+| T2 fixture | `tsp-tester.pst` (57 messages, enhanced to cover 5 of 7 identified gaps) | 29-file `.msg` corpus (plus 3 subdirectories for the dry run and export), plus synthetic `.msg` files built at test time |
+| T3 behavioral | Not started | Partial: export, consent, and overwrite behavior exercised on real output (v0.1.23.1) |
+| T4 fidelity | Not started | Partial: field-by-field agreement with `msg_parser` on every comparable field, including (M4d) the subject, sender, and recipients of the 29 top-level files |
+| T5 differential | Not started; no `libpff`/`libpst` comparison has been run | Done against `msg_parser` (`--verify`, re-run through `v0.1.25.1`; `--verify-envelope`, 0 mismatches), two differences triaged against the specifications in M3; `libpff`/`libpst` not used |
 | T6 adversarial | Not started | Partial: synthetic fixtures for unsupported code pages and undecodable strings; no malformed or truncated container corpus |
 | T7 corpus | One PST | One 29-file corpus; fixtures deliberately not in the repository, and provenance is not recorded in it |
 
@@ -85,6 +85,8 @@ committed with it.
   automatically; it stays a manual step.
 - Raising the tolerated RTF divergence, or adding any other exception,
   requires a specification-checked reason recorded in the M3 results.
+- `--verify-envelope` (M4d) has no corpus-gated test yet; it is run by hand
+  and its output recorded in `m4-results.md`.
 
 When a structural gate does fire, `--verify` prints the privacy-safe
 structural breakdown after a `structural_breakdown=follows` marker, so the
@@ -101,6 +103,13 @@ Design choices behind this, for the next fixture-gated check:
 - Build small synthetic fixtures at test time for cases the corpus lacks
   (ANSI strings, unsupported code pages). They are hermetic and run in CI.
   They prove the decoder's logic, not that real producers behave that way.
+
+## Regression and golden evidence in M4
+
+- **`verify-split.ps1`** compares the default, `--verify`, and PST outputs of an earlier tag with those of the new build, byte for byte. It has been run for v0.1.20, v0.1.22, v0.1.23.1, and v0.1.25.1 (always IDENTICAL: 850, 2705, and 1092 bytes). It proves a change did not alter existing diagnostics; it says nothing about new output.
+- **Golden files** (`tests/golden/`, synthetic messages, no personal data) pin the exact bytes of `message.md`, `metadata.json`, and an envelope-rich `message.md`. They run in CI.
+- **Tree hash** (`export_tree_sha256`) lets two exports be compared at a glance; it changes whenever the output format changes, so each format change needs a new baseline from a real-corpus export.
+- **Differential checks** compare against `msg_parser` only where it exposes the field; fields without an oracle are reported as presence counts and rest on the specification and unit tests. The tallies say which of two properties matched, but an absent property is compared as empty, so they cannot always separate "absent" from "present and different".
 
 ## M1 evidence target
 
@@ -128,3 +137,13 @@ M3 is intended to establish, for `.msg`:
 
 It does not establish complete semantic extraction, Markdown rendering, or
 attachment byte preservation.
+
+## M4 evidence target
+
+M4 is intended to establish a deterministic, loss-explicit archive: names and
+paths that are valid and unique on Windows, byte-identical re-exports, consent
+before replacing anything, and every gap recorded. Each stage has its own
+gate in `docs/plans/m4-plan.md` and its results in `m4-results.md`. As of
+`v0.1.25.1` the evidence covers the planner, the `.msg` export with its
+consent rules, and the envelope; it does not yet cover attachment bytes,
+HTML and RTF body conversion, or PST export.
