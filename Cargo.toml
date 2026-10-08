@@ -1,7 +1,7 @@
 [package]
 name = "teaspoon"
-version = "0.1.25"
-edition = "2021"
+version = "0.1.26"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
 description = "Deterministic, loss-aware mining of Outlook .pst and .msg files; a standalone tool"
