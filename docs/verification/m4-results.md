@@ -195,5 +195,29 @@ The owner examined a couple of exported `message.md` and `metadata.json` pairs a
 - Confirm the remaining identifiers (0x0064, 0x0065, 0x3002, the importance and sensitivity meanings, and the others listed as tier B or C) against MS-OXPROPS.
 - Separate "SMTP property absent" from "present and different" in the email tally.
 - Compare the 5 messages in the subdirectories (the scan is non-recursive).
-- Run an export of the corpus to record the new `export_tree_sha256`, and report `cargo fmt --check`, `clippy`, and CI for `v0.1.25.1`.
+- ~~Run an export of the corpus to record the new `export_tree_sha256`~~ (done 2026-10-07, below). `cargo fmt --check`, `clippy`, and CI for `v0.1.25.1` are still not reported.
 - Review more exported messages, and a second producer, before treating the envelope as proven beyond one corpus.
+
+### M4d loose ends (2026-10-07; tags `v0.1.25.1` and `v0.1.25.2`)
+
+- **New corpus baseline.** The owner reports that the export of the `.msg` corpus at `v0.1.25.1` (the same at `v0.1.25.2`, the documentation-only tag after the M4d documents were applied) reports `export_tree_sha256=72d8553417441719c7c1e2b1d3ec253141fb5c2697c311d4210a92cd5d71c2e5`. This replaces `96da290e…793ad` (v0.1.23.1), which no longer applies because the output format changed. The other `export_*` counts for this run were not reported.
+- **PST short-`--out` item is still open.** Running `tsp.exe tsp-tester.pst --out $o` without `--dry-run` stops with "exporting a .pst file is not implemented yet (planned for M4i); add --dry-run to plan one". That is the designed refusal and not a failure; the open item needs `--dry-run` with a short `--out`.
+- **Identifiers.** Three property identifiers moved to tier A on 2026-10-07 after being seen on Microsoft's MAPI canonical property pages: 0x0064 and 0x0065 (sent-representing address type and address) and 0x39FE (SMTP address). See [`../plans/m4d-envelope-properties.md`](../plans/m4d-envelope-properties.md). The others stand.
+- **Built, not yet run (v0.1.26 candidate):** the email tally now separates "SMTP absent" from "SMTP present and different", and `--recursive` lets `--verify-envelope` cover the 5 messages in the subdirectories. Both need one run to produce numbers.
+- Still not reported: `cargo fmt --check`, `clippy`, and CI for `v0.1.25.1`.
+
+## M4e-1: in-house MS-OXRTFEX de-encapsulation (written 2026-10-07; not yet built or run)
+
+What was written: `src/rtf_deencap.rs` (pure; the recognition rule, an RTF tokenizer, and the extraction rules of MS-OXRTFEX 2.2.3.1 and 2.2.3.2, with diagnostics and bounds), `src/verify_deencap.rs` (`--verify-deencap`), and edits to `cli.rs` (`--verify-deencap`, `--recursive`), `main.rs`, and `verify_envelope.rs`. The specification pages read for this are listed in [`../plans/m4-plan.md`](../plans/m4-plan.md) (M4e-1). Nothing has been compiled or run, so nothing here is a result.
+
+Gate (from the plan), and its state:
+
+| Gate item | State |
+|---|---|
+| Spec-derived unit and golden tests | written (about 30 tests in `rtf_deencap.rs`); not run |
+| Weak-oracle differential against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML messages, counts only, every disagreement triaged | the mode is written; not run |
+| Property test: arbitrary input never panics and stays within the output bound | written; not run |
+| Recognition rule against `check_compressed_rtf_bytes` | compared by `--verify-deencap` (`recognition_vs_marker_search_*`); not run |
+| Hand comparison of a sample against a reference implementation | not done |
+
+What to expect from the first `--verify-deencap` run, stated as hypotheses to check and not as findings: one presence mismatch (the genuinely RTF-authored fixture, where `msg_parser` returns HTML and the 10-token rule does not); some disagreements from `msg_parser`'s Latin-1 treatment of `\'hh` escapes; one file affected by the dictionary divergence; and unsupported-code-page bytes (reported as `deencap_unsupported_codepage_<n>_files` and `deencap_undecodable_bytes_total`) if any message uses a code page other than 1252, which would be the evidence for or against adding a code page crate.

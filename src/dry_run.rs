@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::naming::{sanitize_component, utf16_len};
-use crate::plan::{plan_export, verify_plan, GateReport, Plan, Policy};
+use crate::plan::{GateReport, Plan, Policy, plan_export, verify_plan};
 use crate::source_msg::build_msg_tree;
 use crate::source_pst::build_pst_tree;
 

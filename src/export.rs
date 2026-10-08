@@ -16,20 +16,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
 use crate::archive::{
-    adjustment_names, message_metadata, render_message_md, to_json, ChildRecord, FolderMetadata,
-    NameRecord, RootCounts, RootRecord, RootSpec, SourceRecord, FOLDER_JSON_NAME,
-    KIND_ARCHIVE_ROOT, MESSAGE_MD_NAME, METADATA_JSON_NAME, STATUS_COMPLETE, STATUS_INCOMPLETE,
-    TOOL_NAME,
+    ChildRecord, FOLDER_JSON_NAME, FolderMetadata, KIND_ARCHIVE_ROOT, MESSAGE_MD_NAME,
+    METADATA_JSON_NAME, NameRecord, RootCounts, RootRecord, RootSpec, STATUS_COMPLETE,
+    STATUS_INCOMPLETE, SourceRecord, TOOL_NAME, adjustment_names, message_metadata,
+    render_message_md, to_json,
 };
-use crate::dry_run::{classify_source, input_leaf_name, root_stem, root_units, SourceKind};
+use crate::dry_run::{SourceKind, classify_source, input_leaf_name, root_stem, root_units};
 use crate::model::PlainBody;
 use crate::naming::{collision_key, utf16_len};
-use crate::plan::{plan_export, verify_plan, EntryKind, Plan, Policy, SourceFolder, SourceMessage};
-use crate::source_msg::{build_msg_export_source, read_message_content, MsgFileMap};
+use crate::plan::{EntryKind, Plan, Policy, SourceFolder, SourceMessage, plan_export, verify_plan};
+use crate::source_msg::{MsgFileMap, build_msg_export_source, read_message_content};
 
 /// Staging directory directly under `--out`. Files are written here under short numeric names
 /// and then renamed into place, so a half-written file never appears at its final path.
@@ -275,14 +275,14 @@ fn sha256_file(path: &Path) -> Result<(String, u64)> {
 /// The source file's name (single file) or its path relative to the input directory with `/`
 /// separators. Never absolute.
 fn relative_source_name(input: &Path, file: &Path) -> String {
-    if input.is_dir() {
-        if let Ok(rel) = file.strip_prefix(input) {
-            return rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/");
-        }
+    if input.is_dir()
+        && let Ok(rel) = file.strip_prefix(input)
+    {
+        return rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
     }
     file.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -655,7 +655,9 @@ fn prepare_staging(staging: &Path) -> Result<()> {
                 let leftover =
                     is_file && !name.is_empty() && name.chars().all(|c| c.is_ascii_digit());
                 if !leftover {
-                    bail!("the staging directory .tsp-tmp already holds entries this tool did not create; remove it and retry");
+                    bail!(
+                        "the staging directory .tsp-tmp already holds entries this tool did not create; remove it and retry"
+                    );
                 }
                 std::fs::remove_file(entry.path())
                     .context("failed to remove a leftover staged file")?;
@@ -872,7 +874,9 @@ pub(crate) fn run_export(
     report.readback_mismatches = read_back_mismatches(&root_dir, &rendered.files);
     print_export_report(&report);
     if report.readback_mismatches > 0 {
-        bail!("read-back found files that differ from what was planned; the archive is not trustworthy");
+        bail!(
+            "read-back found files that differ from what was planned; the archive is not trustworthy"
+        );
     }
     Ok(ExportStatus::Completed)
 }
@@ -1155,10 +1159,12 @@ mod tests {
         let meta: serde_json::Value = serde_json::from_slice(&files[&meta_key]).unwrap();
         assert_eq!(meta["directory"]["original"], "Re: a/b?");
         assert_eq!(meta["subject"], "Re: a/b?");
-        assert!(!meta["directory"]["adjustments"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            !meta["directory"]["adjustments"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1320,11 +1326,12 @@ mod tests {
             export(&input, &out, &opts(false, false)),
             ExportStatus::Completed
         );
-        assert!(out
-            .join("m")
-            .join("Hello World")
-            .join("message.md")
-            .exists());
+        assert!(
+            out.join("m")
+                .join("Hello World")
+                .join("message.md")
+                .exists()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

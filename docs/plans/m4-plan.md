@@ -1,6 +1,6 @@
-# M4 plan (v4.7) — normalized model and deterministic Markdown archive
+# M4 plan (v4.8) — normalized model and deterministic Markdown archive
 
-Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c complete (tag v0.1.23.1, 2026-10-03); M4a-2 complete for the four ADRs that could be decided (accepted by the owner 2026-10-04, release v0.1.24, documentation only); M4d (the envelope, with the envelope part of M4b-4) built and verified against `msg_parser` for the fields it exposes (code at v0.1.25, tag v0.1.25.1, 2026-10-06), not yet closed against the specification check of every property identifier; the body and formatting-loss ADR is deferred to M4e.** Version 4.7, revised 2026-10-06 from version 4.6 to record M4d. Every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
+Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c complete (tag v0.1.23.1, 2026-10-03); M4a-2 complete for the four ADRs that could be decided (accepted by the owner 2026-10-04, release v0.1.24, documentation only); M4d (the envelope, with the envelope part of M4b-4) built and verified against `msg_parser` for the fields it exposes (code at v0.1.25, tag v0.1.25.1, 2026-10-06), not yet closed against the specification check of every property identifier; the body and formatting-loss ADR is deferred to M4e.** Version 4.8, revised 2026-10-07 from version 4.7 to record the M4d baseline and loose ends and to record that M4e-1 (the RTF de-encapsulation) is written but not yet built or run. Every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
 
 - [`m4a-export-rules.md`](m4a-export-rules.md): the naming, layout, identity, duplicate, path-length, and overwrite rules (v3.6; sections 4-6 are now backed by an accepted ADR).
 - [`m4a-dependency-research.md`](m4a-dependency-research.md): RTF de-encapsulation, HTML-to-Markdown converters, and supporting crates.
@@ -26,7 +26,15 @@ Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) 
 - The owner will create the priority fixtures separately.
 - 2026-10-03: the owner directed that M4c proceed ahead of M4a-2 (the ADRs) and M4b-4 (the model types), which this plan places before it. M4c used a small seed of the model and **draft** schemas so that the ADRs could decide what the skeleton had actually produced.
 - 2026-10-04: the owner directed that M4a-2 be taken next, read the four ADRs, and **accepted each of them**, including the decisions that went beyond the original overwrite instruction (an archive of a different source is refused even with `--overwrite`; source identity is kind plus name, not hash; a non-empty directory without a `tsp` marker is refused; per-file rather than whole-archive atomicity for now) and the binding file rules (UTF-8 without BOM, LF, fixed field order, no absolute paths or export-time values).
+- 2026-10-07: the owner reported the v0.1.25.1 corpus tree hash and directed that M4d's loose ends be closed and M4e-1 (in-house MS-OXRTFEX de-encapsulation) started now, ahead of the HTML-to-Markdown bake-off (M4e-0), which needs real HTML that only M4e-1 can supply from this corpus.
 - 2026-10-06: the owner took M4d next, together with the envelope part of the model (M4b-4), ahead of the bake-off (M4e-0), and built and tagged it (v0.1.25, v0.1.25.1).
+
+## What changed from v4.7
+
+1. **M4d baseline recorded.** The corpus export at `v0.1.25.1` (and `v0.1.25.2`, documentation only) has `export_tree_sha256=72d8553417441719c7c1e2b1d3ec253141fb5c2697c311d4210a92cd5d71c2e5`.
+2. **M4d loose ends:** three property identifiers (0x0064, 0x0065, 0x39FE) are tier A (seen on Microsoft's MAPI canonical property pages); the email tally split ("SMTP absent" versus "present and different") and `--recursive` for `--verify-envelope` are written, not yet run; `fmt`, `clippy`, and CI for the tag are still not reported. M4d stays "built and verified for the comparable fields", not closed.
+3. **M4e-1 written, not built or run:** `rtf_deencap.rs`, `verify_deencap.rs` (`--verify-deencap`), and edits to `cli.rs`, `main.rs`, and `verify_envelope.rs`. Its gate is not met until the owner builds it and reports a run.
+4. The PST short-`--out` item is unchanged: the run reported (without `--dry-run`) was the designed "not implemented" refusal; it needs `--dry-run`.
 
 ## What changed from v4.6
 
@@ -210,9 +218,21 @@ Note for sequencing (not yet decided): the `.msg` corpus has no native HTML body
 
 ### M4e-1 — MS-OXRTFEX de-encapsulation (in-house)
 
-Implement the module specified in the research document, including confirming the recognition rule (first 10 tokens) against `check_compressed_rtf_bytes`.
+Status: **written 2026-10-07, uncompiled; not yet built or run.** New modules `src/rtf_deencap.rs` (pure) and `src/verify_deencap.rs`; `cli.rs` gains `--verify-deencap` and `--recursive`; `main.rs` dispatches them; `verify_envelope.rs` splits its email tally. No dependency was added.
 
-Gate: spec-derived unit and golden tests; a weak-oracle differential against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML corpus messages, counts only, every disagreement triaged; a property test that arbitrary input never panics and stays within an output bound.
+The specification pages this was written from (all read 2026-10-07): MS-OXRTFEX 2.2.3.1 (recognizing encapsulation: `{\rtf1` first; at most the first 10 tokens, begin-group marks and control words; `\fromhtml1` or `\fromtext` among them; any other token kind, or neither word, means ordinary RTF), 2.2.3.2 (extracting encapsulated HTML), 2.1.3.1.4 (the HTMLTAG destination group, whose numeric parameter is ignored), and 2.1.3.1.5 (the MHTMLTAG group, covered by the rule that ignorable destinations other than HTMLTAG are skipped).
+
+Decisions taken in the code, each stated so it can be overruled:
+- **Recognition is the 10-token rule**, stricter than the whole-document `\fromhtml1` search in `shared.rs`. The two are compared by `--verify-deencap`; `shared.rs` is not changed.
+- **Output is UTF-8 text.** A `charset=` in the recovered HTML is stale; `meta_charset_declared` records it and the body pipeline (M4e-2) must not trust it.
+- **`htmltag` content** is decoded in the document's default code page; **ordinary text** in the current font's code page (from `\fcharset` or `\cpg` in the font table); the font is tracked inside `\htmlrtf` regions, as the specification says.
+- **`\htmlrtf` is group-scoped** like any RTF character-formatting toggle. This is an assumption; a corpus disagreement with `msg_parser` that traces to it would show here first.
+- **Code pages** are limited to those `oxmsg_decode` implements (1252, ISO-8859-1, US-ASCII, UTF-8). Anything else becomes U+FFFD per byte and is counted (`deencap_undecodable_bytes_total`, `deencap_unsupported_codepage_<n>_files`); no code page crate is added until the corpus shows it is needed.
+- **Skipped destinations** are a fixed list of standard destinations without visible text, only as a group's first word; unlisted ones are treated as visible (a known limit).
+- **Bounds:** group depth 1024 and output 64 MiB, each reported as a flag when hit; no input can panic it (a property test covers arbitrary bytes).
+- The decompressed RTF still comes from `compressed-rtf`, whose result is a string; an RTF stream with raw non-UTF-8 bytes would fail decompression and be counted (`rtf_decompression_failed`). Replacing it with an in-house MS-OXRTFCP decompressor is a possible follow-up if the corpus shows it matters.
+
+Gate: spec-derived unit and golden tests; a weak-oracle differential against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML corpus messages, counts only, every disagreement triaged; a property test that arbitrary input never panics and stays within the output bound; the recognition rule confirmed against `check_compressed_rtf_bytes`. **None met yet** (written, not run). Agreement is graded, not pass/fail: byte-identical, equal ignoring whitespace, equal ignoring whitespace and non-ASCII, same visible text, same visible text ASCII only, different.
 
 ### M4e-2 — body pipeline
 
@@ -313,8 +333,9 @@ Crate boundaries become worthwhile only for a concrete reason: another program e
 
 ## Decisions still needed from the owner
 
-1. The PST items still open from M4b-3: a PST dry run with a short `--out`, and the current PST diagnostic output (`tsp tsp-tester.pst`) to reconcile the PST counts.
-2. Whether to try removing `#![allow(dead_code)]` now, and the `Cargo.toml` version to use for the next tag (the file said `0.1.23` at `v0.1.23.1`).
-3. Whether to treat M4d as closed now or after the specification check of the remaining property identifiers and the two small follow-ups (split the email tally; include subdirectories in `--verify-envelope`).
-4. Which stage comes next: the HTML-to-Markdown bake-off (M4e-0, which unblocks the deferred fifth ADR) or the de-encapsulation (M4e-1) first, since the corpus has HTML only inside RTF; or attachments (M4f).
-5. Q11, the content-hash definition, before M4g (not before).
+1. The PST items still open from M4b-3: a PST **dry run** (`--out <short> --dry-run`) and the current PST diagnostic output (`tsp tsp-tester.pst`) to reconcile the PST counts.
+2. Whether to try removing `#![allow(dead_code)]` now, and the `Cargo.toml` version and tag for the next release (M4e-1 and the two M4d follow-ups are written as a v0.1.26 candidate).
+3. After building the M4e-1 code: the `--verify-deencap` output (and `--verify-envelope --recursive`), so the gate and the open M4d items can be judged.
+4. Whether a code page crate (for example `encoding_rs`) is warranted, decided from the unsupported-code-page counts in that run.
+5. The M4d specification check of the remaining tier B and C identifiers (0x0C1A, 0x3001-0x3003, 0x0C15, 0x0E06, importance and sensitivity meanings), and `fmt`, `clippy`, and CI results for the tag.
+6. Q11, the content-hash definition, before M4g (not before).

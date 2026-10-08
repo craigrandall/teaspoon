@@ -7,22 +7,22 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::msg_report::{
+    MSG_ATTACH_METHOD_EMBEDDED_MESSAGE, MsgTotals, PROP_TYPE_ERROR, PROP_TYPE_UNSPECIFIED,
     print_msg_report, record_embedded_message_class, record_msg_class, record_msg_recipients,
-    MsgTotals, MSG_ATTACH_METHOD_EMBEDDED_MESSAGE, PROP_TYPE_ERROR, PROP_TYPE_UNSPECIFIED,
 };
 use crate::oxmsg_classify::{
-    message_shaped_parent_paths, top_level_storage_paths, OxmsgEntryKind, OxmsgEntryScope,
-    EMBEDDED_OBJECT_STORAGE_NAME,
+    EMBEDDED_OBJECT_STORAGE_NAME, OxmsgEntryKind, OxmsgEntryScope, message_shaped_parent_paths,
+    top_level_storage_paths,
 };
 use crate::oxmsg_decode::{
-    decode_fixed_value, decode_properties_stream, decode_string8_with_codepage,
-    decode_unicode_value, expected_variable_stream_path, extract_string8_codepage,
-    properties_stream_header_len, read_stream_bytes, DecodedFixedValue, String8Decoded,
-    PROP_MESSAGE_CLASS,
+    DecodedFixedValue, PROP_MESSAGE_CLASS, String8Decoded, decode_fixed_value,
+    decode_properties_stream, decode_string8_with_codepage, decode_unicode_value,
+    expected_variable_stream_path, extract_string8_codepage, properties_stream_header_len,
+    read_stream_bytes,
 };
 use crate::shared::{
-    check_compressed_rtf_bytes, CompoundFile, RtfHtmlCheck, PROP_ATTACH_CONTENT_ID,
-    PROP_ATTACH_METHOD, PROP_BODY, PROP_BODY_HTML, PROP_RECIPIENT_TYPE, PROP_RTF_COMPRESSED,
+    CompoundFile, PROP_ATTACH_CONTENT_ID, PROP_ATTACH_METHOD, PROP_BODY, PROP_BODY_HTML,
+    PROP_RECIPIENT_TYPE, PROP_RTF_COMPRESSED, RtfHtmlCheck, check_compressed_rtf_bytes,
 };
 
 // =============================================================================

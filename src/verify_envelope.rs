@@ -11,7 +11,10 @@
 //! sender's name and email, and the To / Cc / Bcc recipient lists (length, then name and email
 //! position by position). `msg_parser`'s single email string is checked against both
 //! `PidTagEmailAddress` and the SMTP address, and the report says which one it matched, because
-//! which property `msg_parser` reads is not documented.
+//! which property `msg_parser` reads is not documented. Since v0.1.26 the report also separates,
+//! within "matched only one", whether the other property was absent or present and different, so
+//! it is visible whether `message.md` (which prefers the SMTP address) can ever disagree with
+//! `msg_parser`.
 
 use std::path::PathBuf;
 
@@ -21,7 +24,7 @@ use msg_parser::Outlook;
 use crate::dry_run::strip_subject_marker;
 use crate::model::{Address, Envelope, RecipientKind};
 use crate::source_msg::read_message_content;
-use crate::verify::{compare_count, print_count_tally, CountComparison, CountTally};
+use crate::verify::{CountComparison, CountTally, compare_count, print_count_tally};
 
 /// Which of the custom path's two email properties equals `msg_parser`'s email string.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,20 +55,55 @@ pub(crate) fn compare_text(msg_parser: &str, custom: &str) -> CountComparison {
     }
 }
 
+/// An absent property, or one stored as an empty string.
+fn is_blank(value: &Option<String>) -> bool {
+    value.as_deref().is_none_or(str::is_empty)
+}
+
 #[derive(Default)]
 pub(crate) struct EmailTally {
     pub(crate) both: u64,
+    /// Of `both`: the two properties are both absent or empty (and `msg_parser`'s string is empty).
+    pub(crate) both_empty: u64,
     pub(crate) email_address_only: u64,
+    /// Of `email_address_only`: the SMTP property is absent or empty.
+    pub(crate) email_address_only_smtp_absent: u64,
+    /// Of `email_address_only`: the SMTP property is present and differs. `message.md` shows the
+    /// SMTP address first, so each of these is a place it can disagree with `msg_parser`.
+    pub(crate) email_address_only_smtp_present_different: u64,
     pub(crate) smtp_only: u64,
+    /// Of `smtp_only`: `PidTagEmailAddress` is absent or empty.
+    pub(crate) smtp_only_email_address_absent: u64,
+    /// Of `smtp_only`: `PidTagEmailAddress` is present and differs (typically an Exchange DN).
+    pub(crate) smtp_only_email_address_present_different: u64,
     pub(crate) neither: u64,
 }
 
 impl EmailTally {
-    pub(crate) fn record(&mut self, comparison: EmailComparison) {
+    pub(crate) fn record(&mut self, comparison: EmailComparison, address: &Address) {
         match comparison {
-            EmailComparison::Both => self.both += 1,
-            EmailComparison::EmailAddressOnly => self.email_address_only += 1,
-            EmailComparison::SmtpOnly => self.smtp_only += 1,
+            EmailComparison::Both => {
+                self.both += 1;
+                if is_blank(&address.email_address) && is_blank(&address.smtp_address) {
+                    self.both_empty += 1;
+                }
+            }
+            EmailComparison::EmailAddressOnly => {
+                self.email_address_only += 1;
+                if is_blank(&address.smtp_address) {
+                    self.email_address_only_smtp_absent += 1;
+                } else {
+                    self.email_address_only_smtp_present_different += 1;
+                }
+            }
+            EmailComparison::SmtpOnly => {
+                self.smtp_only += 1;
+                if is_blank(&address.email_address) {
+                    self.smtp_only_email_address_absent += 1;
+                } else {
+                    self.smtp_only_email_address_present_different += 1;
+                }
+            }
             EmailComparison::Neither => self.neither += 1,
         }
     }
@@ -73,11 +111,28 @@ impl EmailTally {
 
 fn print_email_tally(name: &str, tally: &EmailTally) {
     println!("{name}_match_both={}", tally.both);
+    println!("{name}_match_both_empty={}", tally.both_empty);
     println!(
         "{name}_match_email_address_only={}",
         tally.email_address_only
     );
+    println!(
+        "{name}_match_email_address_only_smtp_absent={}",
+        tally.email_address_only_smtp_absent
+    );
+    println!(
+        "{name}_match_email_address_only_smtp_present_different={}",
+        tally.email_address_only_smtp_present_different
+    );
     println!("{name}_match_smtp_only={}", tally.smtp_only);
+    println!(
+        "{name}_match_smtp_only_email_address_absent={}",
+        tally.smtp_only_email_address_absent
+    );
+    println!(
+        "{name}_match_smtp_only_email_address_present_different={}",
+        tally.smtp_only_email_address_present_different
+    );
     println!("{name}_mismatch={}", tally.neither);
 }
 
@@ -124,7 +179,7 @@ fn compare_recipient_lists(
             mp.0,
             address.display_name.as_deref().unwrap_or(""),
         ));
-        emails.record(compare_email(mp.1, address));
+        emails.record(compare_email(mp.1, address), address);
     }
 }
 
@@ -177,7 +232,7 @@ pub(crate) fn collect_envelope_verify_totals(files: &[PathBuf]) -> EnvelopeVerif
         ));
         totals
             .sender_email
-            .record(compare_email(&outlook.sender.email, sender));
+            .record(compare_email(&outlook.sender.email, sender), sender);
 
         let to: Vec<(&str, &str)> = outlook
             .to
@@ -346,6 +401,40 @@ mod tests {
     }
 
     #[test]
+    fn the_tally_separates_an_absent_property_from_a_different_one() {
+        let mut tally = EmailTally::default();
+
+        let absent = address(Some("a@x"), None);
+        tally.record(compare_email("a@x", &absent), &absent);
+        let empty = address(Some("a@x"), Some(""));
+        tally.record(compare_email("a@x", &empty), &empty);
+        let different = address(Some("a@x"), Some("b@x"));
+        tally.record(compare_email("a@x", &different), &different);
+        assert_eq!(tally.email_address_only, 3);
+        assert_eq!(tally.email_address_only_smtp_absent, 2);
+        assert_eq!(tally.email_address_only_smtp_present_different, 1);
+
+        let no_address = address(None, Some("a@x"));
+        tally.record(compare_email("a@x", &no_address), &no_address);
+        let exchange = address(Some("/O=EX"), Some("a@x"));
+        tally.record(compare_email("a@x", &exchange), &exchange);
+        assert_eq!(tally.smtp_only, 2);
+        assert_eq!(tally.smtp_only_email_address_absent, 1);
+        assert_eq!(tally.smtp_only_email_address_present_different, 1);
+
+        let same = address(Some("a@x"), Some("a@x"));
+        tally.record(compare_email("a@x", &same), &same);
+        let nothing = Address::default();
+        tally.record(compare_email("", &nothing), &nothing);
+        assert_eq!(tally.both, 2);
+        assert_eq!(tally.both_empty, 1);
+
+        let other = address(Some("c@x"), None);
+        tally.record(compare_email("a@x", &other), &other);
+        assert_eq!(tally.neither, 1);
+    }
+
+    #[test]
     fn text_is_compared_exactly() {
         assert_eq!(compare_text("a", "a"), CountComparison::Match);
         assert_eq!(compare_text("a", "A"), CountComparison::Mismatch);
@@ -380,7 +469,9 @@ mod tests {
         assert_eq!((names.matched, names.mismatched), (1, 1));
         assert_eq!(emails.both, 0);
         assert_eq!(emails.email_address_only, 1);
+        assert_eq!(emails.email_address_only_smtp_absent, 1);
         assert_eq!(emails.smtp_only, 1);
+        assert_eq!(emails.smtp_only_email_address_absent, 1);
 
         // A shorter custom list is a list mismatch; only the common prefix is compared.
         let mut lists = CountTally::default();

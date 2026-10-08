@@ -5,18 +5,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::oxmsg_classify::{
-    cfb_entry_depth, cfb_entry_name, cfb_object_kind, classify_oxmsg_entry,
+    CfbObjectKind, OxmsgEntryKind, OxmsgEntryScope, RecognizedNameTypeMismatch,
+    UnrecognizedNameShape, cfb_entry_depth, cfb_entry_name, cfb_object_kind, classify_oxmsg_entry,
     enclosing_custom_payload_root, message_shaped_parent_paths, oxmsg_ancestry_shape,
-    oxmsg_entry_scope, recognized_name_type_mismatch, unrecognized_name_shape, CfbObjectKind,
-    OxmsgEntryKind, OxmsgEntryScope, RecognizedNameTypeMismatch, UnrecognizedNameShape,
+    oxmsg_entry_scope, recognized_name_type_mismatch, unrecognized_name_shape,
 };
 use crate::oxmsg_decode::{
-    classify_property_entry_shape, decode_fixed_value, decode_named_property_string,
-    decode_properties_stream, decode_string8_with_codepage, decode_unicode_value,
-    expected_size_field_value, expected_variable_stream_path, extract_string8_codepage,
-    is_valid_boolean_encoding, properties_stream_header_len, read_named_property_map,
-    read_stream_bytes, CodepageSource, DecodedFixedValue, DecodedPropertyEntry, NamedPropertyMap,
-    NamedPropertySet, PropertyEntryShape, String8Decoded,
+    CodepageSource, DecodedFixedValue, DecodedPropertyEntry, NamedPropertyMap, NamedPropertySet,
+    PropertyEntryShape, String8Decoded, classify_property_entry_shape, decode_fixed_value,
+    decode_named_property_string, decode_properties_stream, decode_string8_with_codepage,
+    decode_unicode_value, expected_size_field_value, expected_variable_stream_path,
+    extract_string8_codepage, is_valid_boolean_encoding, properties_stream_header_len,
+    read_named_property_map, read_stream_bytes,
 };
 use crate::shared::CompoundFile;
 

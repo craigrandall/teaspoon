@@ -17,9 +17,8 @@ use outlook_pst::messaging::store::Store;
 use outlook_pst::ndb::node_id::NodeId;
 
 use crate::dry_run::{
-    strip_subject_marker, InternetIdTracker, SourceCensus, PROP_ATTACH_FILENAME,
-    PROP_ATTACH_LONG_FILENAME, PROP_DELIVERY_TIME, PROP_INTERNET_MESSAGE_ID, PROP_SUBJECT,
-    PROP_SUBMIT_TIME,
+    InternetIdTracker, PROP_ATTACH_FILENAME, PROP_ATTACH_LONG_FILENAME, PROP_DELIVERY_TIME,
+    PROP_INTERNET_MESSAGE_ID, PROP_SUBJECT, PROP_SUBMIT_TIME, SourceCensus, strip_subject_marker,
 };
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
 use crate::pst::{column_index, read_i32_at};
@@ -135,21 +134,40 @@ impl PstBuilder {
         }
 
         let mut folders = Vec::new();
-        if depth < MAX_FOLDER_DEPTH {
-            if let Some(hierarchy) = folder.hierarchy_table() {
-                for row in hierarchy.rows_matrix() {
-                    let node = NodeId::from(u32::from(row.id()));
-                    let entry_id = match store.properties().make_entry_id(node) {
-                        Ok(entry_id) => entry_id,
-                        Err(_) => {
-                            self.census.open_errors += 1;
-                            continue;
-                        }
-                    };
-                    match store.open_folder(&entry_id) {
-                        Ok(child) => folders.push(self.folder(store, child.as_ref(), depth + 1)),
-                        Err(_) => self.census.open_errors += 1,
+        if depth < MAX_FOLDER_DEPTH
+            && let Some(hierarchy) = folder.hierarchy_table()
+        {
+            for row in hierarchy.rows_matrix() {
+                let node = NodeId::from(u32::from(row.id()));
+                let entry_id = match store.properties().make_entry_id(node) {
+                    Ok(entry_id) => entry_id,
+                    Err(_) => {
+                        self.census.open_errors += 1;
+                        continue;
                     }
+                };
+                match store.open_folder(&entry_id) {
+                    Ok(child) => folders.push(self.folder(store, child.as_ref(), depth + 1)),
+                    Err(_) => self.census.open_errors += 1,
+                }
+            }
+        }
+
+        if depth < MAX_FOLDER_DEPTH
+            && let Some(hierarchy) = folder.hierarchy_table()
+        {
+            for row in hierarchy.rows_matrix() {
+                let node = NodeId::from(u32::from(row.id()));
+                let entry_id = match store.properties().make_entry_id(node) {
+                    Ok(entry_id) => entry_id,
+                    Err(_) => {
+                        self.census.open_errors += 1;
+                        continue;
+                    }
+                };
+                match store.open_folder(&entry_id) {
+                    Ok(child) => folders.push(self.folder(store, child.as_ref(), depth + 1)),
+                    Err(_) => self.census.open_errors += 1,
                 }
             }
         }

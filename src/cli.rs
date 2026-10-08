@@ -37,6 +37,18 @@ pub(crate) struct Args {
     #[arg(long, conflicts_with_all = ["verify", "out", "dry_run"])]
     pub(crate) verify_envelope: bool,
 
+    /// Compare the HTML the in-house MS-OXRTFEX de-encapsulation recovers from each message's
+    /// RTF against `msg_parser`'s `html_from_rtf()`, and the 10-token recognition rule against
+    /// the whole-document `\fromhtml1` search. Reads real content internally and prints only
+    /// counts, flags, code page numbers, and byte-size differences -- never the HTML.
+    #[arg(long, conflicts_with_all = ["verify", "verify_envelope", "out", "dry_run"])]
+    pub(crate) verify_deencap: bool,
+
+    /// With `--verify-envelope` or `--verify-deencap`, descend into subdirectories of a directory
+    /// input (the default scan is non-recursive, as for `--verify`).
+    #[arg(long)]
+    pub(crate) recursive: bool,
+
     /// Directory to export into. The archive is written to `<DIR>/<input name>/`: one
     /// directory per message holding `message.md` and `metadata.json`, a `folder.json` in every
     /// folder, and a `folder.json` at the archive root that marks the directory as created
@@ -79,6 +91,38 @@ pub(crate) enum InputKind {
     },
 }
 
+fn is_msg_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("msg"))
+        .unwrap_or(false)
+}
+
+/// Every `.msg` file under `root`, at any depth, sorted. Used by `--recursive`. Never includes
+/// the path in an error message.
+pub(crate) fn collect_msg_files_recursive(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .context("failed to read input directory")?
+            .filter_map(|entry| entry.ok())
+        {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                pending.push(entry_path);
+            } else if is_msg_file(&entry_path) {
+                files.push(entry_path);
+            }
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        anyhow::bail!("input directory contains no .msg files");
+    }
+    Ok(files)
+}
+
 /// Classifies the input by extension (or, for a directory, by scanning for
 /// `.msg` files directly inside it -- not recursive). Never includes the
 /// input path itself in any error message: paths can disclose information
@@ -97,12 +141,7 @@ pub(crate) fn classify_input(path: &Path) -> Result<InputKind> {
                 subdirectories_skipped += 1;
                 continue;
             }
-            let is_msg = entry_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("msg"))
-                .unwrap_or(false);
-            if is_msg {
+            if is_msg_file(&entry_path) {
                 files.push(entry_path);
             }
         }

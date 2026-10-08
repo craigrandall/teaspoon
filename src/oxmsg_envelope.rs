@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 
 use crate::dry_run::{PROP_DELIVERY_TIME, PROP_SUBMIT_TIME};
 use crate::model::{Address, Envelope, Recipient, RecipientKind};
-use crate::oxmsg_classify::{top_level_storage_paths, OxmsgEntryKind, OxmsgEntryScope};
+use crate::oxmsg_classify::{OxmsgEntryKind, OxmsgEntryScope, top_level_storage_paths};
 use crate::oxmsg_decode::{
-    decode_fixed_value, decode_properties_stream, extract_string8_codepage,
-    properties_stream_header_len, read_stream_bytes, DecodedFixedValue,
+    DecodedFixedValue, decode_fixed_value, decode_properties_stream, extract_string8_codepage,
+    properties_stream_header_len, read_stream_bytes,
 };
 use crate::oxmsg_extract::read_string_property;
 use crate::shared::{CompoundFile, PROP_RECIPIENT_TYPE};

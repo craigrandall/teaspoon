@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 /// Units reserved at the end of every directory name for a duplicate suffix (` (999)`).
 pub(crate) const SUFFIX_RESERVE_UNITS: usize = 6;

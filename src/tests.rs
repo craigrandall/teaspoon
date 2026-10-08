@@ -6,41 +6,42 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use outlook_pst::ltp::prop_context::PropertyValue;
 
-use crate::cli::{classify_input, Args, InputKind};
+use crate::cli::{Args, InputKind, classify_input};
 use crate::msg_report::{
-    record_embedded_message_class, record_msg_class, record_msg_recipients, MsgTotals,
+    MsgTotals, record_embedded_message_class, record_msg_class, record_msg_recipients,
 };
 use crate::oxmsg_classify::{
-    classify_oxmsg_entry, enclosing_custom_payload_root, oxmsg_ancestry_shape, oxmsg_entry_scope,
-    recognized_name_type_mismatch, unrecognized_name_shape, CfbObjectKind, OxmsgEntryKind,
-    OxmsgEntryScope, RecognizedNameTypeMismatch, UnrecognizedNameShape,
+    CfbObjectKind, OxmsgEntryKind, OxmsgEntryScope, RecognizedNameTypeMismatch,
+    UnrecognizedNameShape, classify_oxmsg_entry, enclosing_custom_payload_root,
+    oxmsg_ancestry_shape, oxmsg_entry_scope, recognized_name_type_mismatch,
+    unrecognized_name_shape,
 };
 use crate::oxmsg_decode::{
+    CodepageSource, DecodedFixedValue, NamedPropertyMap, NamedPropertySet, PROP_INTERNET_CODEPAGE,
+    PROP_MESSAGE_CODEPAGE, PSETID_COMMON, PropertyEntryShape, ResolvedCodepage, String8Decoded,
     classify_property_entry_shape, cp1252_to_char, decode_fixed_value, decode_named_property_entry,
     decode_named_property_string, decode_properties_stream, decode_string8_cp1252,
     decode_string8_with_codepage, decode_unicode_value, expected_size_field_value,
     expected_variable_stream_path, extract_string8_codepage, is_valid_boolean_encoding,
-    properties_stream_header_len, resolve_string8_codepage, CodepageSource, DecodedFixedValue,
-    NamedPropertyMap, NamedPropertySet, PropertyEntryShape, ResolvedCodepage, String8Decoded,
-    PROP_INTERNET_CODEPAGE, PROP_MESSAGE_CODEPAGE, PSETID_COMMON,
+    properties_stream_header_len, resolve_string8_codepage,
 };
 use crate::oxmsg_extract::extract_message_class;
-use crate::oxmsg_structure::{print_structural_breakdown, OxmsgTotals};
+use crate::oxmsg_structure::{OxmsgTotals, print_structural_breakdown};
 use crate::pst::{
-    check_rtf_for_encapsulated_html, record_attachment_content_id_presence,
-    record_attachment_method, record_message_class, record_recipient_type, PstTotals,
+    PstTotals, check_rtf_for_encapsulated_html, record_attachment_content_id_presence,
+    record_attachment_method, record_message_class, record_recipient_type,
 };
 use crate::shared::{
-    rtf_bytes_contain_fromhtml, BodyCounters, CountStats, RtfHtmlCheck, ZeroByteStats,
     ATTACH_METHOD_BY_REFERENCE, ATTACH_METHOD_BY_REFERENCE_ONLY,
     ATTACH_METHOD_BY_REFERENCE_RESOLVE, ATTACH_METHOD_BY_VALUE, ATTACH_METHOD_EMBEDDED_MESSAGE,
-    ATTACH_METHOD_NONE, ATTACH_METHOD_OLE, RECIPIENT_TYPE_BCC, RECIPIENT_TYPE_CC,
-    RECIPIENT_TYPE_ORIG, RECIPIENT_TYPE_TO,
+    ATTACH_METHOD_NONE, ATTACH_METHOD_OLE, BodyCounters, CountStats, RECIPIENT_TYPE_BCC,
+    RECIPIENT_TYPE_CC, RECIPIENT_TYPE_ORIG, RECIPIENT_TYPE_TO, RtfHtmlCheck, ZeroByteStats,
+    rtf_bytes_contain_fromhtml,
 };
 use crate::verify::{
-    collect_msg_verify_totals, compare_bool_field, compare_count, compare_message_class,
-    count_structural_gate_violations, structural_gate_values, BoolFieldComparison, CountComparison,
-    MessageClassComparison,
+    BoolFieldComparison, CountComparison, MessageClassComparison, collect_msg_verify_totals,
+    compare_bool_field, compare_count, compare_message_class, count_structural_gate_violations,
+    structural_gate_values,
 };
 
 // --- Custom MS-OXMSG parser groundwork -----------------------------------
@@ -661,7 +662,7 @@ fn oxmsg_properties_stream_header_len_matches_ms_oxmsg_2_4_1() {
 #[test]
 fn oxmsg_decode_properties_stream_parses_entries_and_reports_trailing_bytes() {
     let mut bytes = vec![0u8; 8]; // an 8-byte (attachment/recipient) header
-                                  // One PT_LONG (0x0003) entry, property ID 0x0E20, flags 0x01, value 7.
+    // One PT_LONG (0x0003) entry, property ID 0x0E20, flags 0x01, value 7.
     bytes.extend_from_slice(&0x0003u16.to_le_bytes());
     bytes.extend_from_slice(&0x0E20u16.to_le_bytes());
     bytes.extend_from_slice(&1u32.to_le_bytes());

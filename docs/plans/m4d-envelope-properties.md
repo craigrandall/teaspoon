@@ -1,6 +1,6 @@
 # M4d envelope properties: identifiers, sources, and extraction rules
 
-Status: **built (tag `v0.1.25.1`, 2026-10-06) and run on Windows: 165 tests pass, and `--verify-envelope` over the 29 top-level `.msg` files reports 0 mismatches against `msg_parser`** (results: [`../verification/m4-results.md`](../verification/m4-results.md)). The M4 plan requires each candidate property ID to be confirmed against Microsoft's specifications before it is relied on. This document says what was and was not confirmed, so that nothing is presented as checked that was not. The tiers below record confirmation against Microsoft's text; they did not change with the run. The run adds a separate kind of evidence, listed in the next section.
+Status: **built (tag `v0.1.25.1`, 2026-10-06) and run on Windows: 165 tests pass, and `--verify-envelope` over the 29 top-level `.msg` files reports 0 mismatches against `msg_parser`** (results: [`../verification/m4-results.md`](../verification/m4-results.md)). The M4 plan requires each candidate property ID to be confirmed against Microsoft's specifications before it is relied on. This document says what was and was not confirmed, so that nothing is presented as checked that was not. The tiers below record confirmation against Microsoft's text. The corpus run adds a separate kind of evidence, listed in the next section. On 2026-10-07 three identifiers (0x0064, 0x0065, 0x39FE) were moved to tier A after being seen on Microsoft's MAPI canonical property pages (not in MS-OXPROPS itself); the rest stand.
 
 ## Confirmation tiers
 
@@ -21,13 +21,13 @@ The differential check ran over the 29 top-level `.msg` files (not the 5 message
 | PidTagSenderSmtpAddress | 0x5D01 | A | equalled `msg_parser`'s sender email on 3 of 29 (the one "both" case may be two empty values) |
 | PidTagDisplayName (recipient) | 0x3001 | C | recipient name matched on 36 of 36 |
 | PidTagEmailAddress (recipient) | 0x3003 | C | equalled `msg_parser`'s email on 33 of 36 |
-| PidTagSmtpAddress (recipient) | 0x39FE | B | equalled `msg_parser`'s email on 3 of 36, where `PidTagEmailAddress` did not |
+| PidTagSmtpAddress (recipient) | 0x39FE | A (2026-10-07) | equalled `msg_parser`'s email on 3 of 36, where `PidTagEmailAddress` did not |
 | PidTagRecipientType | 0x0C15 | C | To, Cc, and Bcc list lengths matched on 29 of 29 each |
 | PidTagSubject (existing) | 0x0037 | already in use | matched on 29 of 29 |
 
 This is agreement with an independent implementation on one corpus, not confirmation against Microsoft's text; the tiers stand. It shows the identifiers read the properties they are meant to read for these fields.
 
-Not covered by any oracle, present in the corpus only as counts (of 29 messages): sent-representing 29, submit time 29, delivery time 29, importance 29, sensitivity 11, conversation topic 29, conversation index 29, transport headers 24. Their values were not checked against anything independent. The remaining recipient and sent-representing properties (0x0064, 0x0065, 0x3002) are untested by the differential check.
+Not covered by any oracle, present in the corpus only as counts (of 29 messages): sent-representing 29, submit time 29, delivery time 29, importance 29, sensitivity 11, conversation topic 29, conversation index 29, transport headers 24. Their values were not checked against anything independent. The sent-representing properties (0x0042, 0x0064, 0x0065, 0x5D02) and the recipient address type (0x3002) are untested by the differential check; 0x0064 and 0x0065 are now tier A.
 
 ## Message-level properties
 
@@ -38,8 +38,8 @@ Not covered by any oracle, present in the corpus only as counts (of 29 messages)
 | PidTagSenderEmailAddress | 0x0C1F | string | A | sender address (an X.500 DN when the type is `EX`) |
 | PidTagSenderSmtpAddress | 0x5D01 | string | A | sender SMTP address |
 | PidTagSentRepresentingName | 0x0042 | string | A | "on behalf of" display name |
-| PidTagSentRepresentingAddressType | 0x0064 | string | C | "on behalf of" address type |
-| PidTagSentRepresentingEmailAddress | 0x0065 | string | C | "on behalf of" address |
+| PidTagSentRepresentingAddressType | 0x0064 | string | A (2026-10-07) | "on behalf of" address type |
+| PidTagSentRepresentingEmailAddress | 0x0065 | string | A (2026-10-07) | "on behalf of" address |
 | PidTagSentRepresentingSmtpAddress | 0x5D02 | string | A | "on behalf of" SMTP address |
 | PidTagClientSubmitTime | 0x0039 | time | A | sent time (already used since M3) |
 | PidTagMessageDeliveryTime | 0x0E06 | time | C | delivery time (already used since M3) |
@@ -57,7 +57,7 @@ Not covered by any oracle, present in the corpus only as counts (of 29 messages)
 | PidTagDisplayName | 0x3001 | string | C | recipient display name |
 | PidTagAddressType | 0x3002 | string | C | recipient address type |
 | PidTagEmailAddress | 0x3003 | string | C | recipient address |
-| PidTagSmtpAddress | 0x39FE | string | B | recipient SMTP address |
+| PidTagSmtpAddress | 0x39FE | string | A (2026-10-07) | recipient SMTP address |
 
 ## Rules
 
@@ -77,7 +77,8 @@ Against `msg_parser` (0.3.x, `Outlook::subject`, `sender`, `to`, `cc`, `bcc`; ea
 
 ## Open
 
-- Tier B and C identifiers have not been confirmed against Microsoft's text. The differential check, which agreed on the corpus, covers 0x0C1A, 0x0C1F, 0x5D01, 0x3001, 0x3003, and 0x39FE through `msg_parser`; it does not cover 0x0064, 0x0065, 0x3002, importance and sensitivity values, or the conversation fields.
-- Which `msg_parser` property feeds `Person.email` is only partly established: its email string equalled `PidTagEmailAddress` in 60 of 65 comparisons and the SMTP property alone in 5 (2 senders, 3 recipients), with 0 matching neither. Splitting `email_address_only` into "SMTP absent" and "SMTP present and different" would show whether `message.md`, which prefers the SMTP address, can ever disagree with `msg_parser`.
+- Still tier B or C (not seen in a Microsoft document in this work): 0x0C1A (sender name), 0x3001, 0x3002, 0x3003 (recipient display name, address type, address), 0x0C15 (recipient type), 0x0E06 (delivery time), and the importance and sensitivity value meanings. The differential check, which agreed on the corpus, covers 0x0C1A, 0x0C1F, 0x5D01, 0x3001, 0x3003, and 0x39FE through `msg_parser`; it does not cover 0x0064, 0x0065, 0x3002, importance and sensitivity values, or the conversation fields.
+- Which `msg_parser` property feeds `Person.email` is only partly established: its email string equalled `PidTagEmailAddress` in 60 of 65 comparisons and the SMTP property alone in 5 (2 senders, 3 recipients), with 0 matching neither. **Built (v0.1.26, not yet run):** the report now splits `email_address_only` into "SMTP absent" and "SMTP present and different" (and `smtp_only` likewise for `PidTagEmailAddress`), and counts `both` where both are empty. A nonzero `..._smtp_present_different` count would be a place where `message.md`, which prefers the SMTP address, disagrees with `msg_parser`.
+- **Built (v0.1.26, not yet run):** `--recursive` lets `--verify-envelope` include the 5 messages in the 3 subdirectories. Until it is run, those messages are not compared.
 - The `EX`-without-SMTP path, unlisted recipients, and originator rows have no real instance in the corpus; they are covered by unit tests only.
-- The 5 messages in the 3 subdirectories were not compared, and the corpus is one producer.
+- The corpus is one producer.

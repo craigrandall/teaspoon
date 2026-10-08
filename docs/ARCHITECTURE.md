@@ -194,6 +194,28 @@ renderers stay free of MSG details.
 - `verify_envelope.rs` is the envelope's check: it runs the same extraction and `msg_parser` over the same files and prints match/mismatch counts for the subject, sender, and recipients. It does not touch the export path.
 - The status reason `envelope_not_extracted` was replaced by `other_properties_not_preserved`: the envelope is now written, but the rest of the property bag still is not.
 
+## M4e-1 boundary: de-encapsulation (written, not yet built)
+
+M4e-1 adds the first body-conversion step, kept pure and outside the writer for now.
+
+```text
+PidTagRtfCompressed (bytes)
+ |
+ +-- compressed-rtf          MS-OXRTFCP decompression (existing)
+ |
+ +-- rtf_deencap.rs          pure: recognize (10-token rule) -> tokenize -> interpret
+ |                           (htmltag groups, htmlrtf suppression, font code pages,
+ |                            \uN with fallbacks, skipped destinations) -> UTF-8 HTML
+ |                           plus content-free diagnostics; bounded depth and output
+ |
+ +-- verify_deencap.rs       --verify-deencap: the recovered HTML against msg_parser's
+                             html_from_rtf(), graded; recognition rule against the
+                             whole-document \fromhtml1 search
+```
+
+- `rtf_deencap` imports only the `PT_STRING8` decoders from `oxmsg_decode`; it reads no file and knows no adapter type. Nothing in the export calls it yet; M4e-2 (the body pipeline) will.
+- The recovered text is UTF-8, so a `charset=` declaration inside it is stale; the diagnostics flag one.
+
 ## Verification structure
 
 `tsp --verify` runs the custom MSG path and `msg_parser` over the same files
@@ -235,7 +257,8 @@ The code lives in `src/`, one module per seam:
 - `shared` — vocabulary, the encapsulated-HTML check, shared counters.
 - `pst` — the PST diagnostic; `msg_report` — the shared MSG report.
 - `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, `oxmsg_extract` — the custom MS-OXMSG parser, from naming conventions through extraction; `oxmsg_envelope` — the envelope extraction (M4d).
-- `verify` — the `--verify` comparison and structural gates; `verify_envelope` — the `--verify-envelope` comparison (M4d).
+- `verify` — the `--verify` comparison and structural gates; `verify_envelope` — the `--verify-envelope` comparison (M4d); `verify_deencap` — the `--verify-deencap` comparison (M4e-1).
+- `rtf_deencap` — the pure MS-OXRTFEX de-encapsulation (M4e-1).
 - `naming`, `plan` — the pure naming rules and export planner (M4b).
 - `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also re-reads message content, including the envelope, for export.
 - `model`, `archive`, `export` — the model so far (message content and envelope), the pure renderers, and the writer with its preflight and consent rules (M4c, extended by M4d).

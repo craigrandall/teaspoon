@@ -14,7 +14,7 @@ use crate::oxmsg_extract::{
     extract_attachment_count, extract_attachment_method_counts, extract_body_flags,
     extract_message_class, extract_recipient_type_counts, open_embedded_message,
 };
-use crate::oxmsg_structure::{inspect_oxmsg, print_structural_breakdown, OxmsgTotals};
+use crate::oxmsg_structure::{OxmsgTotals, inspect_oxmsg, print_structural_breakdown};
 use crate::shared::rtf_bytes_contain_fromhtml;
 
 // =============================================================================

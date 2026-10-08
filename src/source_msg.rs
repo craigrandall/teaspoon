@@ -12,18 +12,17 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::dry_run::{
-    strip_subject_marker, InternetIdTracker, SourceCensus, PROP_ATTACH_FILENAME,
-    PROP_ATTACH_LONG_FILENAME, PROP_DELIVERY_TIME, PROP_INTERNET_MESSAGE_ID, PROP_SUBJECT,
-    PROP_SUBMIT_TIME,
+    InternetIdTracker, PROP_ATTACH_FILENAME, PROP_ATTACH_LONG_FILENAME, PROP_DELIVERY_TIME,
+    PROP_INTERNET_MESSAGE_ID, PROP_SUBJECT, PROP_SUBMIT_TIME, SourceCensus, strip_subject_marker,
 };
 use crate::model::{BodyAvailability, MessageContent, PlainBody};
 use crate::oxmsg_classify::{
-    cfb_entry_name, classify_oxmsg_entry, OxmsgEntryKind, OxmsgEntryScope,
-    EMBEDDED_OBJECT_STORAGE_NAME,
+    EMBEDDED_OBJECT_STORAGE_NAME, OxmsgEntryKind, OxmsgEntryScope, cfb_entry_name,
+    classify_oxmsg_entry,
 };
 use crate::oxmsg_decode::{
-    decode_fixed_value, decode_properties_stream, extract_string8_codepage,
-    properties_stream_header_len, read_stream_bytes, DecodedFixedValue,
+    DecodedFixedValue, decode_fixed_value, decode_properties_stream, extract_string8_codepage,
+    properties_stream_header_len, read_stream_bytes,
 };
 use crate::oxmsg_envelope::extract_envelope;
 use crate::oxmsg_extract::{extract_body_flags, read_string_property};
@@ -116,10 +115,10 @@ impl Builder {
                     let sub = self.folder_from_dir(&path, depth + 1)?;
                     folder.folders.push(sub);
                 }
-            } else if is_msg_file(&path) {
-                if let Some(message) = self.message_from_file(&path) {
-                    folder.messages.push(message);
-                }
+            } else if is_msg_file(&path)
+                && let Some(message) = self.message_from_file(&path)
+            {
+                folder.messages.push(message);
             }
         }
         Ok(folder)
@@ -302,7 +301,7 @@ fn attach_method(comp: &mut CompoundFile, attach_path: &Path) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{plan_export, verify_plan, Policy};
+    use crate::plan::{Policy, plan_export, verify_plan};
     use std::io::Write;
 
     fn entry(ty: u16, id: u16, value: [u8; 8]) -> Vec<u8> {

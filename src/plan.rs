@@ -14,9 +14,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::naming::{
-    assign_namespace, collision_key, is_special_attachment_name, is_valid_component,
-    sanitize_component, shorten_to, split_extension, utf16_len, NameFlag, NsItem, Sanitized,
-    COMPONENT_MAX_UNITS, MAX_SUFFIX_RESERVE_UNITS, SUFFIX_RESERVE_UNITS,
+    COMPONENT_MAX_UNITS, MAX_SUFFIX_RESERVE_UNITS, NameFlag, NsItem, SUFFIX_RESERVE_UNITS,
+    Sanitized, assign_namespace, collision_key, is_special_attachment_name, is_valid_component,
+    sanitize_component, shorten_to, split_extension, utf16_len,
 };
 
 /// Name reserved in every folder directory for that folder's metadata file.
@@ -909,10 +909,12 @@ mod tests {
         assert_eq!(capped.len(), 1);
         // The capped message is written as a directory but nothing is planned below it.
         let cap_path = &capped[0].components;
-        assert!(plan
-            .entries
-            .iter()
-            .all(|e| !(e.components.len() > cap_path.len() && e.components.starts_with(cap_path))));
+        assert!(
+            plan.entries
+                .iter()
+                .all(|e| !(e.components.len() > cap_path.len()
+                    && e.components.starts_with(cap_path)))
+        );
         clean(&plan, &policy);
     }
 
