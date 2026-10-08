@@ -194,7 +194,7 @@ renderers stay free of MSG details.
 - `verify_envelope.rs` is the envelope's check: it runs the same extraction and `msg_parser` over the same files and prints match/mismatch counts for the subject, sender, and recipients. It does not touch the export path.
 - The status reason `envelope_not_extracted` was replaced by `other_properties_not_preserved`: the envelope is now written, but the rest of the property bag still is not.
 
-## M4e-1 boundary: de-encapsulation (written, not yet built)
+## M4e-1 boundary: de-encapsulation (built in v0.1.26)
 
 M4e-1 adds the first body-conversion step, kept pure and outside the writer for now.
 

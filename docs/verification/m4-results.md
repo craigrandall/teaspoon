@@ -195,29 +195,51 @@ The owner examined a couple of exported `message.md` and `metadata.json` pairs a
 - Confirm the remaining identifiers (0x0064, 0x0065, 0x3002, the importance and sensitivity meanings, and the others listed as tier B or C) against MS-OXPROPS.
 - Separate "SMTP property absent" from "present and different" in the email tally.
 - Compare the 5 messages in the subdirectories (the scan is non-recursive).
-- ~~Run an export of the corpus to record the new `export_tree_sha256`~~ (done 2026-10-07, below). `cargo fmt --check`, `clippy`, and CI for `v0.1.25.1` are still not reported.
+- ~~Run an export of the corpus to record the new `export_tree_sha256`~~ (done 2026-10-07, below). `cargo fmt --check`, `clippy`, and CI for the tags were later reported successful (below).
 - Review more exported messages, and a second producer, before treating the envelope as proven beyond one corpus.
 
 ### M4d loose ends (2026-10-07; tags `v0.1.25.1` and `v0.1.25.2`)
 
 - **New corpus baseline.** The owner reports that the export of the `.msg` corpus at `v0.1.25.1` (the same at `v0.1.25.2`, the documentation-only tag after the M4d documents were applied) reports `export_tree_sha256=72d8553417441719c7c1e2b1d3ec253141fb5c2697c311d4210a92cd5d71c2e5`. This replaces `96da290e…793ad` (v0.1.23.1), which no longer applies because the output format changed. The other `export_*` counts for this run were not reported.
-- **PST short-`--out` item is still open.** Running `tsp.exe tsp-tester.pst --out $o` without `--dry-run` stops with "exporting a .pst file is not implemented yet (planned for M4i); add --dry-run to plan one". That is the designed refusal and not a failure; the open item needs `--dry-run` with a short `--out`.
-- **Identifiers.** Three property identifiers moved to tier A on 2026-10-07 after being seen on Microsoft's MAPI canonical property pages: 0x0064 and 0x0065 (sent-representing address type and address) and 0x39FE (SMTP address). See [`../plans/m4d-envelope-properties.md`](../plans/m4d-envelope-properties.md). The others stand.
+- **PST short-`--out` dry run (2026-10-07), closed.** `tsp.exe tsp-tester.pst --dry-run --out $o` with `plan_root_units=15`: `plan_entries_total=154`, folders 10, messages 60, attachment files 84, embedded 0, names sanitized 16, truncated 2, fallback 3, collision groups 2 (largest 16), `plan_budget_exceeded=0`, `plan_max_path_units=253` (allowed 259), `plan_max_relative_path_units=238` (15 + 238 = 253), `plan_max_component_units=115`, depth 6, `plan_gate_violations=0` (all four gates 0). So the 4 over-budget entries seen at a root of 152 units fit at a root of 15; the PST plan is clean at a short output path. The other keys equal the long-path census (subject markers 60, nameless attachments 3, duplicate Internet message IDs 20, embedded not opened 3, long-name columns 9, folder identity 11/11/0). The PST count difference from the earlier diagnostic (60/84 against 57/79) is still **unreconciled**: the current `tsp tsp-tester.pst` diagnostic output has not been supplied.
+- **Earlier, without `--dry-run`:** Running `tsp.exe tsp-tester.pst --out $o` without `--dry-run` stops with "exporting a .pst file is not implemented yet (planned for M4i); add --dry-run to plan one". That is the designed refusal and not a failure; the open item needs `--dry-run` with a short `--out`.
+- **Identifiers.** Every tier B and C property identifier was checked on 2026-10-07 against Microsoft's pages (the MAPI canonical property pages; MS-OXPROPS for 0x0C1A) and is now tier A: 0x0064, 0x0065, 0x0C1A, 0x0C15, 0x0E06, 0x3001, 0x3002, 0x3003, 0x39FE, and the identifiers for importance (0x0017) and sensitivity (0x0036). Sensitivity values 0 to 3 and importance high = 2 were also seen in Microsoft text; importance low = 0 and normal = 1 were not. **A finding:** Microsoft's PidTagRecipientType page says the value is one type plus an optional flag (MAPI_P1, MAPI_SUBMITTED), while the export lists only values 1, 2, 3, so a flagged recipient would be dropped from `message.md` (counted in `recipients_unlisted`); the corpus has none (`recipients_unlisted_total=0`), so the differential run could not catch it. See [`../plans/m4d-envelope-properties.md`](../plans/m4d-envelope-properties.md).
 - **Built, not yet run (v0.1.26 candidate):** the email tally now separates "SMTP absent" from "SMTP present and different", and `--recursive` lets `--verify-envelope` cover the 5 messages in the subdirectories. Both need one run to produce numbers.
-- Still not reported: `cargo fmt --check`, `clippy`, and CI for `v0.1.25.1`.
+- **`cargo fmt --check`, `clippy -D warnings`, and CI** were all successful for the tags 0.1.25, 0.1.25.1, and 0.1.25.2 (owner's report; the third tag was typed `0.1.25.22` and is read as `0.1.25.2`).
 
-## M4e-1: in-house MS-OXRTFEX de-encapsulation (written 2026-10-07; not yet built or run)
+## M4e-1 and the M4d follow-ups: built and tagged `v0.1.26` (2026-10-08)
 
-What was written: `src/rtf_deencap.rs` (pure; the recognition rule, an RTF tokenizer, and the extraction rules of MS-OXRTFEX 2.2.3.1 and 2.2.3.2, with diagnostics and bounds), `src/verify_deencap.rs` (`--verify-deencap`), and edits to `cli.rs` (`--verify-deencap`, `--recursive`), `main.rs`, and `verify_envelope.rs`. The specification pages read for this are listed in [`../plans/m4-plan.md`](../plans/m4-plan.md) (M4e-1). Nothing has been compiled or run, so nothing here is a result.
+### Build and regression
 
-Gate (from the plan), and its state:
+- The owner reports that everything built, tested, and passed CI after he addressed several build issues and upgraded the crate to **Rust edition 2024** (with all dependencies updated, in the same tag); **all 201 tests pass** (165 plus 36 new); the repository is tagged `v0.1.26`.
+- Not reported for this tag: `verify-split.ps1` (the default, `--verify`, and PST outputs against the baseline), and the corpus export tree hash (the output format did not change, so `72d85534…c2e5` should still hold).
+
+### What was written and how it was revised
+
+`src/rtf_deencap.rs` (the recognition rule, an RTF tokenizer, and the MS-OXRTFEX extraction rules, with diagnostics and bounds), `src/verify_deencap.rs` (`--verify-deencap`), edits to `cli.rs`, `main.rs`, and `verify_envelope.rs`. Review of the owner's revisions to four files:
+
+| File | Revision | Assessment |
+|---|---|---|
+| `rtf_deencap.rs` | A `TrailingBackslash` token replaces the drafted `Symbol(b'\\')` for a backslash at the very end of input; the interpreter ignores it. A second test (`a_trailing_backslash_is_dropped_but_a_escaped_one_is_not`) was added. Let-chains in two places; edition-2024 import order and `rustfmt` layout. | The first is a real fix: the drafted code wrote a literal backslash for a lone trailing backslash, which its own test (`a_trailing_backslash_is_harmless`) would have caught. Semantics otherwise identical. The older test is now partly redundant with the new one. |
+| `verify_deencap.rs` | New `recognition_mismatch_by_kind` map and `recognition_mismatch_kind_<kind>_files` lines (which kind the 10-token rule concluded when it disagreed with the marker search); edition-2024 imports and layout. | A useful addition: it says what the disagreeing files are. **Slip:** the `recognition_vs_marker_search` tally is now printed twice (once before and once after `html_presence`), so every `recognition_vs_marker_search_*` line appears twice in the output. Harmless to the numbers, but the second call should be deleted. |
+| `verify_envelope.rs` | Edition-2024 import order only. | Identical to the drafted version in behavior. |
+| `export.rs` | Import order; one nested `if` and `if let` collapsed into a let-chain in `relative_source_name`; `bail!` and `assert!` arguments re-wrapped. | No behavior change: when the path is not under the input the function still falls through to the file name. |
+
+### A defect found in the review (not in the four files): `source_pst.rs`
+
+At `v0.1.26` the loop over a folder's sub-folders in `PstBuilder::folder` appears **twice** in `source_pst.rs` (two identical `if depth < MAX_FOLDER_DEPTH && let Some(hierarchy) = folder.hierarchy_table() { ... }` blocks, apparently from the edition migration). Each sub-folder is opened and pushed twice, and each of those copies repeats the doubling for its own sub-folders, so a folder at depth `d` is planned `2^d` times; the folder identity counts double as well. The 201 tests do not cover it (no PST fixture is in the repository), and no PST dry run was reported at `v0.1.26`; the one reported on 2026-10-07 was at `v0.1.25.x`, before the migration. The default PST diagnostic (`pst.rs`) and `--verify` are unaffected. Fix: delete the second block. Check: the PST dry run with a short `--out` should again report `plan_folders=10`, `plan_messages=60`, `plan_attachment_files=84`, `plan_entries_total=154`, and `folder_identity_nid_available=11`.
+
+### Gate for M4e-1
 
 | Gate item | State |
 |---|---|
-| Spec-derived unit and golden tests | written (about 30 tests in `rtf_deencap.rs`); not run |
-| Weak-oracle differential against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML messages, counts only, every disagreement triaged | the mode is written; not run |
-| Property test: arbitrary input never panics and stays within the output bound | written; not run |
-| Recognition rule against `check_compressed_rtf_bytes` | compared by `--verify-deencap` (`recognition_vs_marker_search_*`); not run |
+| Spec-derived unit tests, and the property tests (arbitrary input never panics, output bounded) | **met**: they are part of the 201 passing tests |
+| Weak-oracle differential against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML messages, counts only, every disagreement triaged | **not met**: `--verify-deencap` output not yet reported |
+| Recognition rule against `check_compressed_rtf_bytes` | **not met**: compared by `--verify-deencap`; not yet reported |
 | Hand comparison of a sample against a reference implementation | not done |
 
-What to expect from the first `--verify-deencap` run, stated as hypotheses to check and not as findings: one presence mismatch (the genuinely RTF-authored fixture, where `msg_parser` returns HTML and the 10-token rule does not); some disagreements from `msg_parser`'s Latin-1 treatment of `\'hh` escapes; one file affected by the dictionary divergence; and unsupported-code-page bytes (reported as `deencap_unsupported_codepage_<n>_files` and `deencap_undecodable_bytes_total`) if any message uses a code page other than 1252, which would be the evidence for or against adding a code page crate.
+What to expect from the first `--verify-deencap` run, stated as hypotheses to check: one recognition disagreement (the genuinely RTF-authored fixture, which `msg_parser` and the whole-document marker search treat as HTML but the 10-token rule does not), some disagreements from `msg_parser`'s Latin-1 treatment of `\'hh` escapes, one file affected by the dictionary divergence, and unsupported-code-page bytes (`deencap_unsupported_codepage_<n>_files`, `deencap_undecodable_bytes_total`) if any message uses a code page other than 1252.
+
+### Identifiers and recipient types (2026-10-07)
+
+Every property identifier in the M4d envelope was checked against Microsoft's pages (the MAPI canonical property pages, and MS-OXPROPS for 0x0C1A) and is tier A. Sensitivity values 0 to 3 and importance high = 2 were seen in Microsoft text; importance low = 0 and normal = 1 were not. **A likely defect:** Microsoft's PidTagRecipientType page says the value is one type plus an optional flag (MAPI_P1, MAPI_SUBMITTED), but the envelope lists only values 1, 2, 3, so a flagged recipient would be dropped from `message.md` (counted in `recipients_unlisted`). The corpus has none (`recipients_unlisted_total=0`), so the differential run could not catch it. Details: [`../plans/m4d-envelope-properties.md`](../plans/m4d-envelope-properties.md).
