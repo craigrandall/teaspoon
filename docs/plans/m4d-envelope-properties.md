@@ -1,6 +1,6 @@
 # M4d envelope properties: identifiers, sources, and extraction rules
 
-Status: **built (tag `v0.1.25.1`, 2026-10-06) and run on Windows: 165 tests pass, and `--verify-envelope` over the 29 top-level `.msg` files reports 0 mismatches against `msg_parser`** (results: [`../verification/m4-results.md`](../verification/m4-results.md)). The M4 plan requires each candidate property ID to be confirmed against Microsoft's specifications before it is relied on. This document says what was and was not confirmed, so that nothing is presented as checked that was not. The tiers below record confirmation against Microsoft's text. The corpus run adds a separate kind of evidence, listed in the next section. On 2026-10-07 every property identifier below was checked against Microsoft's pages (the MAPI canonical property pages, and MS-OXPROPS for 0x0C1A) and is now tier A; what remains open is the meaning of two value sets and one recipient-type rule, listed under Open.
+Status: **built (tag `v0.1.25.1`, 2026-10-06; follow-ups in `v0.1.26.2`, 2026-10-08) and run on Windows: 203 tests pass, and `--verify-envelope --recursive` over all 34 `.msg` files reports 0 mismatches against `msg_parser`** (results: [`../verification/m4-results.md`](../verification/m4-results.md)). The M4 plan requires each candidate property ID to be confirmed against Microsoft's specifications before it is relied on. This document says what was and was not confirmed, so that nothing is presented as checked that was not. The tiers below record confirmation against Microsoft's text. The corpus run adds a separate kind of evidence, listed in the next section. On 2026-10-07 every property identifier below was checked against Microsoft's pages (the MAPI canonical property pages, and MS-OXPROPS for 0x0C1A) and is now tier A; what remains open is the meaning of two value sets and one recipient-type rule, listed under Open.
 
 ## Confirmation tiers
 
@@ -75,12 +75,21 @@ Against `msg_parser` (0.3.x, `Outlook::subject`, `sender`, `to`, `cc`, `bcc`; ea
 
 **Not compared** (nothing in `msg_parser` to compare against, or not used here): sent-representing, times, importance, sensitivity, conversation fields, and transport headers. They are reported only as presence counts across the files. The scan is non-recursive, like `--verify`: messages in subdirectories are not compared.
 
+## Evidence from the recursive run (2026-10-08, 34 messages, 41 recipients)
+
+0 mismatches on every compared field, as before, now including the 5 messages in the subdirectories. The email tally, split in `v0.1.26`:
+
+| | both | `PidTagEmailAddress` only | SMTP property only |
+|---|---|---|---|
+| sender (34) | 1 | 31, SMTP absent in all 31 | 2, `PidTagEmailAddress` present and different in both |
+| recipients (41) | 0 | 38, SMTP absent in all 38 | 3, `PidTagEmailAddress` present and different in all 3 |
+
+So in all 5 cases where the two properties are both present and differ, `msg_parser` returned the SMTP address, and otherwise the SMTP property was absent and it returned `PidTagEmailAddress`. That matches the rule `message.md` uses; on this corpus the two never disagree. The recursive run added no `EX`-without-SMTP, unlisted, or flagged-type recipient (`recipients_unlisted_total=0`, `exchange_without_smtp_total=0`).
+
 ## Open
 
-- **A likely defect, to fix:** Microsoft's PidTagRecipientType page says the value consists of one required value (To, Cc, or Bcc) and one optional flag (MAPI_P1, a resend; MAPI_SUBMITTED, already received). `oxmsg_envelope.rs` lists a recipient only when the value is exactly 1, 2, or 3, so a recipient with a flag set would be dropped from `message.md` and counted in `recipients_unlisted`. The corpus shows `recipients_unlisted_total=0`, so none of the 29 messages has one, which is why `--verify-envelope` could not have caught it. The fix is to mask the flag bits before classifying (and a unit test with a flagged recipient). The numeric flag values (0x10000000 and 0x80000000) are from a third-party library's documentation, not seen in Microsoft text.
-- Not seen in Microsoft text: the numbers 0 (low) and 1 (normal) for importance.
-- Which `msg_parser` property feeds `Person.email` is only partly established: its email string equalled `PidTagEmailAddress` in 60 of 65 comparisons and the SMTP property alone in 5 (2 senders, 3 recipients), with 0 matching neither. **Built in v0.1.26 (201 tests pass; not yet run on the corpus):** the report now splits `email_address_only` into "SMTP absent" and "SMTP present and different" (and `smtp_only` likewise for `PidTagEmailAddress`), and counts `both` where both are empty. A nonzero `..._smtp_present_different` count would be a place where `message.md`, which prefers the SMTP address, disagrees with `msg_parser`.
-- **Built in v0.1.26 (not yet run on the corpus):** `--recursive` lets `--verify-envelope` include the 5 messages in the subdirectories. Until it is run, those messages are not compared.
-- The identifiers 0x0064, 0x0065, 0x0042, 0x5D02, 0x0C1E, 0x0C1F, 0x5D01, 0x0039, 0x0070, 0x0071, and 0x007D were already tier A and were not re-checked; 0x0064, 0x0065, 0x0C1A, 0x3001, 0x3002, 0x3003, 0x0C15, 0x0E06, 0x0017, 0x0036, and 0x39FE were checked on 2026-10-07.
-- The `EX`-without-SMTP path, unlisted recipients, and originator rows have no real instance in the corpus; they are covered by unit tests only.
+- Not seen in Microsoft text: the numbers 0 (low) and 1 (normal) for importance. The numeric values of the recipient-type flags MAPI_P1 (0x10000000) and MAPI_SUBMITTED (0x80000000) are from a third-party library's documentation; the code ignores exactly those two bits when classifying (fixed in `v0.1.26.2`, with tests; no corpus recipient carries a flag).
+- Which `msg_parser` property feeds `Person.email` is established for this corpus only (above); the rule is inferred from 5 cases where the two properties differ, not read from `msg_parser`'s source.
+- The `EX`-without-SMTP path, unlisted recipients, and flagged recipient types have no real instance in the corpus; they are covered by unit tests only.
+- Sent-representing, times, importance, sensitivity, conversation fields, and transport headers have no oracle: the corpus shows them present (34 of 34, except sensitivity 11 and transport headers 29) but their values were not checked against anything independent.
 - The corpus is one producer.

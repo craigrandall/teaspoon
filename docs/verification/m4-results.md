@@ -227,19 +227,72 @@ The owner examined a couple of exported `message.md` and `metadata.json` pairs a
 
 ### A defect found in the review (not in the four files): `source_pst.rs`
 
-At `v0.1.26` the loop over a folder's sub-folders in `PstBuilder::folder` appears **twice** in `source_pst.rs` (two identical `if depth < MAX_FOLDER_DEPTH && let Some(hierarchy) = folder.hierarchy_table() { ... }` blocks, apparently from the edition migration). Each sub-folder is opened and pushed twice, and each of those copies repeats the doubling for its own sub-folders, so a folder at depth `d` is planned `2^d` times; the folder identity counts double as well. The 201 tests do not cover it (no PST fixture is in the repository), and no PST dry run was reported at `v0.1.26`; the one reported on 2026-10-07 was at `v0.1.25.x`, before the migration. The default PST diagnostic (`pst.rs`) and `--verify` are unaffected. Fix: delete the second block. Check: the PST dry run with a short `--out` should again report `plan_folders=10`, `plan_messages=60`, `plan_attachment_files=84`, `plan_entries_total=154`, and `folder_identity_nid_available=11`.
+At `v0.1.26` the loop over a folder's sub-folders in `PstBuilder::folder` appears **twice** in `source_pst.rs` (two identical `if depth < MAX_FOLDER_DEPTH && let Some(hierarchy) = folder.hierarchy_table() { ... }` blocks, apparently from the edition migration). Each sub-folder is opened and pushed twice, and each of those copies repeats the doubling for its own sub-folders, so a folder at depth `d` is planned `2^d` times; the folder identity counts double as well. The 201 tests do not cover it (no PST fixture is in the repository), and no PST dry run was reported at `v0.1.26`; the one reported on 2026-10-07 was at `v0.1.25.x`, before the migration. The default PST diagnostic (`pst.rs`) and `--verify` are unaffected. Fix: delete the second block. Check: the PST dry run with a short `--out` should again report `plan_folders=10`, `plan_messages=60`, `plan_attachment_files=84`, `plan_entries_total=154`, and `folder_identity_nid_available=11`. **Fixed in `v0.1.26.2` and confirmed** (below).
 
-### Gate for M4e-1
+### Gate for M4e-1 (state at `v0.1.26.2`; the corpus run is below)
 
 | Gate item | State |
 |---|---|
-| Spec-derived unit tests, and the property tests (arbitrary input never panics, output bounded) | **met**: they are part of the 201 passing tests |
-| Weak-oracle differential against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML messages, counts only, every disagreement triaged | **not met**: `--verify-deencap` output not yet reported |
-| Recognition rule against `check_compressed_rtf_bytes` | **not met**: compared by `--verify-deencap`; not yet reported |
+| Spec-derived unit tests, and the property tests (arbitrary input never panics, output bounded) | **met**: part of the 203 passing tests |
+| Recognition rule against `check_compressed_rtf_bytes` | **met on this corpus**: 0 disagreements in 29 files |
+| Weak-oracle differential against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML messages, counts only, every disagreement triaged | **not met**: the presence agrees on all 29 files, but the recovered HTML differs from `msg_parser`'s in all 27 pairs at the coarsest grade, and no disagreement has been triaged yet |
 | Hand comparison of a sample against a reference implementation | not done |
-
-What to expect from the first `--verify-deencap` run, stated as hypotheses to check: one recognition disagreement (the genuinely RTF-authored fixture, which `msg_parser` and the whole-document marker search treat as HTML but the 10-token rule does not), some disagreements from `msg_parser`'s Latin-1 treatment of `\'hh` escapes, one file affected by the dictionary divergence, and unsupported-code-page bytes (`deencap_unsupported_codepage_<n>_files`, `deencap_undecodable_bytes_total`) if any message uses a code page other than 1252.
 
 ### Identifiers and recipient types (2026-10-07)
 
 Every property identifier in the M4d envelope was checked against Microsoft's pages (the MAPI canonical property pages, and MS-OXPROPS for 0x0C1A) and is tier A. Sensitivity values 0 to 3 and importance high = 2 were seen in Microsoft text; importance low = 0 and normal = 1 were not. **A likely defect:** Microsoft's PidTagRecipientType page says the value is one type plus an optional flag (MAPI_P1, MAPI_SUBMITTED), but the envelope lists only values 1, 2, 3, so a flagged recipient would be dropped from `message.md` (counted in `recipients_unlisted`). The corpus has none (`recipients_unlisted_total=0`), so the differential run could not catch it. Details: [`../plans/m4d-envelope-properties.md`](../plans/m4d-envelope-properties.md).
+
+## `v0.1.26.2`: corrections applied, and the first corpus runs of the new modes (2026-10-08)
+
+### Build and corrections
+
+The owner applied three corrected files (the duplicated sub-folder loop removed from `source_pst.rs`; the duplicated recognition tally print removed from `verify_deencap.rs`, checked: each `recognition_vs_marker_search_*` line now appears once; the recipient-type flags MAPI_P1 and MAPI_SUBMITTED ignored when classifying in `oxmsg_envelope.rs`, with two tests). Everything built, **203 tests pass** (201 plus 2), committed, and tagged `v0.1.26.2`.
+
+### PST dry run with a short `--out` at `v0.1.26.2` (`plan_root_units=20`)
+
+`plan_entries_total=154`, folders 10, messages 60, attachment files 84, embedded 0, names sanitized 16, truncated 2, fallback 3, collision groups 2 (largest 16), `plan_budget_exceeded=0`, `plan_max_path_units=253`, `plan_max_relative_path_units=233` (20 + 233 = 253), `plan_max_component_units=115`, depth 6, `plan_gate_violations=0`; folder identity 11 / 11 / 0; the `source_*` keys unchanged. These equal the counts before the migration (root 15 on 2026-10-07), so **the duplicate-folder defect is fixed** and the migration changed no PST plan count. The relative path is 5 units shorter than at root 15 only because the root is 5 units longer (budget arithmetic). The PST count difference from the earlier diagnostic (60/84 against 57/79) is still unreconciled.
+
+### `--verify-envelope --recursive` over the corpus (34 files, `verify-envelope-recursive1.txt`)
+
+0 open errors; the scan now includes the 5 messages in the 3 subdirectories (`subdirectories_skipped=0`).
+
+| Field compared with `msg_parser` | Matched | Mismatched |
+|---|---|---|
+| subject, sender name | 34, 34 | 0, 0 |
+| To / Cc / Bcc list length | 34 / 34 / 34 | 0 / 0 / 0 |
+| recipient name (41 recipients) | 41 | 0 |
+| sender email (34) | 34 | 0 |
+| recipient email (41) | 41 | 0 |
+
+| Email property that equalled `msg_parser` | both | `PidTagEmailAddress` only | SMTP only |
+|---|---|---|---|
+| sender (34) | 1 (0 of them both empty) | 31, all with the SMTP property absent, 0 with it present and different | 2, both with `PidTagEmailAddress` present and different |
+| recipients (41) | 0 | 38, all with the SMTP property absent, 0 with it present and different | 3, all with `PidTagEmailAddress` present and different |
+
+Presence counts (of 34): sender 34, sent-representing 34, submit time 34, delivery time 34, importance 34, sensitivity 11, transport headers 29, conversation topic 34, conversation index 34; `recipients_unlisted_total=0`, `exchange_without_smtp_total=0`.
+
+What this shows:
+- **The M4d differential gate is met on all 34 messages** (the 5 subdirectory messages added 5 recipients and 0 mismatches).
+- **The email question is answered for this corpus.** In every one of the 5 cases where both of the custom path's email properties are present and differ (2 senders, 3 recipients), `msg_parser` returned the SMTP address; in every other case the SMTP property was absent and `msg_parser` returned `PidTagEmailAddress`. That is exactly the rule `message.md` uses (the SMTP address, else the address when its type is SMTP or absent). There is no case where the SMTP property is present, differs, and `msg_parser` chose the other one, so on this corpus `message.md` never disagrees with `msg_parser`.
+- Still no real instance of an `EX` address without an SMTP address, an unlisted recipient, or a flagged recipient type.
+
+### `--verify-deencap` over the 29 top-level files (`verify-deencap1.txt`)
+
+0 open errors; `subdirectories_skipped=3` (this run was not recursive).
+
+| Measure | Result |
+|---|---|
+| RTF kind by the 10-token rule | encapsulated HTML 27; encapsulated text 1; plain RTF 1; not RTF 0; RTF absent 0; decompression failed 0 |
+| Recognition rule against the whole-document `\fromhtml1` search | both true 27, both false 2, **mismatch 0** |
+| HTML recovered, custom against `msg_parser` | both true 27, both false 2, **mismatch 0** |
+| Agreement of the 27 recovered HTML pairs | exact 0; equal ignoring whitespace 0; ignoring whitespace and non-ASCII 0; same visible text 0; same visible text ASCII only 0; **different 27** |
+| Size, custom minus `msg_parser`, per pair | from −1571 to +1586 bytes (three pairs at +15); totals 1,069,793 against 1,067,224 bytes (custom 0.24% larger) |
+
+Diagnostics: 15,024 `htmltag` groups; 491 ignorable and 27 standard destinations skipped; 13,446 `\htmlrtf` regions; 677 hex escapes and 429 `\uN` escapes (0 bad hex escapes, 0 unpaired surrogates); 8,561 paragraph breaks and 977 tabs; 122 fonts defined; 0 control symbols ignored, 0 binary bytes, 0 object placeholders, 0 stray group ends; 0 files with unclosed groups, with the depth limit hit, with the output limit hit, or with a `charset=` declaration in the recovered HTML; default code page 1252 declared in 27 files; **1 undecodable byte in 1 file, with code page 1255 unsupported**.
+
+What this shows, and what it does not:
+- **Recognition is settled for this corpus:** the MS-OXRTFEX 10-token rule and the existing whole-document search give the same answer on all 29 files, so the M4e-1 item "confirm the recognition rule" is met. The two non-HTML files are one `\fromtext` message and one plain-RTF message.
+- **Two hypotheses in the earlier draft were wrong and are withdrawn:** there is no presence disagreement for the RTF-authored message (`msg_parser` returns no HTML for it here; the dependencies were updated in `v0.1.26`, which may explain the change from M2, but that was not checked), and the 1252-only decoder is not a problem for nearly the whole corpus.
+- **The content of the 27 recovered HTML bodies differs from `msg_parser`'s in every file, at every grade, including the visible text outside tags with whitespace and non-ASCII characters removed.** The totals are within 0.24%, the deltas run both ways, and three pairs differ by exactly 15 bytes, so there is no single large systematic cause, but counts alone cannot say which side is right or why. Possible causes, none of them checked: treatment of text inside `\htmlrtf` regions, of `\uN` fallbacks, of `\par` and `\tab`, of ignorable destinations, of entities, or of the `\htmltag` content boundary. This is the open item; the differential gate stays unmet until the differences are triaged against the specification.
+- **Code pages:** the only unsupported one is 1255 (Hebrew), for 1 byte in 1 of 27 files. That does not justify a code page crate on its own; the corpus is one producer.
+- **No file declares a `charset=`** in its recovered HTML, so the stale-declaration concern did not arise here.
