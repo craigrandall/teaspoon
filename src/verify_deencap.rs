@@ -327,14 +327,10 @@ pub(crate) fn print_deencap_verify_report(totals: &DeencapVerifyTotals) {
         "recognition_vs_marker_search",
         &totals.recognition_vs_marker_search,
     );
-    print_bool_field_tally("html_presence", &totals.html_presence);
-    print_bool_field_tally(
-        "recognition_vs_marker_search",
-        &totals.recognition_vs_marker_search,
-    );
     for (label, files) in &totals.recognition_mismatch_by_kind {
         println!("recognition_mismatch_kind_{label}_files={files}");
     }
+    print_bool_field_tally("html_presence", &totals.html_presence);
     let a = &totals.agreement;
     println!("html_agreement_exact={}", a.exact);
     println!(

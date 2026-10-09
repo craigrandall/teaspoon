@@ -153,25 +153,6 @@ impl PstBuilder {
             }
         }
 
-        if depth < MAX_FOLDER_DEPTH
-            && let Some(hierarchy) = folder.hierarchy_table()
-        {
-            for row in hierarchy.rows_matrix() {
-                let node = NodeId::from(u32::from(row.id()));
-                let entry_id = match store.properties().make_entry_id(node) {
-                    Ok(entry_id) => entry_id,
-                    Err(_) => {
-                        self.census.open_errors += 1;
-                        continue;
-                    }
-                };
-                match store.open_folder(&entry_id) {
-                    Ok(child) => folders.push(self.folder(store, child.as_ref(), depth + 1)),
-                    Err(_) => self.census.open_errors += 1,
-                }
-            }
-        }
-
         SourceFolder {
             id: u64::from(nid),
             name,

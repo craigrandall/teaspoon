@@ -51,6 +51,18 @@ const RECIPIENT_TYPE_TO: i32 = 1;
 const RECIPIENT_TYPE_CC: i32 = 2;
 const RECIPIENT_TYPE_BCC: i32 = 3;
 
+/// Flags that Microsoft's `PidTagRecipientType` page says may be combined with the recipient type:
+/// MAPI_P1 (a resend, 0x10000000) and MAPI_SUBMITTED (already received, 0x80000000). The type
+/// itself is the value without them. The two numeric values are from a third-party library's
+/// documentation, not from Microsoft text seen in this work; a value with any other high bit set
+/// is still not listed (it is counted in `recipients_unlisted`).
+const RECIPIENT_TYPE_FLAGS: i32 = 0x1000_0000 | i32::MIN;
+
+/// The recipient type with the optional flags removed.
+fn recipient_type_without_flags(value: i32) -> i32 {
+    value & !RECIPIENT_TYPE_FLAGS
+}
+
 /// The identifiers of one address's four properties.
 struct AddressProps {
     name: u16,
@@ -160,7 +172,8 @@ fn read_fixed_values(comp: &mut CompoundFile, base: &Path, header_len: usize) ->
     out
 }
 
-/// The recipient type (`PidTagRecipientType`) of one recipient storage.
+/// The recipient type (`PidTagRecipientType`) of one recipient storage, as stored (with any
+/// optional flags still set).
 fn read_recipient_type(comp: &mut CompoundFile, recipient_path: &Path) -> Option<i32> {
     let bytes = read_stream_bytes(comp, &recipient_path.join("__properties_version1.0"))?;
     let decoded = decode_properties_stream(&bytes, 8)?;
@@ -176,7 +189,8 @@ fn read_recipient_type(comp: &mut CompoundFile, recipient_path: &Path) -> Option
 }
 
 /// To, Cc, and Bcc recipients in storage order, plus the number of storages that are none of
-/// those (the originator row, an unknown type, or an unreadable type).
+/// those (the originator row, an unknown type, or an unreadable type). The optional MAPI_P1 and
+/// MAPI_SUBMITTED flags are ignored when classifying.
 fn read_recipients(comp: &mut CompoundFile, codepage: u32) -> (Vec<Recipient>, usize) {
     let mut paths: Vec<PathBuf> = top_level_storage_paths(&*comp, OxmsgEntryKind::RecipientStorage)
         .into_iter()
@@ -186,7 +200,7 @@ fn read_recipients(comp: &mut CompoundFile, codepage: u32) -> (Vec<Recipient>, u
     let mut recipients = Vec::new();
     let mut unlisted = 0usize;
     for path in paths {
-        let kind = match read_recipient_type(comp, &path) {
+        let kind = match read_recipient_type(comp, &path).map(recipient_type_without_flags) {
             Some(RECIPIENT_TYPE_TO) => RecipientKind::To,
             Some(RECIPIENT_TYPE_CC) => RecipientKind::Cc,
             Some(RECIPIENT_TYPE_BCC) => RecipientKind::Bcc,
@@ -453,6 +467,65 @@ mod tests {
             env.recipients[3].address.display_name.as_deref(),
             Some("Second To")
         );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_optional_recipient_type_flags_are_ignored_when_classifying() {
+        assert_eq!(recipient_type_without_flags(1), 1);
+        assert_eq!(recipient_type_without_flags(1 | 0x1000_0000), 1);
+        assert_eq!(recipient_type_without_flags(2 | i32::MIN), 2);
+        assert_eq!(recipient_type_without_flags(3 | 0x1000_0000 | i32::MIN), 3);
+        // A bit that is not one of the two flags is kept, so the value is not a known type.
+        assert_eq!(
+            recipient_type_without_flags(1 | 0x2000_0000),
+            1 | 0x2000_0000
+        );
+    }
+
+    #[test]
+    fn a_flagged_recipient_is_listed_and_an_unknown_flag_is_not() {
+        let path = temp_file("flags");
+        let mut comp = cfb::create(&path).expect("create CFB");
+        put(&mut comp, "/__properties_version1.0", &[0u8; 32]);
+        add_recipient(
+            &mut comp,
+            0,
+            Some(1 | 0x1000_0000),
+            "Resent To",
+            None,
+            None,
+            Some("a@example.com"),
+        );
+        add_recipient(
+            &mut comp,
+            1,
+            Some(2 | i32::MIN),
+            "Submitted Cc",
+            None,
+            None,
+            Some("b@example.com"),
+        );
+        add_recipient(
+            &mut comp,
+            2,
+            Some(1 | 0x2000_0000),
+            "Unknown flag",
+            None,
+            None,
+            None,
+        );
+        drop(comp);
+
+        let mut comp = cfb::open(&path).expect("open CFB");
+        let env = extract_envelope(&mut comp);
+        let kinds: Vec<RecipientKind> = env.recipients.iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, vec![RecipientKind::To, RecipientKind::Cc]);
+        assert_eq!(
+            env.recipients[0].address.display_name.as_deref(),
+            Some("Resent To")
+        );
+        assert_eq!(env.recipients_unlisted, 1);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
