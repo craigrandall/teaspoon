@@ -1,6 +1,6 @@
-# M4 plan (v4.10) — normalized model and deterministic Markdown archive
+# M4 plan (v4.11) — normalized model and deterministic Markdown archive
 
-Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c complete (tag v0.1.23.1, 2026-10-03); M4a-2 complete for the four ADRs that could be decided (accepted by the owner 2026-10-04, release v0.1.24, documentation only); M4d (the envelope, with the envelope part of M4b-4) closed 2026-10-08 (code v0.1.25, follow-ups v0.1.26 and v0.1.26.2; 0 mismatches against `msg_parser` over 34 messages; every property identifier confirmed against Microsoft's pages); M4e-1 (RTF de-encapsulation) built, with the recognition rule confirmed on the corpus and the recovered HTML differing from `msg_parser`'s in all 27 pairs, untriaged; the body and formatting-loss ADR is deferred to M4e.** Version 4.10, revised 2026-10-08 from version 4.9 to record `v0.1.26.2`: the corrections applied, the first corpus runs of `--verify-envelope --recursive` and `--verify-deencap`, M4d closed, and the M4e-1 content differential open. Every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
+Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c complete (tag v0.1.23.1, 2026-10-03); M4a-2 complete for the four ADRs that could be decided (accepted by the owner 2026-10-04, release v0.1.24, documentation only); M4d (the envelope, with the envelope part of M4b-4) closed 2026-10-08 (code v0.1.25, follow-ups v0.1.26 and v0.1.26.2; 0 mismatches against `msg_parser` over 34 messages; every property identifier confirmed against Microsoft's pages); M4e-1 (RTF de-encapsulation) built and its gate met (recognition rule confirmed; the 27 differences from `msg_parser` all traced to `msg_parser` faults, plus one counted limitation: Windows-1255); the body and formatting-loss ADR is deferred to M4e.** Version 4.11, revised 2026-10-09 from version 4.10 to record the triage of the 27 de-encapsulation differences (all explained; the M4e-1 gate is met) and `--dump-deencap` (209 tests). Every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
 
 - [`m4a-export-rules.md`](m4a-export-rules.md): the naming, layout, identity, duplicate, path-length, and overwrite rules (v3.6; sections 4-6 are now backed by an accepted ADR).
 - [`m4a-dependency-research.md`](m4a-dependency-research.md): RTF de-encapsulation, HTML-to-Markdown converters, and supporting crates.
@@ -28,6 +28,12 @@ Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) 
 - 2026-10-04: the owner directed that M4a-2 be taken next, read the four ADRs, and **accepted each of them**, including the decisions that went beyond the original overwrite instruction (an archive of a different source is refused even with `--overwrite`; source identity is kind plus name, not hash; a non-empty directory without a `tsp` marker is refused; per-file rather than whole-archive atomicity for now) and the binding file rules (UTF-8 without BOM, LF, fixed field order, no absolute paths or export-time values).
 - 2026-10-07: the owner reported the v0.1.25.1 corpus tree hash and directed that M4d's loose ends be closed and M4e-1 (in-house MS-OXRTFEX de-encapsulation) started now, ahead of the HTML-to-Markdown bake-off (M4e-0), which needs real HTML that only M4e-1 can supply from this corpus.
 - 2026-10-06: the owner took M4d next, together with the envelope part of the model (M4b-4), ahead of the bake-off (M4e-0), and built and tagged it (v0.1.25, v0.1.25.1).
+
+## What changed from v4.10
+
+1. **M4e-1 gate met.** `--dump-deencap` (209 tests) produced the 83 files; reading the pairs against their RTF explained every difference: `msg_parser` prepends the font table's text, inserts `*` after each tag group, drops line breaks, reads `\'hh` as Latin-1, emits `\uN` fallbacks instead of the Unicode character, and corrupts one word in one file (consistent with its wrong LZFu dictionary). The in-house output has one limitation, 1 byte of code page 1255 (U+FFFD). Line-break placement has no independent oracle.
+2. **The next stage is M4e-0** (the HTML-to-Markdown bake-off), now with real input: 27 recovered HTML bodies, from Word, Outlook, and web-composed mail.
+3. Quality-gate and tree-hash evidence for the latest tag is still not reported.
 
 ## What changed from v4.9
 
@@ -224,11 +230,11 @@ Follow [`m4a-dependency-research.md`](m4a-dependency-research.md): candidates `h
 
 Gate: a recorded choice with the exact version pinned, in the body-policy ADR.
 
-Note for sequencing (not yet decided): the `.msg` corpus has no native HTML body (27 of 29 messages carry HTML only inside RTF), so a bake-off on real data needs the de-encapsulation of M4e-1, or new fixtures with native or Word-authored HTML (fixture priority 10).
+Sequencing: the `.msg` corpus has no native HTML body (27 of 29 messages carry HTML only inside RTF). With M4e-1 complete, the bake-off can run on the 27 recovered bodies (Word, Outlook, and web-composed mail, 40 bytes to 300 KB), which `--dump-deencap` writes locally; new fixtures with native or Word-authored HTML (fixture priority 10) remain useful.
 
 ### M4e-1 — MS-OXRTFEX de-encapsulation (in-house)
 
-Status: **built and unit-tested (`v0.1.26`, corrected in `v0.1.26.2`; 203 tests; CI green); corpus differential run, recognition confirmed, content differences untriaged.** New modules `src/rtf_deencap.rs` (pure) and `src/verify_deencap.rs`; `cli.rs` gains `--verify-deencap` and `--recursive`. No dependency was added. The owner's revisions beyond the drafted code: a `TrailingBackslash` token (the draft emitted a literal backslash for a lone trailing backslash), a `recognition_mismatch_by_kind` breakdown in `--verify-deencap`, let-chains and import ordering from the edition-2024 migration.
+Status: **complete 2026-10-09 (`v0.1.26`, `v0.1.26.2`, and the `--dump-deencap` release; 209 tests; CI green); gate met** New modules `src/rtf_deencap.rs` (pure) and `src/verify_deencap.rs`; `cli.rs` gains `--verify-deencap` and `--recursive`. No dependency was added. The owner's revisions beyond the drafted code: a `TrailingBackslash` token (the draft emitted a literal backslash for a lone trailing backslash), a `recognition_mismatch_by_kind` breakdown in `--verify-deencap`, let-chains and import ordering from the edition-2024 migration.
 
 The specification pages this was written from (all read 2026-10-07): MS-OXRTFEX 2.2.3.1 (recognizing encapsulation: `{\rtf1` first; at most the first 10 tokens, begin-group marks and control words; `\fromhtml1` or `\fromtext` among them; any other token kind, or neither word, means ordinary RTF), 2.2.3.2 (extracting encapsulated HTML), 2.1.3.1.4 (the HTMLTAG destination group, whose numeric parameter is ignored), and 2.1.3.1.5 (the MHTMLTAG group, covered by the rule that ignorable destinations other than HTMLTAG are skipped).
 
@@ -242,9 +248,9 @@ Decisions taken in the code, each stated so it can be overruled:
 - **Bounds:** group depth 1024 and output 64 MiB, each reported as a flag when hit; no input can panic it (a property test covers arbitrary bytes).
 - The decompressed RTF still comes from `compressed-rtf`, whose result is a string; an RTF stream with raw non-UTF-8 bytes would fail decompression and be counted (`rtf_decompression_failed`). Replacing it with an in-house MS-OXRTFCP decompressor is a possible follow-up if the corpus shows it matters.
 
-Gate: spec-derived unit and golden tests: **met**. Property test that arbitrary input never panics and stays within the output bound: **met**. Recognition rule confirmed against `check_compressed_rtf_bytes`: **met on this corpus** (0 disagreements in 29 files). Weak-oracle differential against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML messages, counts only, every disagreement triaged: **not met**: presence agrees on all 29 files, but the recovered HTML differs from `msg_parser`'s in all 27 pairs at every agreement grade (sizes within 0.24% in total, deltas −1571 to +1586 bytes, three at +15), and no difference has been triaged. Agreement is graded, not pass/fail: byte-identical, equal ignoring whitespace, equal ignoring whitespace and non-ASCII, same visible text, same visible text ASCII only, different.
+Gate: spec-derived unit and golden tests: **met**. Property test that arbitrary input never panics and stays within the output bound: **met**. Recognition rule confirmed against `check_compressed_rtf_bytes`: **met** (0 disagreements in 29 files). Weak-oracle differential against `msg_parser`'s `html_from_rtf()` on the 27 encapsulated-HTML messages, every disagreement triaged: **met**: the recovered HTML differs from `msg_parser`'s in all 27 pairs, and every difference was traced (with `--dump-deencap`) to `msg_parser`: it prepends the font table's text, inserts `*` after each tag group, drops line breaks, reads `\'hh` as Latin-1, emits `\uN` fallbacks instead of the Unicode character, and corrupts one word in one file (consistent with its wrong preset dictionary). After normalizing for those, 24 of 27 pairs are identical and the other three are explained by the fallback and dictionary faults. Details: `m4-results.md`.
 
-Other results from the first run: 1 undecodable byte in 1 file (code page 1255 unsupported), so no code page crate is warranted yet; no file declares a `charset=`; no limit, unclosed-group, or bad-escape counts. One message is `\fromtext` (encapsulated plain text), which this module does not handle (the plain-text body already exists).
+Residual, not blocking: one byte of code page 1255 (Hebrew) is replaced by U+FFFD (the correct character is U+200F); no other unsupported code page appeared, so no code page crate yet. Line-break placement (CRLF from `\par` and line words inside `htmltag` groups, as MS-OXRTFEX describes) has no independent oracle. `\fromtext` encapsulated plain text (1 file) is not handled; the plain-text body already exists. The decompressed RTF still comes from `compressed-rtf`, whose result is a string.
 
 ### M4e-2 — body pipeline
 
@@ -345,9 +351,9 @@ Crate boundaries become worthwhile only for a concrete reason: another program e
 
 ## Decisions still needed from the owner
 
-1. **Triage the 27 HTML differences** (the open M4e-1 gate item). `--dump-deencap <dir>` is written (not yet built or run): with `--verify-deencap` it writes each message's custom HTML, `msg_parser` HTML, and decompressed RTF into a new or empty directory you name. Then diff one or two pairs locally (start with a pair whose size difference is exactly 15 bytes; three pairs share it) and describe the difference to the assistant without content.
-2. The current `tsp tsp-tester.pst` diagnostic output, to reconcile the PST counts (60/84 against the earlier 57/79). The planner is stable at 154 entries, so the open question is the diagnostic's side.
-3. Whether to run `verify-split.ps1` and a corpus export at `v0.1.26.2` to confirm the outputs and the tree hash did not move.
-4. Whether to try removing `#![allow(dead_code)]` now, and the `Cargo.toml` version (the tags go past it).
-5. A code page crate: not warranted on this corpus (1 byte, 1 file); revisit with a second producer's fixtures.
+1. **Start M4e-0** (the HTML-to-Markdown bake-off), using the recovered HTML as input. The plan approved the candidates (`htmd`, `html2markdown`, `html-to-markdown-rs`); the assistant would write the bake-off harness (a pure trait, one adapter per candidate, content-free scoring plus a local dump for review).
+2. The current `tsp tsp-tester.pst` diagnostic output, to reconcile the PST counts (60/84 against the earlier 57/79). The planner is stable at 154 entries across runs and roots, so the open question is the diagnostic's side.
+3. `verify-split.ps1` and a corpus export (tree hash) at the latest tag, to confirm nothing moved (expected: `72d85534…c2e5`).
+4. A code page crate or in-house tables: only if a second producer's fixtures show more than the one byte seen here.
+5. Whether to try removing `#![allow(dead_code)]` now, and the `Cargo.toml` version.
 6. Q11, the content-hash definition, before M4g (not before).

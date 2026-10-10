@@ -49,11 +49,11 @@ The project distinguishes:
 | Level | PST | MSG |
 |---|---|---|
 | T0 build/static | CI on Linux and Windows | CI on Linux and Windows (last reported for `v0.1.23.1`; not reported for `v0.1.25.1`) |
-| T1 unit | Yes (naming, planning, rendering) | Yes: classification, decoding (including the `PT_STRING8` code page chain), counters, every verify-comparison outcome, structural gates, the archive renderers against golden files (including an envelope-rich message), the envelope comparison rules, the export writer; 203 tests at `v0.1.26.2` |
+| T1 unit | Yes (naming, planning, rendering) | Yes: classification, decoding (including the `PT_STRING8` code page chain), counters, every verify-comparison outcome, structural gates, the archive renderers against golden files (including an envelope-rich message), the envelope comparison rules, the export writer; 209 tests at the `--dump-deencap` release |
 | T2 fixture | `tsp-tester.pst` (57 messages, enhanced to cover 5 of 7 identified gaps) | 29-file `.msg` corpus (plus 3 subdirectories for the dry run and export), plus synthetic `.msg` files built at test time |
 | T3 behavioral | Not started | Partial: export, consent, and overwrite behavior exercised on real output (v0.1.23.1) |
 | T4 fidelity | Not started | Partial: field-by-field agreement with `msg_parser` on every comparable field, including (M4d) the subject, sender, and recipients of the 29 top-level files |
-| T5 differential | Not started; no `libpff`/`libpst` comparison has been run | Done against `msg_parser` (`--verify`, re-run through `v0.1.25.1`; `--verify-envelope --recursive`, 0 mismatches over 34 files; `--verify-deencap`, recognition and presence agree, recovered HTML differs and is untriaged), two differences triaged against the specifications in M3; `libpff`/`libpst` not used |
+| T5 differential | Not started; no `libpff`/`libpst` comparison has been run | Done against `msg_parser` (`--verify`, re-run through `v0.1.25.1`; `--verify-envelope --recursive`, 0 mismatches over 34 files; `--verify-deencap`, recognition and presence agree and every difference in the recovered HTML was traced to `msg_parser` using `--dump-deencap`), two differences triaged against the specifications in M3; `libpff`/`libpst` not used |
 | T6 adversarial | Not started | Partial: synthetic fixtures for unsupported code pages and undecodable strings; no malformed or truncated container corpus |
 | T7 corpus | One PST | One 29-file corpus; fixtures deliberately not in the repository, and provenance is not recorded in it |
 

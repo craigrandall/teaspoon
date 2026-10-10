@@ -296,3 +296,40 @@ What this shows, and what it does not:
 - **The content of the 27 recovered HTML bodies differs from `msg_parser`'s in every file, at every grade, including the visible text outside tags with whitespace and non-ASCII characters removed.** The totals are within 0.24%, the deltas run both ways, and three pairs differ by exactly 15 bytes, so there is no single large systematic cause, but counts alone cannot say which side is right or why. Possible causes, none of them checked: treatment of text inside `\htmlrtf` regions, of `\uN` fallbacks, of `\par` and `\tab`, of ignorable destinations, of entities, or of the `\htmltag` content boundary. This is the open item; the differential gate stays unmet until the differences are triaged against the specification.
 - **Code pages:** the only unsupported one is 1255 (Hebrew), for 1 byte in 1 of 27 files. That does not justify a code page crate on its own; the corpus is one producer.
 - **No file declares a `charset=`** in its recovered HTML, so the stale-declaration concern did not arise here.
+
+## `--dump-deencap` and the triage of the 27 HTML differences (2026-10-09)
+
+### The run
+
+`--verify-deencap --dump-deencap C:\dump1` over the 29 top-level files: the report is identical to the earlier run plus `dump_files_written=83` (27 messages × 3 files, plus the decompressed RTF alone for the 2 messages that are not encapsulated HTML). Everything built and all **209 tests** passed (203 plus 6 for the dump). The owner also re-ran `--verify-envelope --recursive` (identical to the first run, 0 mismatches) and a PST dry run with a short `--out` at a root of 18 units (identical counts: 154 entries, 10 folders, 60 messages, 84 attachment files, 0 gate violations; relative path 235, 18 + 235 = 253).
+
+### What the pairs show
+
+The dumped HTML and RTF were compared directly (the content was read on the assistant's side, from files the owner supplied). `msg_parser`'s output differs from the RTF's own content in six ways, and the in-house output differs from `msg_parser`'s only because of them, with one exception:
+
+| # | Difference | Which side is right |
+|---|---|---|
+| 1 | `msg_parser` prepends the font table's text (for example `Arial;Courier New;Symbol;...;*`), 40 to 74 bytes per file | in-house; the font table is not HTML |
+| 2 | `msg_parser` inserts a `*` after each encapsulated tag group (5 to about 3,900 per file) | in-house |
+| 3 | `msg_parser` drops every line break; the in-house output keeps the `\par` and line breaks the encapsulation recorded (as CRLF) | not settled: no oracle keeps them; the in-house rule follows MS-OXRTFEX, and the breaks match the original HTML's line structure in the pairs inspected |
+| 4 | `msg_parser` reads `\'hh` bytes as Latin-1, so a Windows-1252 byte such as 0x93 becomes a C1 control character; the in-house output decodes it in the font's code page (a curly quote) | in-house |
+| 5 | Where `\uN` has a fallback character, `msg_parser` emits the fallback (`?`, or the Latin-1 byte), not the Unicode character: bullets from the Symbol font become `?`, an emoji becomes `???`, a narrow no-break space becomes a no-break space | in-house (the fallback is for readers without Unicode) |
+| 6 | In one file `msg_parser` corrupts a word (`about` becomes `obout`); the RTF contains `about`. Only this file's letters-and-digits stream differs between the two outputs, and the cause is consistent with the dictionary divergence recorded in M3 (a wrong preset dictionary gives wrong bytes) | in-house (via `compressed-rtf`, which matches MS-OXRTFCP) |
+| 7 | **In-house limitation:** one byte (`\'fe` in a font of code page 1255, Hebrew) became U+FFFD because Windows-1255 is not implemented; the correct character is U+200F (right-to-left mark), and `msg_parser` shows `þ` (Latin-1), also wrong | neither; known and counted (`deencap_undecodable_bytes_total=1`) |
+
+After removing 1 (the prefix), 2 (the stars), and whitespace, and mapping the in-house characters to `msg_parser`'s Latin-1 and `?` style, **24 of 27 pairs are identical**; the three that remain are explained by 5 (two files) and 6 (one file), and by 7 for the one unrepresentable byte. No difference was found that points to an in-house defect other than 7.
+
+### Status of the M4e-1 gate
+
+| Gate item | State |
+|---|---|
+| Spec-derived unit tests and the property tests | met (209 tests) |
+| Recognition rule against `check_compressed_rtf_bytes` | met on this corpus (0 disagreements in 29 files) |
+| Weak-oracle differential against `msg_parser`, every disagreement triaged | **met**: all 27 differing pairs are explained (above) |
+| Hand comparison of a sample against a reference implementation | not done; the line-break rule (3) in particular has no independent oracle |
+
+Residual, not blocking: Windows-1255 and the other multi-byte or unimplemented code pages (1 byte in 1 of 27 files here, one producer); line-break placement unverified against a second implementation; `\fromtext` encapsulated plain text not handled (1 file; the plain-text body exists anyway); the decompressed RTF still passes through `compressed-rtf`'s string result.
+
+### Which of the files supplied were useful
+
+`dump1.zip` was the decisive one. The two re-run reports (`verify-envelope-recursive2.txt`, `pst-dry-run1.txt`) repeated earlier results exactly, and `verify-deencap2.txt` added only the `dump_files_written=83` line. Still outstanding from the earlier requests: the current `tsp tsp-tester.pst` diagnostic output, `verify-split.ps1` at the current tag, and a corpus export tree hash at the current tag.
