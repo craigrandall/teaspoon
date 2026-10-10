@@ -345,7 +345,7 @@ Crate boundaries become worthwhile only for a concrete reason: another program e
 
 ## Decisions still needed from the owner
 
-1. **Triage the 27 HTML differences** (the open M4e-1 gate item). The next action is a way to look at one pair locally, since the counts cannot say which side is right: for example a `--dump-deencap <dir>` option that writes each message's two HTML strings to a directory you name (message content goes only where you point it, as for the export), then a diff of one or two pairs, described to the assistant without content.
+1. **Triage the 27 HTML differences** (the open M4e-1 gate item). `--dump-deencap <dir>` is written (not yet built or run): with `--verify-deencap` it writes each message's custom HTML, `msg_parser` HTML, and decompressed RTF into a new or empty directory you name. Then diff one or two pairs locally (start with a pair whose size difference is exactly 15 bytes; three pairs share it) and describe the difference to the assistant without content.
 2. The current `tsp tsp-tester.pst` diagnostic output, to reconcile the PST counts (60/84 against the earlier 57/79). The planner is stable at 154 entries, so the open question is the diagnostic's side.
 3. Whether to run `verify-split.ps1` and a corpus export at `v0.1.26.2` to confirm the outputs and the tree hash did not move.
 4. Whether to try removing `#![allow(dead_code)]` now, and the `Cargo.toml` version (the tags go past it).

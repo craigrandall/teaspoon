@@ -44,6 +44,14 @@ pub(crate) struct Args {
     #[arg(long, conflicts_with_all = ["verify", "verify_envelope", "out", "dry_run"])]
     pub(crate) verify_deencap: bool,
 
+    /// With `--verify-deencap`, write each message's two recovered HTML strings and its
+    /// decompressed RTF into DIR (`NNN.custom.html`, `NNN.msg_parser.html`, `NNN.rtf`, where
+    /// NNN is the message's position in the scanned list), so a pair can be compared locally.
+    /// This is the only place message content goes; standard output stays content-free. DIR
+    /// must be new or empty.
+    #[arg(long, value_name = "DIR", requires = "verify_deencap")]
+    pub(crate) dump_deencap: Option<PathBuf>,
+
     /// With `--verify-envelope` or `--verify-deencap`, descend into subdirectories of a directory
     /// input (the default scan is non-recursive, as for `--verify`).
     #[arg(long)]

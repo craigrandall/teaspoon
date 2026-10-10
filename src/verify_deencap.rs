@@ -13,11 +13,17 @@
 //! It also compares the recognition rule with the whole-document `\fromhtml1` search the default
 //! report uses (`rtf_bytes_contain_fromhtml`), which is the M4e-1 item "confirm that the 10-token
 //! rule matches `check_compressed_rtf_bytes`".
+//!
+//! With `--dump-deencap <dir>` the mode also writes, for each message, the two recovered HTML
+//! strings and the decompressed RTF into the directory the user names, so a pair can be compared
+//! locally when the counts cannot say which side is right. That is the only place message content
+//! goes; what is printed stays content-free, and no file name is derived from the message.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use msg_parser::Outlook;
 
 use crate::oxmsg_decode::{expected_variable_stream_path, read_stream_bytes};
@@ -107,6 +113,81 @@ impl AgreementTally {
         }
     }
 }
+
+// =============================================================================
+// --dump-deencap
+// =============================================================================
+
+/// Which of a message's dumped files.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DumpKind {
+    /// The HTML the in-house de-encapsulation recovered (UTF-8).
+    Custom,
+    /// The HTML `msg_parser`'s `html_from_rtf()` returned (UTF-8).
+    MsgParser,
+    /// The decompressed RTF the de-encapsulation read.
+    Rtf,
+}
+
+impl DumpKind {
+    fn suffix(self) -> &'static str {
+        match self {
+            DumpKind::Custom => "custom.html",
+            DumpKind::MsgParser => "msg_parser.html",
+            DumpKind::Rtf => "rtf",
+        }
+    }
+}
+
+/// The name of a dumped file: the message's 1-based position in the scanned file list (a
+/// directory scan is sorted, so the position is stable), then the kind. Nothing in it comes from
+/// the message or its path.
+pub(crate) fn dump_file_name(index: usize, kind: DumpKind) -> String {
+    format!("{index:03}.{}", kind.suffix())
+}
+
+/// The directory `--dump-deencap` writes into, and how many files it has written. Error messages
+/// never include the path.
+pub(crate) struct DumpDir {
+    path: PathBuf,
+    files_written: u64,
+}
+
+impl DumpDir {
+    /// A new directory is created; an existing one must be empty, so a dump never mixes with, or
+    /// replaces, anything else.
+    pub(crate) fn prepare(path: &Path) -> Result<DumpDir> {
+        if path.exists() {
+            if !path.is_dir() {
+                anyhow::bail!("the --dump-deencap path exists and is not a directory");
+            }
+            let mut entries =
+                fs::read_dir(path).context("failed to read the --dump-deencap directory")?;
+            if entries.next().is_some() {
+                anyhow::bail!(
+                    "the --dump-deencap directory is not empty; name a new or empty directory"
+                );
+            }
+        } else {
+            fs::create_dir_all(path).context("failed to create the --dump-deencap directory")?;
+        }
+        Ok(DumpDir {
+            path: path.to_path_buf(),
+            files_written: 0,
+        })
+    }
+
+    pub(crate) fn write(&mut self, index: usize, kind: DumpKind, bytes: &[u8]) -> Result<()> {
+        fs::write(self.path.join(dump_file_name(index, kind)), bytes)
+            .context("failed to write a --dump-deencap file")?;
+        self.files_written += 1;
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Reading the RTF
+// =============================================================================
 
 /// What reading the message's compressed RTF gave.
 enum RtfRead {
@@ -232,9 +313,16 @@ fn record_kind(totals: &mut DeencapVerifyTotals, kind: RtfKind) {
     }
 }
 
-pub(crate) fn collect_deencap_verify_totals(files: &[PathBuf]) -> DeencapVerifyTotals {
+/// Scans `files`, comparing the two HTML recoveries. With `dump` set, also writes each message's
+/// custom HTML, `msg_parser` HTML, and decompressed RTF into it (numbered by position in `files`,
+/// starting at 1). A failure to write is an error; everything else is counted.
+pub(crate) fn collect_deencap_verify_totals(
+    files: &[PathBuf],
+    dump: &mut Option<DumpDir>,
+) -> Result<DeencapVerifyTotals> {
     let mut totals = DeencapVerifyTotals::default();
-    for file in files {
+    for (position, file) in files.iter().enumerate() {
+        let index = position + 1;
         let outlook = match Outlook::from_path(file) {
             Ok(outlook) => outlook,
             Err(_) => {
@@ -257,6 +345,9 @@ pub(crate) fn collect_deencap_verify_totals(files: &[PathBuf]) -> DeencapVerifyT
             RtfRead::Absent => totals.rtf_absent += 1,
             RtfRead::DecompressionFailed => totals.rtf_decompression_failed += 1,
             RtfRead::Bytes(rtf) => {
+                if let Some(dump) = dump.as_mut() {
+                    dump.write(index, DumpKind::Rtf, &rtf)?;
+                }
                 let kind = recognize(&rtf);
                 record_kind(&mut totals, kind);
 
@@ -279,6 +370,15 @@ pub(crate) fn collect_deencap_verify_totals(files: &[PathBuf]) -> DeencapVerifyT
             }
         }
 
+        if let Some(dump) = dump.as_mut() {
+            if let Some(html) = &custom_html {
+                dump.write(index, DumpKind::Custom, html.as_bytes())?;
+            }
+            if let Some(html) = &oracle_html {
+                dump.write(index, DumpKind::MsgParser, html.as_bytes())?;
+            }
+        }
+
         totals.html_presence.record(compare_bool_field(
             oracle_html.is_some(),
             custom_html.as_ref().is_some_and(|html| !html.is_empty()),
@@ -296,7 +396,7 @@ pub(crate) fn collect_deencap_verify_totals(files: &[PathBuf]) -> DeencapVerifyT
             }
         }
     }
-    totals
+    Ok(totals)
 }
 
 fn print_codepage_map(name: &str, map: &BTreeMap<u32, u64>) {
@@ -415,19 +515,35 @@ pub(crate) fn print_deencap_verify_report(totals: &DeencapVerifyTotals) {
     );
 }
 
-pub(crate) fn run_deencap_verify(files: &[PathBuf], subdirectories_skipped: u64) -> Result<()> {
-    let totals = collect_deencap_verify_totals(files);
+pub(crate) fn run_deencap_verify(
+    files: &[PathBuf],
+    subdirectories_skipped: u64,
+    dump_dir: Option<&Path>,
+) -> Result<()> {
+    // Checked before any scanning, so a bad directory fails fast.
+    let mut dump = dump_dir.map(DumpDir::prepare).transpose()?;
+    let totals = collect_deencap_verify_totals(files, &mut dump)?;
     println!("inventory=privacy_safe");
     println!("input_kind=msg_deencap_verify");
     println!("files_scanned={}", files.len());
     println!("subdirectories_skipped={subdirectories_skipped}");
     print_deencap_verify_report(&totals);
+    if let Some(dump) = &dump {
+        println!("dump_files_written={}", dump.files_written);
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir_path(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("tsp-dump-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&path);
+        path
+    }
 
     #[test]
     fn agreement_is_graded_from_exact_downward() {
@@ -481,5 +597,70 @@ mod tests {
         tally.record(HtmlAgreement::Exact);
         tally.record(HtmlAgreement::Different);
         assert_eq!((tally.exact, tally.different), (2, 1));
+    }
+
+    #[test]
+    fn dump_file_names_come_only_from_the_position_and_the_kind() {
+        assert_eq!(dump_file_name(1, DumpKind::Custom), "001.custom.html");
+        assert_eq!(
+            dump_file_name(12, DumpKind::MsgParser),
+            "012.msg_parser.html"
+        );
+        assert_eq!(dump_file_name(123, DumpKind::Rtf), "123.rtf");
+        assert_eq!(dump_file_name(1234, DumpKind::Rtf), "1234.rtf");
+    }
+
+    #[test]
+    fn a_new_directory_is_created_and_written_into() {
+        let path = temp_dir_path("new");
+        let mut dump = DumpDir::prepare(&path).expect("prepare a new directory");
+        dump.write(2, DumpKind::Custom, b"<p>x</p>").expect("write");
+        dump.write(2, DumpKind::Rtf, b"{\\rtf1}").expect("write");
+        assert_eq!(dump.files_written, 2);
+        assert_eq!(
+            fs::read(path.join("002.custom.html")).expect("read back"),
+            b"<p>x</p>"
+        );
+        assert_eq!(
+            fs::read(path.join("002.rtf")).expect("read back"),
+            b"{\\rtf1}"
+        );
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn an_empty_existing_directory_is_accepted() {
+        let path = temp_dir_path("empty");
+        fs::create_dir_all(&path).expect("create");
+        assert!(DumpDir::prepare(&path).is_ok());
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_non_empty_directory_is_refused_and_left_alone() {
+        let path = temp_dir_path("busy");
+        fs::create_dir_all(&path).expect("create");
+        fs::write(path.join("keep.txt"), b"mine").expect("write");
+        assert!(DumpDir::prepare(&path).is_err());
+        assert_eq!(fs::read(path.join("keep.txt")).expect("read back"), b"mine");
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_path_that_is_a_file_is_refused() {
+        let path = temp_dir_path("file");
+        fs::write(&path, b"a file").expect("write");
+        assert!(DumpDir::prepare(&path).is_err());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dump_errors_do_not_name_the_path() {
+        let path = temp_dir_path("secret-name-segment");
+        fs::write(&path, b"a file").expect("write");
+        let error = DumpDir::prepare(&path).err().expect("refused");
+        let text = format!("{error:#}");
+        assert!(!text.contains("secret-name-segment"));
+        let _ = fs::remove_file(&path);
     }
 }

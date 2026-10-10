@@ -84,7 +84,7 @@ fn main() -> Result<()> {
             } else if args.verify_envelope {
                 run_envelope_verify(&files, subdirectories_skipped)
             } else if args.verify_deencap {
-                run_deencap_verify(&files, subdirectories_skipped)
+                run_deencap_verify(&files, subdirectories_skipped, args.dump_deencap.as_deref())
             } else {
                 run_msg_extract(&files, subdirectories_skipped)
             }
