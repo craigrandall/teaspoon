@@ -334,6 +334,46 @@ Residual, not blocking: Windows-1255 and the other multi-byte or unimplemented c
 
 `dump1.zip` was the decisive one. The two re-run reports (`verify-envelope-recursive2.txt`, `pst-dry-run1.txt`) repeated earlier results exactly, and `verify-deencap2.txt` added only the `dump_files_written=83` line. Still outstanding from the earlier requests: the current `tsp tsp-tester.pst` diagnostic output, `verify-split.ps1` at the current tag, and a corpus export tree hash at the current tag.
 
-## M4e-0: HTML-to-Markdown bake-off (harness written 2026-10-10; not yet built or run)
+## M4e-0: HTML-to-Markdown bake-off (first run 2026-10-10)
 
-Nothing here is a result. The harness is `src/bakeoff.rs` with `--bakeoff-md` and `--bakeoff-dump`; the candidates (`htmd` 0.5.4 in pure and faithful mode, `html2markdown` 0.2.0, `html-to-markdown-rs` 3.11.0) are behind the optional `bakeoff` Cargo feature. The measures, the synthetic cases, and the limits are in [`../plans/m4-plan.md`](../plans/m4-plan.md) (M4e-0). To run it: `cargo build --release --features bakeoff`, then `tsp --bakeoff-md --bakeoff-dump <new dir> <the --dump-deencap directory>`. The report keys are `corpus_<candidate>_<raw|pre>_<measure>` and `synthetic_<candidate>_<raw|pre>_<measure>`.
+### Build and cost
+
+Everything built and **225 tests pass** (209 plus 16 for the harness; `Cargo.toml` is at `0.1.28`). `cargo tree --features bakeoff --depth 1` shows the three candidates (`htmd` 0.5.4, `html-to-markdown-rs` 3.11.0, `html2markdown` 0.2.0) added to the direct dependencies. Release build time: 47.60 s without the feature, 54.11 s with it (+6.5 s, about 14%). Transitive weight, duplicate versions, and licenses were not reported.
+
+### The run
+
+`--bakeoff-md --bakeoff-dump C:\md1 C:\dump1`: 27 recovered bodies and 16 synthetic cases, four candidates (`htmd` pure, `htmd` faithful, `html2markdown`, `html_to_markdown_rs`), each on the raw HTML and on the lightly preprocessed copy; 360 files dumped. **0 panics, 0 errors, and 0 nondeterministic outputs for every candidate and variant, over all 43 inputs.** Time is not a differentiator (27 bodies in 21 to 79 ms in total for every candidate).
+
+Corpus totals as printed (preprocessed variant; HTML side: 361 links, 140 images, 32 headings, 38 list items, 237 table rows):
+
+| Candidate | output bytes | links | images | headings | list items | table rows | Office noise | raw HTML tags left |
+|---|---|---|---|---|---|---|---|---|
+| `htmd` | 388,068 | 361 | 140 | 31 | 46 | 0 | 0 | 1 |
+| `htmd` faithful | 787,424 | 0 | 0 | 0 | 0 | 0 | 2,246 | 8,052 |
+| `html2markdown` | 525,124 | 282 | 73 | 1 | 4 | 34 | 0 | 14 |
+| `html-to-markdown-rs` | 254,996 | 345 | 46 | 1 | 322 | 44 | 0 | 15 |
+
+### A flaw in the harness's own word metric (found in review)
+
+The report's `words_missing` (8,577 / 7,851 / 7,631 / 8,759 of 26,952 for the best variants) **is wrong and should be disregarded.** It looked for each HTML word in the next 200 Markdown words after the last match; a common word matched early skipped the position past text that followed, and the very long tracking URLs in the newsletters pushed words out of the window. Recomputed from the dumped pairs of the three largest messages (001, 023: two newsletters; 014: a forwarded web article; 19,344 visible words in all) as a multiset difference with link destinations removed:
+
+| Candidate (preprocessed) | HTML words missing | Markdown words not in the HTML ("extra") |
+|---|---|---|
+| `htmd` | 2 (0.01%) | 6,384 |
+| `htmd` faithful | 2 | 43,015 |
+| `html2markdown` | 34 (0.18%) | 53 |
+| `html-to-markdown-rs` | 55 (0.28%) | 85 |
+
+So every candidate keeps almost all of the text. The corpus-wide figures need the corrected metric and a re-run; the corrections are described for the next change to `bakeoff.rs` in the plan.
+
+### What the outputs show (the dumped Markdown for messages 001, 014, and 023, read side by side)
+
+- **`htmd` (default mode)** gives the best Markdown by a wide margin: paragraphs separated by blank lines; all 5 and 11 headings of the two newsletters and the 1 of the article kept as `#` headings; all 26, 16, and 11 images and all links kept (including `cid:` images and link titles); simple tables converted, layout tables flattened into readable paragraphs. **Its one serious defect:** it writes the text of `<style>` blocks that sit in the body (the newsletters carry them) into the output, which is the source of its extra words (about 240 braces per newsletter). Removing `<style>` and `<script>` elements before conversion should fix that and is cheap. The single U+FFFD is the Windows-1255 byte from the de-encapsulation step.
+- **`htmd` faithful mode** keeps raw HTML in place of Markdown (8,052 raw tags left, no headings or links as Markdown, 1 MB of output; message 014 collapses to 9 lines). Unusable as a body format; rejected.
+- **`html2markdown`** runs paragraphs together without a blank line (13 and 32 sentence joins per newsletter against none for `htmd`), leaves numeric entities such as `&#xA;` in the text, puts headings inline after other text instead of on their own lines, keeps 9 of 26 images in message 001, loses 4 of 38 list items' structure, and on the unpreprocessed article loses a large part of the text (12,540 of 13,897 words by the flawed metric, 0 after preprocessing). Rejected.
+- **`html-to-markdown-rs`** is nearly identical to `htmd` on the plain article (message 014) and the closest to the HTML's own text, but on the layout-table newsletters it renders layout tables as Markdown tables (about 30 pipe lines with long dash rules per newsletter), loses every heading (0 of 16 in messages 001 and 023), keeps 4 of 26 images in message 001, and drops the hidden preheader sentence that `htmd` and `html2markdown` keep (55 words missing in total). It is also the slowest on the raw variant (79 ms against about 30 ms).
+- **Preprocessing matters:** removing Word comments, downlevel markers, and `o:p` tags cut `htmd`'s Office noise from 508 to 0 and `html2markdown`'s from 497 to 0 (and rescued `html2markdown` on message 014). It did not change `html-to-markdown-rs`.
+
+### Preliminary result and what it does not yet show
+
+`htmd` 0.5.4 in its default mode, behind in-house preprocessing that also removes `<style>` and `<script>` elements, is the leading candidate. This is not yet a decision: the three messages examined are the three largest of 27 and come from two sources (a newsletter service and a forwarded web page); the corpus is one producer; the corrected metric has not been re-run over all 27 and the 16 synthetic cases; tables (data tables against layout tables) and hidden text are policy questions the body-policy ADR must settle; and transitive dependency weight and licenses have not been checked. The gate (a recorded choice with the version pinned, in the body-policy ADR) is not met.
