@@ -333,3 +333,7 @@ Residual, not blocking: Windows-1255 and the other multi-byte or unimplemented c
 ### Which of the files supplied were useful
 
 `dump1.zip` was the decisive one. The two re-run reports (`verify-envelope-recursive2.txt`, `pst-dry-run1.txt`) repeated earlier results exactly, and `verify-deencap2.txt` added only the `dump_files_written=83` line. Still outstanding from the earlier requests: the current `tsp tsp-tester.pst` diagnostic output, `verify-split.ps1` at the current tag, and a corpus export tree hash at the current tag.
+
+## M4e-0: HTML-to-Markdown bake-off (harness written 2026-10-10; not yet built or run)
+
+Nothing here is a result. The harness is `src/bakeoff.rs` with `--bakeoff-md` and `--bakeoff-dump`; the candidates (`htmd` 0.5.4 in pure and faithful mode, `html2markdown` 0.2.0, `html-to-markdown-rs` 3.11.0) are behind the optional `bakeoff` Cargo feature. The measures, the synthetic cases, and the limits are in [`../plans/m4-plan.md`](../plans/m4-plan.md) (M4e-0). To run it: `cargo build --release --features bakeoff`, then `tsp --bakeoff-md --bakeoff-dump <new dir> <the --dump-deencap directory>`. The report keys are `corpus_<candidate>_<raw|pre>_<measure>` and `synthetic_<candidate>_<raw|pre>_<measure>`.

@@ -52,6 +52,21 @@ pub(crate) struct Args {
     #[arg(long, value_name = "DIR", requires = "verify_deencap")]
     pub(crate) dump_deencap: Option<PathBuf>,
 
+    /// Run the HTML-to-Markdown bake-off (M4e-0) over the `NNN.custom.html` files in the input
+    /// directory (the directory `--dump-deencap` wrote) and a built-in set of synthetic and
+    /// adversarial cases, and print only content-free scores. Needs a build with
+    /// `--features bakeoff`, which compiles in the candidate converters.
+    #[arg(
+        long,
+        conflicts_with_all = ["verify", "verify_envelope", "verify_deencap", "dump_deencap", "recursive", "out", "dry_run"]
+    )]
+    pub(crate) bakeoff_md: bool,
+
+    /// With `--bakeoff-md`, write each candidate's Markdown for every input into DIR (the only
+    /// place content goes). DIR must be new or empty.
+    #[arg(long, value_name = "DIR", requires = "bakeoff_md")]
+    pub(crate) bakeoff_dump: Option<PathBuf>,
+
     /// With `--verify-envelope` or `--verify-deencap`, descend into subdirectories of a directory
     /// input (the default scan is non-recursive, as for `--verify`).
     #[arg(long)]

@@ -1,6 +1,6 @@
-# M4 plan (v4.11) — normalized model and deterministic Markdown archive
+# M4 plan (v4.12) — normalized model and deterministic Markdown archive
 
-Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c complete (tag v0.1.23.1, 2026-10-03); M4a-2 complete for the four ADRs that could be decided (accepted by the owner 2026-10-04, release v0.1.24, documentation only); M4d (the envelope, with the envelope part of M4b-4) closed 2026-10-08 (code v0.1.25, follow-ups v0.1.26 and v0.1.26.2; 0 mismatches against `msg_parser` over 34 messages; every property identifier confirmed against Microsoft's pages); M4e-1 (RTF de-encapsulation) built and its gate met (recognition rule confirmed; the 27 differences from `msg_parser` all traced to `msg_parser` faults, plus one counted limitation: Windows-1255); the body and formatting-loss ADR is deferred to M4e.** Version 4.11, revised 2026-10-09 from version 4.10 to record the triage of the 27 de-encapsulation differences (all explained; the M4e-1 gate is met) and `--dump-deencap` (209 tests). Every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
+Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) with open items listed in the M4b-3 section; M4c complete (tag v0.1.23.1, 2026-10-03); M4a-2 complete for the four ADRs that could be decided (accepted by the owner 2026-10-04, release v0.1.24, documentation only); M4d (the envelope, with the envelope part of M4b-4) closed 2026-10-08 (code v0.1.25, follow-ups v0.1.26 and v0.1.26.2; 0 mismatches against `msg_parser` over 34 messages; every property identifier confirmed against Microsoft's pages); M4e-1 (RTF de-encapsulation) built and its gate met (recognition rule confirmed; the 27 differences from `msg_parser` all traced to `msg_parser` faults, plus one counted limitation: Windows-1255); the body and formatting-loss ADR is deferred to M4e.** Version 4.12, revised 2026-10-10 from version 4.11 to record that the M4e-0 bake-off harness is written (not yet built or run). Every stage has an evidence gate that must be met on Windows before the stage counts as done. Companion documents:
 
 - [`m4a-export-rules.md`](m4a-export-rules.md): the naming, layout, identity, duplicate, path-length, and overwrite rules (v3.6; sections 4-6 are now backed by an accepted ADR).
 - [`m4a-dependency-research.md`](m4a-dependency-research.md): RTF de-encapsulation, HTML-to-Markdown converters, and supporting crates.
@@ -28,6 +28,10 @@ Status: **M4a-1 decided; M4b-1, M4b-2, and M4b-3 verified (v0.1.22, 2026-10-02) 
 - 2026-10-04: the owner directed that M4a-2 be taken next, read the four ADRs, and **accepted each of them**, including the decisions that went beyond the original overwrite instruction (an archive of a different source is refused even with `--overwrite`; source identity is kind plus name, not hash; a non-empty directory without a `tsp` marker is refused; per-file rather than whole-archive atomicity for now) and the binding file rules (UTF-8 without BOM, LF, fixed field order, no absolute paths or export-time values).
 - 2026-10-07: the owner reported the v0.1.25.1 corpus tree hash and directed that M4d's loose ends be closed and M4e-1 (in-house MS-OXRTFEX de-encapsulation) started now, ahead of the HTML-to-Markdown bake-off (M4e-0), which needs real HTML that only M4e-1 can supply from this corpus.
 - 2026-10-06: the owner took M4d next, together with the envelope part of the model (M4b-4), ahead of the bake-off (M4e-0), and built and tagged it (v0.1.25, v0.1.25.1).
+
+## What changed from v4.11
+
+1. **M4e-0 started:** the bake-off harness (`src/bakeoff.rs`, `--bakeoff-md`, `--bakeoff-dump`, and an optional `bakeoff` Cargo feature that compiles in the three candidates) is written, uncompiled. Its gate is not met until it is built and run.
 
 ## What changed from v4.10
 
@@ -226,11 +230,15 @@ Gate: met. The differential check covers every field `msg_parser` exposes; every
 
 ### M4e-0 — HTML-to-Markdown bake-off (approved)
 
-Follow [`m4a-dependency-research.md`](m4a-dependency-research.md): candidates `htmd`, `html2markdown`, `html-to-markdown-rs`, behind an `HtmlToMarkdown` trait, judged on determinism, panics, content preservation, tables, links and images, licensing, dependency weight, and custom-handler support.
+Status: **harness written 2026-10-10, uncompiled; not yet built or run.** `src/bakeoff.rs` (pure scoring, a `MarkdownConverter` trait, optional adapters), `--bakeoff-md` and `--bakeoff-dump <dir>` in `cli.rs` and `main.rs`, and a `bakeoff` Cargo feature (`htmd` 0.5.4 pure and faithful, `html2markdown` 0.2.0, `html-to-markdown-rs` 3.11.0, each pinned with `=`). The feature is off by default, so the normal build and its dependencies are unchanged; CI's `--all-features` build compiles the candidates.
 
-Gate: a recorded choice with the exact version pinned, in the body-policy ADR.
+Method: each candidate is run in its own large-stack thread, twice per input, on the 27 recovered HTML bodies (the `NNN.custom.html` files `--dump-deencap` wrote) and on 16 built-in synthetic and adversarial cases (empty, Word cruft, nested lists, tables, entities, `cid:` images, malformed tags, non-Latin text, colors, a huge inline style, 300-deep nesting, 2,000 siblings, script and style, headings, Markdown-looking text), each on the raw HTML and on a lightly preprocessed copy (Word comments, downlevel markers, and `o:p` tags removed). Scores, counts only: panics, errors, nondeterminism, output size and time, visible words missing from the Markdown (ordered, windowed heuristic), and links, images, table rows, headings, and list items in the HTML against the Markdown, plus raw HTML tags and Office noise left behind and U+FFFD characters. `--bakeoff-dump` saves each candidate's Markdown locally for review by eye (the owner only).
 
-Sequencing: the `.msg` corpus has no native HTML body (27 of 29 messages carry HTML only inside RTF). With M4e-1 complete, the bake-off can run on the 27 recovered bodies (Word, Outlook, and web-composed mail, 40 bytes to 300 KB), which `--dump-deencap` writes locally; new fixtures with native or Word-authored HTML (fixture priority 10) remain useful.
+Limits to keep in mind: the word and structure counts are heuristics; the candidates' default options are used (including html-to-markdown-rs's, whose sanitization defaults were not changed because the option names were not confirmed); nesting deeper than 300 and inputs larger than the corpus are not tested; the decision also needs the by-eye review of the dumped Markdown and a look at `cargo tree` weight and licenses.
+
+Gate: a recorded choice with the exact version pinned, in the body-policy ADR. Not met.
+
+Sequencing: the `.msg` corpus has no native HTML body (27 of 29 messages carry HTML only inside RTF). With M4e-1 complete, the bake-off runs on the 27 recovered bodies; new fixtures with native or Word-authored HTML (fixture priority 10) remain useful.
 
 ### M4e-1 — MS-OXRTFEX de-encapsulation (in-house)
 
@@ -351,7 +359,7 @@ Crate boundaries become worthwhile only for a concrete reason: another program e
 
 ## Decisions still needed from the owner
 
-1. **Start M4e-0** (the HTML-to-Markdown bake-off), using the recovered HTML as input. The plan approved the candidates (`htmd`, `html2markdown`, `html-to-markdown-rs`); the assistant would write the bake-off harness (a pure trait, one adapter per candidate, content-free scoring plus a local dump for review).
+1. **Build and run the bake-off** (written, not yet compiled): `cargo build --release --features bakeoff`, then `tsp --bakeoff-md --bakeoff-dump <new dir> <the --dump-deencap directory>`; send the report, and review a few of the dumped Markdown files by eye.
 2. The current `tsp tsp-tester.pst` diagnostic output, to reconcile the PST counts (60/84 against the earlier 57/79). The planner is stable at 154 entries across runs and roots, so the open question is the diagnostic's side.
 3. `verify-split.ps1` and a corpus export (tree hash) at the latest tag, to confirm nothing moved (expected: `72d85534…c2e5`).
 4. A code page crate or in-house tables: only if a second producer's fixtures show more than the one byte seen here.

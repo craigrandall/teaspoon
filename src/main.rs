@@ -1,6 +1,7 @@
 //! `tsp`: privacy-safe inventory and Markdown export of Outlook `.pst` and `.msg` files (the teaspoon miner).
 
 mod archive;
+mod bakeoff;
 mod cli;
 mod dry_run;
 mod export;
@@ -29,6 +30,7 @@ use std::io::IsTerminal;
 use anyhow::Result;
 use clap::Parser;
 
+use crate::bakeoff::run_bakeoff;
 use crate::cli::{Args, InputKind, classify_input, collect_msg_files_recursive};
 use crate::dry_run::run_dry_run;
 use crate::export::{ExportOptions, ExportStatus, prompt_for_consent, run_export};
@@ -43,6 +45,11 @@ fn main() -> Result<()> {
 
     if args.recursive && !(args.verify_envelope || args.verify_deencap) {
         anyhow::bail!("--recursive applies only to --verify-envelope and --verify-deencap");
+    }
+
+    if args.bakeoff_md {
+        // The input is a directory of recovered HTML, not a mail container.
+        return run_bakeoff(&args.input, args.bakeoff_dump.as_deref());
     }
 
     if let Some(out) = &args.out {
