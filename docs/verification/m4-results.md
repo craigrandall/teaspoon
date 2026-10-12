@@ -377,3 +377,114 @@ So every candidate keeps almost all of the text. The corpus-wide figures need th
 ### Preliminary result and what it does not yet show
 
 `htmd` 0.5.4 in its default mode, behind in-house preprocessing that also removes `<style>` and `<script>` elements, is the leading candidate. This is not yet a decision: the three messages examined are the three largest of 27 and come from two sources (a newsletter service and a forwarded web page); the corpus is one producer; the corrected metric has not been re-run over all 27 and the 16 synthetic cases; tables (data tables against layout tables) and hidden text are policy questions the body-policy ADR must settle; and transitive dependency weight and licenses have not been checked. The gate (a recorded choice with the version pinned, in the body-policy ADR) is not met.
+
+## M4e-0: bake-off re-run after the metric fix (2026-10-11)
+
+### Build and cost
+
+The owner reports that everything built and **233 tests pass** (225 plus 8 for the new metric and the style and script removal; the ordered-window test was replaced). `Cargo.toml` is at `0.1.28`; nothing is committed yet, and the owner plans to commit with updated documents and tag `v0.1.29`. Release build time: **45.66 s** without the `bakeoff` feature (47.60 s in the first run, so unchanged within noise) and **1 min 25 s** with it (54.11 s in the first run). The feature therefore adds about 40 s, not the 6.5 s recorded earlier; the earlier figure may have come from an incremental build, which was not checked. `cargo tree --features bakeoff --depth 1` lists the three candidates (`htmd` 0.5.4, `html-to-markdown-rs` 3.11.0, `html2markdown` 0.2.0) beside the direct dependencies (`anyhow` 1.0.104, `cfb` 0.15.0, `clap` 4.6.7, `compressed-rtf` 1.0.1, `msg_parser` 0.3.6, `outlook-pst` 1.2.0, `serde` 1.0.229, `serde_json` 1.0.152, `sha2` 0.11.0, `unicode-normalization` 0.1.25; dev: `proptest` 1.12.0). A depth-1 listing shows no transitive dependency, duplicate version, or license, so **weight and licenses are still not known.**
+
+### What changed in the harness
+
+- **Word metric:** a multiset difference between the HTML's visible words and the Markdown's words (`words_missing`, and the new `words_extra`), after link and image destinations are removed from the Markdown. Order is not compared.
+- **Preprocessing ("pre" variant):** now also removes `<style>` and `<script>` elements with their text. Comments and those elements are removed in one left-to-right pass (a `<!--` inside a script is script text; a `<style>` inside a Word conditional comment is comment text); then Word's downlevel markers and `o:p` tags, as before.
+
+### The run
+
+`--bakeoff-md --bakeoff-dump C:\md1 C:\dump1 > bakeoff2.txt` (the first attempt failed with "failed to read the bake-off input directory" because `C:\dump1` did not exist at that path; it was re-run with the directory that holds the `NNN.custom.html` files). 27 recovered bodies and 16 synthetic cases, four candidates, raw and preprocessed variants, 360 files dumped. **0 panics, 0 errors, and 0 nondeterministic outputs for every candidate and variant over all 43 inputs.** Every candidate shows `replacement_chars=1` on the corpus: that is the Windows-1255 byte from the de-encapsulation step, so it comes from the input, not from a converter.
+
+Corpus totals, preprocessed variant (HTML side: 26,952 visible words, 361 links, 140 images, 32 headings, 38 list items, 237 table rows):
+
+| Candidate | words missing | words extra | links | images | headings | list items | table rows | raw tags | noise | bytes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `htmd` | 2 | 262 | 361 | 140 | 31 | 46 | 0 | 1 | 0 | 264,071 |
+| `htmd` faithful | 0 | 73,542 | 0 | 0 | 0 | 0 | 0 | 8,012 | 2,246 | 653,609 |
+| `html2markdown` | 53 | 514 | 282 | 73 | 1 | 4 | 34 | 14 | 0 | 525,124 |
+| `html-to-markdown-rs` | 122 | 1,440 | 345 | 46 | 1 | 322 | 44 | 15 | 0 | 254,996 |
+
+Raw variant, for comparison: `htmd` 2 missing, 21,664 extra, 508 noise markers, 414,326 bytes; `htmd` faithful 0 missing, 126,083 extra, 11,748 raw tags, 3,761 noise markers; `html2markdown` 53 missing, 29,510 extra, 2,694 raw tags, 497 noise markers; `html-to-markdown-rs` 111 missing, 1,452 extra, 2 noise markers. Time over the 27 bodies (first run of each, milliseconds): `htmd` 32 raw and 20 preprocessed, `htmd` faithful 38 and 25, `html2markdown` 27 and 21, `html-to-markdown-rs` 76 and 35; not a differentiator.
+
+Synthetic set, preprocessed: `htmd` 1 missing and 3 extra words; `htmd` faithful 1 and 10,684; `html2markdown` 2 and 3; `html-to-markdown-rs` 2 and 3. Every candidate reports `links_md=3` against 2 links in the HTML.
+
+### What the numbers show
+
+- **The `htmd` style-text defect is confirmed and removed by the preprocessing.** On the raw variant `htmd` has 21,664 extra words and 508 noise markers; after preprocessing, 262 and 0, and the output falls from 414,326 to 264,071 bytes. The structure counts (links, images, headings, list items) are the same on both variants. Style and script removal is therefore a requirement of the body pipeline (M4e-2), not an option.
+- **The first run's figures are superseded.** The preprocessed `htmd` size recorded in the first run (388,068 bytes) still contained body style text that Word's comment removal had not caught; the figure is now 264,071. The first run's `words_missing` column stays withdrawn.
+- **`htmd` default mode keeps almost every word and all the links and images.** 2 of 26,952 words are missing (0.007%), 361 of 361 links and 140 of 140 images are kept, 31 of 32 headings, no Office noise, 1 raw HTML tag. In the first run's hand comparison of the three largest messages (001, 014, 023) `htmd` was also missing 2 words, so these 2 are probably the same ones; the per-input list added to the harness will say which file.
+- **The 262 extra words** are plausibly the alt text of the 140 images (the metric counts alt text as extra); this was not checked.
+- **Table rows: 0 of 237.** `htmd` flattens every table in the corpus. On the synthetic set it kept 3 of 4 rows of a simple data table, so it does convert tables it takes for data. Whether the corpus holds a real data table that was flattened is **not known**; the three messages read by eye are newsletters and a forwarded article. The header-cell count added to the harness is the first check.
+- **List items: 46 against 38** for `htmd`, and 322 for `html-to-markdown-rs`: the list-item count is a line-shape heuristic and counts lines the converter wrote that look like list items; neither figure was investigated.
+- **The other three candidates stay rejected, now on corpus-wide numbers.** `htmd` faithful keeps raw HTML in place of Markdown (8,012 raw tags, 0 links, 0 headings, 73,542 extra words). `html2markdown` loses structure (282 of 361 links, 73 of 140 images, 1 of 32 headings, 4 of 38 list items) and has 514 extra words, which the first run's reading attributed to numeric entities left in the text. `html-to-markdown-rs` keeps 46 of 140 images and 1 of 32 headings, drops hidden preheader text, and has the most missing words (122, or 0.45%); its missing words rose from 111 to 122 when the HTML was preprocessed, which was not investigated.
+- **A metric limit is visible in the synthetic set.** The case with Markdown-looking text (`[brackets](paren)`) is counted as a link by the Markdown counter (`links_md=3` against 2 in the HTML, for every candidate), and the destination remover therefore removes "paren": that is probably the 1 missing word every candidate shows there. It is inherent to the metric, not a converter fault. `html2markdown` and `html-to-markdown-rs` show a second missing word on the synthetic set that this does not explain.
+
+### What this does not show
+
+- The metric does not check order, so a converter that reorders text (for example while flattening a layout table) is not caught by it; only the by-eye review does, and only the three largest messages have been read.
+- Corpus-wide counts do not say which words are missing, which messages have tables or hidden text, or what share of the output is link destinations. The per-input lists, the destination-byte count, the header-cell count, and the hidden-marker count were written for the next build, **not yet built or run**.
+- Dependency weight and licenses (above); the corpus is one producer; no data-table, hidden-text, or tracking-URL policy is decided.
+
+### Status
+
+**Not closed.** The leading candidate is `htmd` 0.5.4 in default mode, behind the preprocessing described above; the choice is not recorded in the body-policy ADR, so the gate is not met. What remains is listed in the plan's "Decisions still needed" (item 1).
+
+## M4e-0: bake-off re-run after the metric fix, and the per-input run (2026-10-11)
+
+### Build, quality gate, and cost
+
+At the metric-fix build the owner reported that everything built and **233 tests pass**. The per-input counts were then added, and the owner reports for the `v0.1.29` candidate: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (**236 passed**, 0 failed), and `cargo build --release` all succeeded; the CI result for the push is not yet reported. `cargo update` moved `syn` 3.0.8 to 3.0.9 and `unicode-ident` 1.0.26 to 1.0.27 (`Cargo.lock`); it reports `htmd` 0.5.5 and `html-to-markdown-rs` 3.17.2 as available, and the bake-off measured 0.5.4 and 3.11.0. `Cargo.toml` is at `0.1.28`; nothing is committed yet, and the owner plans to commit with updated documents and tag `v0.1.29`.
+
+Release build times: **49.81 s** without the `bakeoff` feature and **54.95 s** with it (+5 s), against 47.60 s and 54.11 s in the first run. An earlier measurement the same day, 45.66 s and **1 min 25 s**, was an outlier (probably a rebuild after dependency updates; not checked), and the first draft's statement that the feature adds about 40 s is withdrawn. The cost of a clean build, and of `htmd` alone once it is a normal dependency, was not measured.
+
+### Dependency weight and licenses
+
+`cargo tree` below the first level (`htmd`'s subtree, taken from the full tree because `cargo tree -p htmd --features bakeoff` is refused for a package outside the workspace): 34 entries, 33 distinct crates (`syn` appears as 2.0.119 and 3.0.9): `htmd` 0.5.4 over `html5ever` 0.38, `markup5ever_rcdom` 0.38.0+unofficial, and `phf` 0.13, with, beneath them, `markup5ever`, `xml5ever`, `web_atoms`, `string_cache`, `tendril`, `parking_lot`, `lock_api`, `parking_lot_core`, `scopeguard`, `smallvec`, `log`, `siphasher`, `precomputed-hash`, `new_debug_unreachable`, `cfg-if`, `windows-link`, `fastrand`, `serde` (with `serde_core` and `serde_derive`), and the proc-macro stack (`proc-macro2`, `quote`, `syn`, `unicode-ident`). The `phf` generators (`phf_macros`, `phf_codegen`, `phf_generator`) and `string_cache_codegen` are build-time. Compared with the tree without the feature (which includes dev dependencies), **22 crates beyond `htmd` itself are new**; the other 11 entries are already in the tree. All three candidates together add 69 entries, among them second versions of `html5ever` (0.39) and `phf` (0.14) that exist only because of the feature.
+
+`cargo license --features bakeoff`: `htmd` is Apache-2.0. Every crate in its subtree is MIT, Apache-2.0, or Apache-2.0 OR MIT. The tree has no copyleft licenses: the one LGPL mention (`r-efi`: Apache-2.0 OR LGPL-2.1-or-later OR MIT) is a choice that includes MIT and Apache-2.0, and `r-efi` is not in `htmd`'s subtree. Other licenses in the tree, all from the candidates the project is not keeping: Unicode-3.0 (the `icu_*` crates), CC0-1.0 (`tiny-keccak`), Apache-2.0 OR MIT OR Zlib (`tinyvec`). Not verified: the maintenance status of `markup5ever_rcdom`, whose version carries the suffix `+unofficial`.
+
+### What changed in the harness
+
+- **Word metric:** a multiset difference between the HTML's visible words and the Markdown's words (`words_missing`, and the new `words_extra`), after link and image destinations are removed from the Markdown. Order is not compared.
+- **Preprocessing ("pre" variant):** now also removes `<style>` and `<script>` elements with their text, in one left-to-right pass with comments (a `<!--` inside a script is script text; a `<style>` inside a Word conditional comment is comment text); then Word's downlevel markers and `o:p` tags, as before.
+- **Per-input counts:** the labels of the inputs that have missing or extra words, with how many (file numbers only); the bytes taken by link destinations; the HTML's header cells; and the HTML's tags hidden by `display:none` or `mso-hide:all`.
+
+### The runs
+
+`--bakeoff-md --bakeoff-dump C:\md1 C:\dump1 > bakeoff2.txt` (the first attempt failed with "failed to read the bake-off input directory" because `C:\dump1` did not exist at that path; it was re-run with the directory that holds the `NNN.custom.html` files), then `--bakeoff-md C:\dump1 > bakeoff3.txt` with the per-input counts. 27 recovered bodies and 16 synthetic cases, four candidates, raw and preprocessed variants. **0 panics, 0 errors, and 0 nondeterministic outputs for every candidate and variant over all 43 inputs.** All 361 keys that the two runs share are identical (timings excluded), so the additions changed no earlier figure. Every candidate shows `replacement_chars=1` on the corpus: that is the Windows-1255 byte from the de-encapsulation step, so it comes from the input, not from a converter.
+
+Corpus totals, preprocessed variant (HTML side: 26,952 visible words, 361 links, 140 images, 32 headings, 38 list items, 237 table rows, 0 header cells, 16 hidden-style tags):
+
+| Candidate | words missing | words extra | links | images | headings | list items | table rows | raw tags | noise | bytes | destination bytes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `htmd` | 2 | 262 | 361 | 140 | 31 | 46 | 0 | 1 | 0 | 264,071 | 86,187 (32.6%) |
+| `htmd` faithful | 0 | 73,542 | 0 | 0 | 0 | 0 | 0 | 8,012 | 2,246 | 653,609 | 0 |
+| `html2markdown` | 53 | 514 | 282 | 73 | 1 | 4 | 34 | 14 | 0 | 525,124 | 48,184 (9.2%) |
+| `html-to-markdown-rs` | 122 | 1,440 | 345 | 46 | 1 | 322 | 44 | 15 | 0 | 254,996 | 66,387 (26.0%) |
+
+Raw variant, for comparison: `htmd` 2 missing, 21,664 extra, 508 noise markers, 414,326 bytes; `htmd` faithful 0 missing, 126,083 extra, 11,748 raw tags, 3,761 noise markers; `html2markdown` 53 missing, 29,510 extra, 2,694 raw tags, 497 noise markers; `html-to-markdown-rs` 111 missing, 1,452 extra, 2 noise markers. Time over the 27 bodies (first run of each, milliseconds): `htmd` 32 raw and 20 preprocessed, `htmd` faithful 38 and 25, `html2markdown` 27 and 21, `html-to-markdown-rs` 76 and 35; not a differentiator.
+
+Per input, `htmd` preprocessed: **missing words only in message 001 (2)**, the same 2 as in the raw variant; extra words in 13 of 27 messages: 001:19, 005:8, 007:26, 008:20, 009:9, 010:8, 014:18, 015:94, 020:8, 023:23, 024:21, 027:7, 029:1 (262 in all). The other candidates miss words in more messages: `html2markdown` in 001, 007, 009, 016, 023, 024; `html-to-markdown-rs` in 001, 007, 008, 009, 016, 023, 024, 027; `htmd` faithful in none.
+
+Synthetic set, preprocessed: `htmd` 1 missing (case s16) and 3 extra (s04: 2, s07: 1); `htmd` faithful 1 and 10,684; `html2markdown` 2 missing (s12, s16) and 3 extra; `html-to-markdown-rs` 2 missing (s12, s16) and 3 extra. Every candidate reports `links_md=3` against 2 links in the HTML. Case s12 is the 300-deep nesting: `html2markdown` and `html-to-markdown-rs` lose one word there; `htmd` does not.
+
+### What the numbers show
+
+- **The `htmd` style-text defect is confirmed and removed by the preprocessing.** On the raw variant `htmd` has 21,664 extra words and 508 noise markers; after preprocessing, 262 and 0, and the output falls from 414,326 to 264,071 bytes. The structure counts (links, images, headings, list items) are the same on both variants. Style and script removal is therefore a requirement of the body pipeline (M4e-2), not an option.
+- **The first run's figures are superseded.** The preprocessed `htmd` size recorded in the first run (388,068 bytes) still contained body style text that Word's comment removal had not caught; the figure is now 264,071. The first run's `words_missing` column stays withdrawn.
+- **`htmd` default mode keeps almost every word and all the links and images.** 2 of 26,952 words are missing (0.007%), 361 of 361 links and 140 of 140 images are kept, 31 of 32 headings, no Office noise, 1 raw HTML tag. The 2 missing words are both in message 001 and are `month` and `¹`: the HTML has `$20/month</span><span class="footnote-anchor-email" ...>&#185;</span>` and `htmd` writes `month¹`. The harness splits words at every tag, including inline ones, while Markdown has no delimiter there, so one glued word counts as 2 missing words and 1 extra: **a metric artifact, not a lost word** (confirmed by reading both files). On this corpus the word metric therefore shows no word lost by `htmd`; message 001 is also where `html2markdown` and `html-to-markdown-rs` miss words (14 each), and `htmd` faithful, whose output keeps the HTML, misses none.
+- **The extra words are mostly explained by the metric on the synthetic set**: ordered-list numerals (s04, 2 words) and image alt text (s07, 1 word). Whether the same holds for the corpus (015 with 94 extra words, 007 with 26) was **not checked**.
+- **Table rows: 0 of 237, and 0 header cells.** `htmd` flattens every table in the corpus, and none of them has `<th>` cells. On the synthetic set it kept 3 of 4 rows of a table with header cells, so it does convert tables it takes for data. Whether the corpus holds a real data table without header cells that was flattened is **not known**.
+- **Hidden text:** 16 tags in the corpus are hidden by `display:none` or `mso-hide:all`; which messages, and what the hidden text says, is **not known** (`htmd` keeps hidden text; `html-to-markdown-rs` drops hidden preheader text).
+- **Link destinations are a third of `htmd`'s output:** 86,187 of 264,071 bytes (32.6%) over 361 links and 140 images, about 172 bytes each.
+- **List items: 46 against 38** for `htmd`, and 322 for `html-to-markdown-rs`: the list-item count is a line-shape heuristic and was not investigated.
+- **The other three candidates stay rejected, now on corpus-wide numbers.** `htmd` faithful keeps raw HTML in place of Markdown (8,012 raw tags, 0 links, 0 headings, 73,542 extra words). `html2markdown` loses structure (282 of 361 links, 73 of 140 images, 1 of 32 headings, 4 of 38 list items), has 514 extra words, and loses a word at 300-deep nesting. `html-to-markdown-rs` keeps 46 of 140 images and 1 of 32 headings, drops hidden preheader text, has the most missing words (122, or 0.45%, in 8 messages), and loses a word at 300-deep nesting; its missing words rose from 111 to 122 when the HTML was preprocessed, which was not investigated.
+- **A metric limit is visible in the synthetic set.** The case with Markdown-looking text (`[brackets](paren)`, s16) is counted as a link by the Markdown counter (`links_md=3` against 2 in the HTML, for every candidate), and the destination remover therefore removes "paren": that is the one missing word every candidate shows there. It is inherent to the metric, not a converter fault. The inline-tag splitting above is the second known limit, and it probably also accounts for part of the corpus's extra words (not checked).
+
+### What this does not show
+
+- The metric does not check order, so a converter that reorders text (for example while flattening a layout table) is not caught by it; only the by-eye review does, and only the three largest messages have been read.
+- Which messages have data-like tables or hidden text, and whether the corpus extras are alt text, list numerals, or glued words.
+- The corpus is one producer; nesting deeper than 300 and inputs larger than the corpus are untested; no data-table, hidden-text, or tracking-URL policy is decided; the maintenance status of `markup5ever_rcdom` and whether `htmd` 0.5.5 changes any figure.
+
+### Status
+
+**Not closed.** The leading candidate is `htmd` 0.5.4 in default mode, behind the preprocessing described above; the choice is not recorded in the body-policy ADR, so the gate is not met. What remains is listed in the plan's "Decisions still needed" (item 1).

@@ -5,14 +5,21 @@
 //! Candidates (compiled only with `--features bakeoff`, so the default build and its
 //! dependencies are unchanged): `htmd` (pure and faithful mode), `html2markdown`, and
 //! `html-to-markdown-rs`. Each is run in a worker thread with a large stack, twice per input
-//! (determinism), on the raw HTML and on a lightly preprocessed copy (Word comments and `o:p`
-//! tags removed), and judged on:
+//! (determinism), on the raw HTML and on a lightly preprocessed copy (Word comments, `style` and
+//! `script` elements, and `o:p` tags removed), and judged on:
 //!
 //! - **robustness**: panics and errors (a panic is caught as a thread failure, never fatal);
 //! - **determinism**: the two runs must produce identical output;
-//! - **content preservation**: how many of the HTML's visible words are missing from the
-//!   Markdown, counting in order within a bounded window (a heuristic: link destinations add
-//!   words to the Markdown but never hide missing ones);
+//! - **content preservation**: the HTML's visible words against the Markdown's words, as a
+//!   multiset difference. Order is not compared, and a repeated word counts once per occurrence.
+//!   `words_missing` are in the HTML and not in the Markdown; `words_extra` are in the Markdown
+//!   and not in the HTML. Link and image destinations are removed from the Markdown first, so a
+//!   long tracking URL adds nothing. A heuristic: an image's alt text counts as extra, hidden
+//!   (`display:none`) text counts as visible, and order is left to the by-eye review;
+//! - **where**: the labels of the inputs that have missing or extra words, with how many, so a
+//!   file can be opened by its number; the bytes taken by link destinations (how much of the
+//!   output is URLs); and how many header cells and hidden-style tags the HTML has (inputs to the
+//!   table and preheader-text policies);
 //! - **structure**: links, images, table rows, headings, and list items in the HTML against what
 //!   appears in the Markdown, plus raw HTML tags left behind, Office noise left behind, and
 //!   U+FFFD characters;
@@ -33,8 +40,9 @@ use anyhow::{Context, Result};
 /// Stack for each conversion thread (Windows' default main-thread stack is only 1 MiB, and
 /// converters recurse on nesting depth).
 const STACK_BYTES: usize = 32 * 1024 * 1024;
-/// How far ahead in the Markdown's words a word of the HTML is looked for.
-const WORD_WINDOW: usize = 200;
+/// The longest link destination (in bytes) looked for after `](`; a longer one is left alone, so
+/// a Markdown full of unclosed `](` cannot make the scan quadratic.
+const MAX_DESTINATION_BYTES: usize = 64 * 1024;
 
 /// One converter under test. Implementations are stateless, so each call builds what it needs.
 pub(crate) trait MarkdownConverter: Send + Sync {
@@ -145,6 +153,8 @@ struct TagToken {
     close: bool,
     /// An opening tag that carries `href=`.
     has_href: bool,
+    /// An opening tag whose style hides its content (`display:none` or `mso-hide:all`).
+    has_hidden: bool,
 }
 
 /// Walks HTML, calling `on_tag` for each tag and `on_text` for each run of text. Comments are
@@ -189,11 +199,14 @@ fn walk(html: &str, on_tag: &mut dyn FnMut(&TagToken), on_text: &mut dyn FnMut(&
             .take_while(|c| c.is_ascii_alphanumeric() || *c == ':' || *c == '-')
             .map(|c| c.to_ascii_lowercase())
             .collect();
-        let has_href = !close && lower[lt..end].contains("href=");
+        let tag_text = &lower[lt..end];
+        let has_href = !close && tag_text.contains("href=");
+        let has_hidden = !close && is_hidden_tag(tag_text);
         on_tag(&TagToken {
             name: name.clone(),
             close,
             has_href,
+            has_hidden,
         });
         on_text(" ");
         i = end;
@@ -205,6 +218,16 @@ fn walk(html: &str, on_tag: &mut dyn FnMut(&TagToken), on_text: &mut dyn FnMut(&
             });
         }
     }
+}
+
+/// True when a lowercased tag hides its content by style, `display:none` or Word's
+/// `mso-hide:all`, ignoring white space. Counts tags, not the words they hide.
+fn is_hidden_tag(lower_tag: &str) -> bool {
+    if !lower_tag.contains("display") && !lower_tag.contains("mso-hide") {
+        return false;
+    }
+    let collapsed: String = lower_tag.chars().filter(|c| !c.is_whitespace()).collect();
+    collapsed.contains("display:none") || collapsed.contains("mso-hide:all")
 }
 
 fn named_entity(name: &str) -> Option<char> {
@@ -309,6 +332,8 @@ struct HtmlFacts {
     table_rows: u64,
     headings: u64,
     list_items: u64,
+    header_cells: u64,
+    hidden_markers: u64,
 }
 
 fn html_facts(html: &str) -> HtmlFacts {
@@ -320,8 +345,12 @@ fn html_facts(html: &str) -> HtmlFacts {
             if tag.close {
                 return;
             }
+            if tag.has_hidden {
+                facts.hidden_markers += 1;
+            }
             match tag.name.as_str() {
                 "a" if tag.has_href => facts.links += 1,
+                "th" => facts.header_cells += 1,
                 "img" => facts.images += 1,
                 "tr" => facts.table_rows += 1,
                 "li" => facts.list_items += 1,
@@ -335,20 +364,85 @@ fn html_facts(html: &str) -> HtmlFacts {
     facts
 }
 
-/// How many of `html_words` are not found, in order, in `markdown_words`: each word is looked
-/// for within the next [`WORD_WINDOW`] words after the last match; a word not found is counted
-/// and the position does not move.
-fn ordered_missing(html_words: &[String], markdown_words: &[String]) -> u64 {
-    let mut position = 0usize;
-    let mut missing = 0u64;
-    for word in html_words {
-        let end = (position + WORD_WINDOW).min(markdown_words.len());
-        match markdown_words[position..end].iter().position(|m| m == word) {
-            Some(offset) => position += offset + 1,
-            None => missing += 1,
+/// How many times each word occurs.
+fn word_counts(words: &[String]) -> BTreeMap<&str, u64> {
+    let mut counts = BTreeMap::new();
+    for word in words {
+        *counts.entry(word.as_str()).or_insert(0u64) += 1;
+    }
+    counts
+}
+
+/// The multiset difference between the HTML's words and the Markdown's, as
+/// `(missing, extra)`: `missing` counts occurrences the HTML has and the Markdown lacks (a word
+/// that occurs three times in the HTML and twice in the Markdown is one missing), `extra` counts
+/// occurrences the Markdown has beyond the HTML's. Order is not compared, so a long run of
+/// unmatched words (such as a tracking URL's) cannot disturb the words around it.
+fn word_difference(html_words: &[String], markdown_words: &[String]) -> (u64, u64) {
+    let html = word_counts(html_words);
+    let markdown = word_counts(markdown_words);
+    let missing = html
+        .iter()
+        .map(|(word, &in_html)| in_html.saturating_sub(markdown.get(word).copied().unwrap_or(0)))
+        .sum();
+    let extra = markdown
+        .iter()
+        .map(|(word, &in_markdown)| {
+            in_markdown.saturating_sub(html.get(word).copied().unwrap_or(0))
+        })
+        .sum();
+    (missing, extra)
+}
+
+/// Where the destination of an inline link or image ends: `after` starts just past `](`, and the
+/// result is the byte length through the closing parenthesis. Parentheses inside the destination
+/// must balance (or be escaped with a backslash), and the destination must close on the same
+/// line within [`MAX_DESTINATION_BYTES`]; otherwise there is no end.
+fn link_destination_end(after: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut escaped = false;
+    for (index, c) in after.char_indices() {
+        if c == '\n' || index > MAX_DESTINATION_BYTES {
+            return None;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
         }
     }
-    missing
+    None
+}
+
+/// Removes the destination (and any title) of each inline link and image, `](destination "title")`,
+/// keeping the bracketed text, so that URLs do not count as words. A `](` whose destination does
+/// not close is left as written.
+fn strip_link_destinations(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len());
+    let mut rest = markdown;
+    while let Some(start) = rest.find("](") {
+        out.push_str(&rest[..=start]);
+        let after = &rest[start + 2..];
+        match link_destination_end(after) {
+            Some(end) => rest = &after[end..],
+            None => {
+                out.push('(');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 // =============================================================================
@@ -423,17 +517,72 @@ fn markdown_counts(markdown: &str) -> MarkdownCounts {
 // Preprocessing (light, for the "pre" variant)
 // =============================================================================
 
-fn strip_comments(html: &str) -> String {
+/// True for the characters that may follow a tag name: the end of the tag, a self-closing slash,
+/// or white space before attributes.
+fn is_tag_delimiter(c: char) -> bool {
+    c == '>' || c == '/' || c.is_whitespace()
+}
+
+/// `style` or `script` when `lower_tail` (lowercased, just past a `<`) starts that element's
+/// opening tag. `<styled>` and `<scripted>` are other elements and do not match.
+fn raw_text_element_at(lower_tail: &str) -> Option<&'static str> {
+    ["style", "script"].into_iter().find(|name| {
+        lower_tail
+            .strip_prefix(*name)
+            .and_then(|after| after.chars().next())
+            .is_some_and(is_tag_delimiter)
+    })
+}
+
+/// Where a `style` or `script` element ends: the byte just past the `>` of its closing tag,
+/// searching `lower` from `from`. `None` when it is never closed.
+fn end_of_raw_text_element(lower: &str, from: usize, name: &str) -> Option<usize> {
+    let closing = format!("</{name}");
+    let mut search = from;
+    while let Some(relative) = lower[search..].find(&closing) {
+        let after = search + relative + closing.len();
+        if lower[after..].chars().next().is_none_or(is_tag_delimiter) {
+            return Some(
+                lower[after..]
+                    .find('>')
+                    .map_or(lower.len(), |q| after + q + 1),
+            );
+        }
+        search = after;
+    }
+    None
+}
+
+/// Removes comments and `style` and `script` elements (with their text) in one left-to-right
+/// pass, so that whichever starts first in the document wins, as it would for a browser: a
+/// `<!--` inside a script is script text, and a `<style>` inside a comment is comment text.
+/// Anything that is never closed removes the rest of the document, as the scoring reader does.
+fn strip_comments_style_and_script(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(start) = rest.find("<!--") {
-        out.push_str(&rest[..start]);
-        match rest[start + 4..].find("-->") {
-            Some(end) => rest = &rest[start + 4 + end + 3..],
-            None => return out,
+    let mut i = 0usize;
+    while i < html.len() {
+        let Some(relative) = html[i..].find('<') else {
+            out.push_str(&html[i..]);
+            break;
+        };
+        let lt = i + relative;
+        out.push_str(&html[i..lt]);
+        if html[lt..].starts_with("<!--") {
+            match html[lt + 4..].find("-->") {
+                Some(end) => i = lt + 4 + end + 3,
+                None => return out,
+            }
+        } else if let Some(name) = raw_text_element_at(&lower[lt + 1..]) {
+            match end_of_raw_text_element(&lower, lt + 1 + name.len(), name) {
+                Some(end) => i = end,
+                None => return out,
+            }
+        } else {
+            out.push('<');
+            i = lt + 1;
         }
     }
-    out.push_str(rest);
     out
 }
 
@@ -481,9 +630,12 @@ fn remove_office_paragraph_tags(html: &str) -> String {
     out
 }
 
-/// The light preprocessing the "pre" variant applies before conversion.
+/// The light preprocessing the "pre" variant applies before conversion: comments, `style` and
+/// `script` elements, Word's downlevel markers, and `o:p` tags.
 pub(crate) fn preprocess_office_html(html: &str) -> String {
-    remove_office_paragraph_tags(&strip_marked_sections(&strip_comments(html)))
+    remove_office_paragraph_tags(&strip_marked_sections(&strip_comments_style_and_script(
+        html,
+    )))
 }
 
 // =============================================================================
@@ -515,6 +667,7 @@ struct Measure {
     millis: u64,
     words_html: u64,
     words_missing: u64,
+    words_extra: u64,
     links_html: u64,
     links_md: u64,
     images_html: u64,
@@ -528,6 +681,13 @@ struct Measure {
     raw_html_tags_md: u64,
     noise_markers_md: u64,
     replacement_chars_md: u64,
+    header_cells_html: u64,
+    hidden_markers_html: u64,
+    destination_bytes_md: u64,
+    /// Inputs with missing words, as (label, count).
+    missing_by_input: Vec<(String, u64)>,
+    /// Inputs with extra words, as (label, count).
+    extra_by_input: Vec<(String, u64)>,
 }
 
 struct Outcome {
@@ -579,11 +739,13 @@ fn run_converter(converter: &Arc<dyn MarkdownConverter>, html: &str) -> Outcome 
 }
 
 /// Converts `input` twice with `converter`, folds the result into `measure`, and returns the
-/// first run's Markdown. `facts` describe the original HTML, whatever `input` was.
+/// first run's Markdown. `facts` describe the original HTML, whatever `input` was, and `label`
+/// names the input in the per-input lists.
 fn evaluate(
     measure: &mut Measure,
     converter: &Arc<dyn MarkdownConverter>,
     facts: &HtmlFacts,
+    label: &str,
     input: &str,
 ) -> Option<String> {
     measure.inputs += 1;
@@ -599,7 +761,20 @@ fn evaluate(
 
     measure.output_bytes += markdown.len() as u64;
     measure.words_html += facts.words.len() as u64;
-    measure.words_missing += ordered_missing(&facts.words, &alnum_words(&markdown));
+    let stripped = strip_link_destinations(&markdown);
+    measure.destination_bytes_md += (markdown.len() - stripped.len()) as u64;
+    let markdown_words = alnum_words(&stripped);
+    let (missing, extra) = word_difference(&facts.words, &markdown_words);
+    measure.words_missing += missing;
+    measure.words_extra += extra;
+    if missing > 0 {
+        measure.missing_by_input.push((label.to_string(), missing));
+    }
+    if extra > 0 {
+        measure.extra_by_input.push((label.to_string(), extra));
+    }
+    measure.header_cells_html += facts.header_cells;
+    measure.hidden_markers_html += facts.hidden_markers;
     let counts = markdown_counts(&markdown);
     measure.links_html += facts.links;
     measure.links_md += counts.links;
@@ -749,7 +924,7 @@ fn run_set(
                     Variant::Preprocessed => preprocessed.as_str(),
                 };
                 let measure = totals.entry((set, converter.name(), variant)).or_default();
-                let markdown = evaluate(measure, converter, &facts, input);
+                let markdown = evaluate(measure, converter, &facts, label, input);
                 if let (Some(dump), Some(markdown)) = (dump.as_mut(), markdown) {
                     let name = format!("{label}.{}.{}.md", converter.name(), variant.label());
                     dump.write(&name, &markdown)?;
@@ -776,6 +951,18 @@ fn run_everything(
     run_set("synthetic", synthetic, converters, totals, dump)
 }
 
+/// `label:count` pairs joined by commas, or `none`. Labels are input numbers, never content.
+fn format_by_input(entries: &[(String, u64)]) -> String {
+    if entries.is_empty() {
+        return "none".to_string();
+    }
+    entries
+        .iter()
+        .map(|(label, count)| format!("{label}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn print_measure(prefix: &str, m: &Measure) {
     println!("{prefix}_inputs={}", m.inputs);
     println!("{prefix}_panics={}", m.panics);
@@ -785,6 +972,18 @@ fn print_measure(prefix: &str, m: &Measure) {
     println!("{prefix}_millis={}", m.millis);
     println!("{prefix}_words_html={}", m.words_html);
     println!("{prefix}_words_missing={}", m.words_missing);
+    println!("{prefix}_words_extra={}", m.words_extra);
+    println!(
+        "{prefix}_words_missing_by_input={}",
+        format_by_input(&m.missing_by_input)
+    );
+    println!(
+        "{prefix}_words_extra_by_input={}",
+        format_by_input(&m.extra_by_input)
+    );
+    println!("{prefix}_destination_bytes_md={}", m.destination_bytes_md);
+    println!("{prefix}_header_cells_html={}", m.header_cells_html);
+    println!("{prefix}_hidden_markers_html={}", m.hidden_markers_html);
     println!("{prefix}_links_html={}", m.links_html);
     println!("{prefix}_links_md={}", m.links_md);
     println!("{prefix}_images_html={}", m.images_html);
@@ -876,6 +1075,38 @@ mod tests {
         }
         fn convert(&self, html: &str) -> Result<String, String> {
             Ok(html_facts(html).words.join(" "))
+        }
+    }
+
+    /// Returns the HTML's visible words as one Markdown link with a long tracking destination.
+    struct Linked;
+    impl MarkdownConverter for Linked {
+        fn name(&self) -> &'static str {
+            "linked"
+        }
+        fn version(&self) -> &'static str {
+            "0"
+        }
+        fn convert(&self, html: &str) -> Result<String, String> {
+            Ok(format!(
+                "[{}](https://t.example.com/{}?u=1 \"a title\")",
+                html_facts(html).words.join(" "),
+                "x1y2".repeat(40)
+            ))
+        }
+    }
+
+    /// Returns a single word that is not in the HTML.
+    struct Garbles;
+    impl MarkdownConverter for Garbles {
+        fn name(&self) -> &'static str {
+            "garbles"
+        }
+        fn version(&self) -> &'static str {
+            "0"
+        }
+        fn convert(&self, _html: &str) -> Result<String, String> {
+            Ok("y".to_string())
         }
     }
 
@@ -976,20 +1207,125 @@ mod tests {
     }
 
     #[test]
-    fn missing_words_are_counted_in_order_within_a_window() {
+    fn missing_and_extra_words_are_a_multiset_difference() {
         let html = words(&["a", "b", "c", "d"]);
-        assert_eq!(ordered_missing(&html, &words(&["a", "b", "c", "d"])), 0);
-        assert_eq!(ordered_missing(&html, &words(&["a", "c", "d"])), 1);
-        assert_eq!(ordered_missing(&html, &words(&[])), 4);
-        // Out of order: "b" is found after "c", so "c" is then missing.
         assert_eq!(
-            ordered_missing(&words(&["a", "c", "b"]), &words(&["a", "b", "c"])),
-            1
+            word_difference(&html, &words(&["a", "b", "c", "d"])),
+            (0, 0)
         );
-        // Extra words in the Markdown (link destinations) never hide a missing one.
+        assert_eq!(word_difference(&html, &words(&["a", "c", "d"])), (1, 0));
+        assert_eq!(word_difference(&html, &words(&[])), (4, 0));
+        // Order is not compared.
         assert_eq!(
-            ordered_missing(&html, &words(&["a", "x", "b", "y", "c", "d"])),
-            0
+            word_difference(&words(&["a", "c", "b"]), &words(&["a", "b", "c"])),
+            (0, 0)
+        );
+        // Extra words are counted on their own and never hide a missing one.
+        assert_eq!(
+            word_difference(&html, &words(&["a", "x", "b", "y", "c", "d"])),
+            (0, 2)
+        );
+        assert_eq!(
+            word_difference(&words(&["a", "b"]), &words(&["a", "x"])),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn repeated_words_are_counted_by_occurrence() {
+        let html = words(&["the", "the", "the", "cat"]);
+        assert_eq!(
+            word_difference(&html, &words(&["the", "cat", "the"])),
+            (1, 0)
+        );
+        assert_eq!(
+            word_difference(&words(&["the"]), &words(&["the", "the", "the"])),
+            (0, 2)
+        );
+    }
+
+    #[test]
+    fn link_destinations_are_removed_and_link_text_is_kept() {
+        assert_eq!(
+            strip_link_destinations(
+                "[the page](https://example.com/a?b=1 \"Title\") and ![logo](cid:x.png)"
+            ),
+            "[the page] and ![logo]"
+        );
+        // Balanced parentheses inside a destination.
+        assert_eq!(
+            strip_link_destinations("[w](https://x/a_(b)) after"),
+            "[w] after"
+        );
+        // An escaped parenthesis does not close it.
+        assert_eq!(strip_link_destinations("[w](a\\)b) after"), "[w] after");
+        // A destination that does not close on its line is left as written.
+        assert_eq!(
+            strip_link_destinations("[w](never closed\nnext line)"),
+            "[w](never closed\nnext line)"
+        );
+        assert_eq!(
+            strip_link_destinations("plain (text) here"),
+            "plain (text) here"
+        );
+    }
+
+    #[test]
+    fn a_long_tracking_url_adds_no_words() {
+        let markdown = format!(
+            "[Click here](https://t.example.com/{}?u=1)",
+            "abc123".repeat(50)
+        );
+        assert_eq!(
+            alnum_words(&strip_link_destinations(&markdown)),
+            words(&["Click", "here"])
+        );
+    }
+
+    #[test]
+    fn markdown_links_do_not_count_as_extra_words() {
+        let mut measure = Measure::default();
+        let html = "<p><a href=\"https://t.example.com/q\">Hello world</a></p>";
+        let facts = html_facts(html);
+        let _ = evaluate(&mut measure, &arc(Linked), &facts, "t", html);
+        assert_eq!(
+            (
+                measure.words_html,
+                measure.words_missing,
+                measure.words_extra
+            ),
+            (2, 0, 0)
+        );
+        assert_eq!(measure.links_md, 1);
+        // The destination and its title are bytes of URL, not words.
+        assert!(measure.destination_bytes_md > 160);
+    }
+
+    #[test]
+    fn header_cells_and_hidden_text_are_counted() {
+        let html = "<table><tr><th>a</th><th>b</th></tr></table><div style=\"display: none; max-height:0\">pre</div><span style='MSO-HIDE:all'>x</span><div style=\"display:block\">y</div>";
+        let facts = html_facts(html);
+        assert_eq!((facts.header_cells, facts.hidden_markers), (2, 2));
+    }
+
+    #[test]
+    fn inputs_with_missing_or_extra_words_are_listed_by_label() {
+        let mut measure = Measure::default();
+        let html = "<p>x</p>";
+        let facts = html_facts(html);
+        let _ = evaluate(&mut measure, &arc(Garbles), &facts, "007", html);
+        let _ = evaluate(&mut measure, &arc(Echo), &facts, "008", html);
+        assert_eq!(measure.missing_by_input, vec![("007".to_string(), 1)]);
+        assert_eq!(measure.extra_by_input, vec![("007".to_string(), 1)]);
+        assert_eq!((measure.words_missing, measure.words_extra), (1, 1));
+    }
+
+    #[test]
+    fn the_per_input_list_is_labels_and_counts_only() {
+        assert_eq!(format_by_input(&[]), "none");
+        assert_eq!(
+            format_by_input(&[("001".to_string(), 2), ("014".to_string(), 1)]),
+            "001:2,014:1"
         );
     }
 
@@ -1025,6 +1361,37 @@ mod tests {
     }
 
     #[test]
+    fn preprocessing_removes_style_and_script_elements_with_their_text() {
+        let html = "<p>a</p><style type=\"text/css\">p{color:red}</style><p>b</p><SCRIPT>var x = \"<b>t</b>\";</SCRIPT><p>c</p>";
+        assert_eq!(preprocess_office_html(html), "<p>a</p><p>b</p><p>c</p>");
+    }
+
+    #[test]
+    fn preprocessing_leaves_elements_that_only_start_with_style_or_script() {
+        let html = "<styled>x</styled><scripted>y</scripted><p>z</p>";
+        assert_eq!(preprocess_office_html(html), html);
+    }
+
+    #[test]
+    fn preprocessing_reads_comments_and_raw_text_in_document_order() {
+        // Word wraps its CSS in a comment inside the style element, and hides more style
+        // elements in conditional comments: both go.
+        let word = "<head><style><!-- p.MsoNormal{margin:0} --></style><!--[if gte mso 9]><style>v|* {behavior:url(#default#VML);}</style><![endif]--></head><body>x</body>";
+        assert_eq!(preprocess_office_html(word), "<head></head><body>x</body>");
+        // A `<!--` inside a script is script text, so it does not swallow what follows.
+        assert_eq!(
+            preprocess_office_html("<script>var a = \"<!--\";</script><p>kept</p>"),
+            "<p>kept</p>"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_style_or_script_drops_the_rest() {
+        assert_eq!(preprocess_office_html("a<style>p{}"), "a");
+        assert_eq!(preprocess_office_html("a<script>var x;"), "a");
+    }
+
+    #[test]
     fn a_perfect_converter_loses_no_words() {
         let mut measure = Measure::default();
         let facts = html_facts("<p>Hello <b>world</b></p>");
@@ -1032,12 +1399,18 @@ mod tests {
             &mut measure,
             &arc(Echo),
             &facts,
+            "t",
             "<p>Hello <b>world</b></p>",
         );
         assert_eq!(markdown.as_deref(), Some("Hello world"));
         assert_eq!(
-            (measure.inputs, measure.words_html, measure.words_missing),
-            (1, 2, 0)
+            (
+                measure.inputs,
+                measure.words_html,
+                measure.words_missing,
+                measure.words_extra
+            ),
+            (1, 2, 0, 0)
         );
         assert_eq!(
             (measure.panics, measure.errors, measure.nondeterministic),
@@ -1050,7 +1423,7 @@ mod tests {
         let mut measure = Measure::default();
         let facts = html_facts("<p>x</p>");
         assert_eq!(
-            evaluate(&mut measure, &arc(Panics), &facts, "<p>x</p>"),
+            evaluate(&mut measure, &arc(Panics), &facts, "t", "<p>x</p>"),
             None
         );
         assert_eq!((measure.panics, measure.errors), (1, 0));
@@ -1061,7 +1434,7 @@ mod tests {
         let mut measure = Measure::default();
         let facts = html_facts("<p>x</p>");
         assert_eq!(
-            evaluate(&mut measure, &arc(Fails), &facts, "<p>x</p>"),
+            evaluate(&mut measure, &arc(Fails), &facts, "t", "<p>x</p>"),
             None
         );
         assert_eq!((measure.panics, measure.errors), (0, 1));
@@ -1075,6 +1448,7 @@ mod tests {
             &mut measure,
             &arc(Flaky(AtomicU64::new(0))),
             &facts,
+            "t",
             "<p>x</p>",
         );
         assert_eq!(measure.nondeterministic, 1);
