@@ -485,6 +485,15 @@ Synthetic set, preprocessed: `htmd` 1 missing (case s16) and 3 extra (s04: 2, s0
 - Which messages have data-like tables or hidden text, and whether the corpus extras are alt text, list numerals, or glued words.
 - The corpus is one producer; nesting deeper than 300 and inputs larger than the corpus are untested; no data-table, hidden-text, or tracking-URL policy is decided; the maintenance status of `markup5ever_rcdom` and whether `htmd` 0.5.5 changes any figure.
 
+### Further checks (2026-10-12)
+
+- **CI:** both pushes of the `v0.1.29` work succeeded on `main` (about 1 min 29 s and 2 min 20 s); `v0.1.29` is tagged.
+- **The 2 missing `htmd` words are a metric artifact.** Message 001's HTML has `$20/month</span><span class="footnote-anchor-email" ...>&#185;</span>`, and `htmd` writes `month¹`; the harness counts a word break at every tag, so it counts `month` and `¹` as missing and `month¹` as extra.
+- **Re-score with inline tags glued** (a PowerShell check outside the harness: tags `span`, `font`, `sup`, `sub`, `small`, `u`, `mark`, `abbr`, `time`, `data`, `bdi`, `bdo`, `dfn`, `kbd`, `q`, `samp`, `var`, `big`, and `label` removed without a break; other tags become spaces; the same link-destination removal) over all 27 messages: **0 words missing in every message**; 243 extra words (the harness's 262 less 19 glue effects): 37 numerals (ordered-list numbering: 007 21, 015 8, 024 5, 008 3), 169 image alt text (015 86, 008 14, 024 14, 005 8, 010 8, 020 8, 001 7, 023 7, 027 7, 007 5, 009 5), and 37 unexplained (001 11, 023 16, 009 4, 008 3, 024 2, 029 1). The unexplained words were not inspected.
+- **Hidden text:** a script matching elements with an inline `display:none` or `mso-hide:all` (outside comments, `head`, `style`, and `script`) found 15 elements in 7 messages with 82 words inside: 001 (2 elements, 4 words), 007 (2, 14), 008 (3, 8), 009 (2, 17), 023 (2, 24), 024 (2, 8), 027 (2, 7). The harness counts 16 tags; the difference was not chased. The text itself was not read for this record.
+- **Template and table counts from the owner:** five messages (001, 009, 023, 024, 027) show 14 `display:none` occurrences each in a plain string count, which includes style sheets and comments, so they share a template. Tables: 024 (51 `<tr>`, 71 `<td>`), 001 (39, 73), 007 (33, 55), 023 (32, 52), 009 (30, 46), 008 (26, 33), 015 (16, 24), and 027 (2, 6); the other messages have at most 2 rows or none. No header cells anywhere.
+- **Policies accepted by the owner:** see the plan's "Decisions in force". The converter ADR is drafted (`ADRs/html-to-markdown-converter-and-preprocessing.md`, proposed).
+
 ### Status
 
-**Not closed.** The leading candidate is `htmd` 0.5.4 in default mode, behind the preprocessing described above; the choice is not recorded in the body-policy ADR, so the gate is not met. What remains is listed in the plan's "Decisions still needed" (item 1).
+**Not closed.** The choice (`htmd` 0.5.4, default mode, behind the preprocessing described above) is recorded in a proposed ADR and the owner has accepted the policies; the gate is met when the owner accepts the ADR, after the by-eye sample. What remains is listed in the plan's "Decisions still needed" (item 1).
