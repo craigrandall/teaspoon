@@ -6,7 +6,7 @@
 //! dependencies are unchanged): `htmd` (pure and faithful mode), `html2markdown`, and
 //! `html-to-markdown-rs`. Each is run in a worker thread with a large stack, twice per input
 //! (determinism), on the raw HTML and on a lightly preprocessed copy (Word comments, `style` and
-//! `script` elements, and `o:p` tags removed), and judged on:
+//! `script` and `title` elements, and `o:p` tags removed), and judged on:
 //!
 //! - **robustness**: panics and errors (a panic is caught as a thread failure, never fatal);
 //! - **determinism**: the two runs must produce identical output;
@@ -514,128 +514,13 @@ fn markdown_counts(markdown: &str) -> MarkdownCounts {
 }
 
 // =============================================================================
-// Preprocessing (light, for the "pre" variant)
+// Preprocessing (shared with the body pipeline)
 // =============================================================================
 
-/// True for the characters that may follow a tag name: the end of the tag, a self-closing slash,
-/// or white space before attributes.
-fn is_tag_delimiter(c: char) -> bool {
-    c == '>' || c == '/' || c.is_whitespace()
-}
-
-/// `style` or `script` when `lower_tail` (lowercased, just past a `<`) starts that element's
-/// opening tag. `<styled>` and `<scripted>` are other elements and do not match.
-fn raw_text_element_at(lower_tail: &str) -> Option<&'static str> {
-    ["style", "script"].into_iter().find(|name| {
-        lower_tail
-            .strip_prefix(*name)
-            .and_then(|after| after.chars().next())
-            .is_some_and(is_tag_delimiter)
-    })
-}
-
-/// Where a `style` or `script` element ends: the byte just past the `>` of its closing tag,
-/// searching `lower` from `from`. `None` when it is never closed.
-fn end_of_raw_text_element(lower: &str, from: usize, name: &str) -> Option<usize> {
-    let closing = format!("</{name}");
-    let mut search = from;
-    while let Some(relative) = lower[search..].find(&closing) {
-        let after = search + relative + closing.len();
-        if lower[after..].chars().next().is_none_or(is_tag_delimiter) {
-            return Some(
-                lower[after..]
-                    .find('>')
-                    .map_or(lower.len(), |q| after + q + 1),
-            );
-        }
-        search = after;
-    }
-    None
-}
-
-/// Removes comments and `style` and `script` elements (with their text) in one left-to-right
-/// pass, so that whichever starts first in the document wins, as it would for a browser: a
-/// `<!--` inside a script is script text, and a `<style>` inside a comment is comment text.
-/// Anything that is never closed removes the rest of the document, as the scoring reader does.
-fn strip_comments_style_and_script(html: &str) -> String {
-    let lower = html.to_ascii_lowercase();
-    let mut out = String::with_capacity(html.len());
-    let mut i = 0usize;
-    while i < html.len() {
-        let Some(relative) = html[i..].find('<') else {
-            out.push_str(&html[i..]);
-            break;
-        };
-        let lt = i + relative;
-        out.push_str(&html[i..lt]);
-        if html[lt..].starts_with("<!--") {
-            match html[lt + 4..].find("-->") {
-                Some(end) => i = lt + 4 + end + 3,
-                None => return out,
-            }
-        } else if let Some(name) = raw_text_element_at(&lower[lt + 1..]) {
-            match end_of_raw_text_element(&lower, lt + 1 + name.len(), name) {
-                Some(end) => i = end,
-                None => return out,
-            }
-        } else {
-            out.push('<');
-            i = lt + 1;
-        }
-    }
-    out
-}
-
-/// Removes `<![if ...]>` and `<![endif]>` markers (Word's downlevel-revealed sections).
-fn strip_marked_sections(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(start) = rest.find("<![") {
-        out.push_str(&rest[..start]);
-        match rest[start..].find("]>") {
-            Some(end) => rest = &rest[start + end + 2..],
-            None => return out,
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Removes `<o:p>` and `</o:p>` tags, keeping what is inside.
-fn remove_office_paragraph_tags(html: &str) -> String {
-    let lower = html.to_ascii_lowercase();
-    let mut out = String::with_capacity(html.len());
-    let mut i = 0usize;
-    while i < html.len() {
-        let Some(relative) = html[i..].find('<') else {
-            out.push_str(&html[i..]);
-            break;
-        };
-        let lt = i + relative;
-        out.push_str(&html[i..lt]);
-        let tail = &lower[lt + 1..];
-        let after_slash = tail.strip_prefix('/').unwrap_or(tail);
-        let is_office_p = after_slash.starts_with("o:p")
-            && after_slash[3..]
-                .chars()
-                .next()
-                .is_some_and(|c| c == '>' || c == '/' || c.is_whitespace());
-        if is_office_p {
-            i = html[lt..].find('>').map_or(html.len(), |end| lt + end + 1);
-        } else {
-            out.push('<');
-            i = lt + 1;
-        }
-    }
-    out
-}
-
-/// The light preprocessing the "pre" variant applies before conversion: comments, `style` and
-/// `script` elements, Word's downlevel markers, and `o:p` tags.
+/// The preprocessing the "pre" variant applies before conversion: the body pipeline's own
+/// ([`crate::body::preprocess_html`]), so the harness measures what production does.
 pub(crate) fn preprocess_office_html(html: &str) -> String {
-    remove_office_paragraph_tags(&strip_marked_sections(&strip_comments_style_and_script(
-        html,
-    )))
+    crate::body::preprocess_html(html)
 }
 
 // =============================================================================

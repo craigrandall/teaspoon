@@ -492,7 +492,7 @@ Synthetic set, preprocessed: `htmd` 1 missing (case s16) and 3 extra (s04: 2, s0
 - **Re-score with inline tags glued** (a PowerShell check outside the harness: tags `span`, `font`, `sup`, `sub`, `small`, `u`, `mark`, `abbr`, `time`, `data`, `bdi`, `bdo`, `dfn`, `kbd`, `q`, `samp`, `var`, `big`, and `label` removed without a break; other tags become spaces; the same link-destination removal) over all 27 messages: **0 words missing in every message**; 243 extra words (the harness's 262 less 19 glue effects): 37 numerals (ordered-list numbering: 007 21, 015 8, 024 5, 008 3), 169 image alt text (015 86, 008 14, 024 14, 005 8, 010 8, 020 8, 001 7, 023 7, 027 7, 007 5, 009 5), and 37 first listed as unexplained (001 11, 023 16, 009 4, 008 3, 024 2, 029 1). The owner's listing for 001 and 023 and then a title check on six messages explained 36 of them: 28 are the document `<title>`, which `htmd` writes as the first line of the Markdown (001: 11 words; 023: 8; 009: 4; 008: 3; 024: 2 net of a repeated word), 8 are Cyrillic image alt text in 023 that is entity-encoded in the HTML (the listing script did not decode it), and 1 in 029 is not explained. 029 has no title; 007, 015, 022, and 027 have none or an empty one.
 - **Hidden text:** a script matching elements with an inline `display:none` or `mso-hide:all` (outside comments, `head`, `style`, and `script`) found 15 elements in 7 messages with 82 words inside: 001 (2 elements, 4 words), 007 (2, 14), 008 (3, 8), 009 (2, 17), 023 (2, 24), 024 (2, 8), 027 (2, 7). The harness counts 16 tags; the difference was not chased. The text itself was not read for this record.
 - **Template and table counts from the owner:** five messages (001, 009, 023, 024, 027) show 14 `display:none` occurrences each in a plain string count, which includes style sheets and comments, so they share a template. Tables: 024 (51 `<tr>`, 71 `<td>`), 001 (39, 73), 007 (33, 55), 023 (32, 52), 009 (30, 46), 008 (26, 33), 015 (16, 24), and 027 (2, 6); the other messages have at most 2 rows or none. No header cells anywhere.
-- **`htmd` writes the `<title>` as the first line of the Markdown.** Confirmed on the six messages checked: in 001, 008, 009, 023, and 024 the first line of the Markdown equals the non-empty `<title>` text. This was not in the measured preprocessing, so the converter ADR is amended to remove `<title>` elements with their text in the same pass as comments, `style`, and `script`; the bake-off will be re-run with it, and the expected effect (not yet measured) is about 28 fewer extra words in `htmd`'s corpus total (262 to about 234), nothing else changed.
+- **`htmd` writes the `<title>` as the first line of the Markdown.** Confirmed on the six messages checked: in 001, 008, 009, 023, and 024 the first line of the Markdown equals the non-empty `<title>` text. This was not in the measured preprocessing, so the converter ADR is amended to remove `<title>` elements with their text in the same pass as comments, `style`, and `script`; the bake-off was re-run with it (see "M4e-2a: the pure body module" below): `htmd`'s corpus extra words fell from 262 to 233, nothing else changed.
 - **Policies accepted by the owner:** see the plan's "Decisions in force". The converter ADR is drafted (`ADRs/html-to-markdown-converter-and-preprocessing.md`, proposed).
 
 ### By-eye review (2026-10-12): 007, 015, 022 (the smallest), 027
@@ -516,3 +516,47 @@ The owner supplied the four HTML and Markdown pairs. Method: the visible word se
 ### Status
 
 **M4e-0 complete (2026-10-12).** The choice (`htmd` 0.5.4, default mode, behind the preprocessing described above) is recorded in `ADRs/html-to-markdown-converter-and-preprocessing.md`, accepted by the owner, and the by-eye review found no defect. M4e (M4e-0 and M4e-1) is complete; M4e-2 (the body pipeline) is next and starts with the second body-policy ADR (the plan's "Decisions still needed", item 1).
+
+## M4e-2a: the pure body module (2026-10-13)
+
+`src/body.rs` (selection, native-HTML decoding, the preprocessing moved out of the bake-off with `<title>` removal and a record of the steps that applied, the invisible-padding collapse, `htmd` conversion on a large-stack worker thread, and the loss record) is built and tested on Windows. It is not called by the export yet (M4e-2b), so exported archives are unchanged. Changes beside the new file: `htmd` is a normal dependency pinned `=0.5.4` and no longer part of the `bakeoff` feature; `bakeoff.rs` calls `body::preprocess_html`; `main.rs` declares `mod body;`.
+
+### Gate
+
+The owner reports that `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`, and both release builds succeeded. **272 tests passed, 0 failed** (the 236 before and 36 new, as expected). CI for the push is not yet reported.
+
+| Build | Time |
+|---|---|
+| `dev` (clippy) | 35.33 s |
+| `test` | 37.09 s |
+| `release`, no `bakeoff` feature | 56.25 s (49.81 s before `htmd` joined the default build) |
+| `release --features bakeoff` | 53.84 s |
+
+The default release build is about 6 s slower, from a single measurement; the feature build runs after the plain one and reuses its compiled `htmd`, so the two figures are not independent.
+
+### Bake-off re-run with the shared preprocessing
+
+`--bakeoff-md C:\dump1 > bakeoff4.txt`, compared with `bakeoff3.txt` key by key (timings excluded). Only `_pre_` keys changed; the raw variants and every structure count (links, images, headings, list items, table rows, noise markers, replacement characters) are identical.
+
+| Key | Before | After |
+|---|---|---|
+| `htmd` pre, words_extra | 262 | 233 |
+| `htmd` pre, output bytes | 264,071 | 263,890 |
+| `htmd` pre, words_missing | 2 | 2 (unchanged) |
+| `htmd` faithful pre, words_extra | 73,542 | 73,499 |
+| `htmd` faithful pre, raw HTML tags | 8,012 | 7,998 |
+| `html-to-markdown-rs` pre, words_extra | 1,440 | 1,408 |
+| `html-to-markdown-rs` pre, words_missing | 122 | 124 |
+
+`htmd` extras by message: 001 19 to 8, 008 20 to 17, 009 9 to 5, 023 23 to 15, 024 21 to 18; the other eight messages are unchanged. That is 29 fewer, the title words of the five messages (11, 3, 4, 8, and 3), as predicted before the run (about 234). `html2markdown` did not change.
+
+### What this shows
+
+- **The title removal does what the ADRs said and nothing else.** `htmd`'s extras drop by exactly the title words, its missing words and structure counts do not move, and no other message changes.
+- **The title words were not hiding a lost word for `htmd`.** Removing them left `words_missing` at 2, the `month¹` artifact.
+- **The same removal exposed two words `html-to-markdown-rs` drops in message 023** (122 to 124 missing, 37 to 39 in 023). The likeliest reason is that the title's words had been covering two body words it loses (a multiset effect); this was not checked, and it does not affect the choice, since the candidate is rejected.
+- **The remaining `htmd` extras** (233) are image alt text and list numerals, plus the 8 entity-encoded Cyrillic alt words in 023 and 1 unexplained word in 029.
+
+### Not yet confirmed
+
+The `body.rs` selection and loss paths are covered by unit tests with stand-in converters and by three real `htmd` conversions; they have not run on the corpus (M4e-2b and M4e-2c). The native-HTML decoding has no real data. The `html_conversion_failed` fallback has only been exercised through a stand-in that fails.

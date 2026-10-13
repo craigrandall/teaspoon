@@ -2,6 +2,7 @@
 
 mod archive;
 mod bakeoff;
+mod body;
 mod cli;
 mod dry_run;
 mod export;
