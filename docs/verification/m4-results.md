@@ -481,7 +481,7 @@ Synthetic set, preprocessed: `htmd` 1 missing (case s16) and 3 extra (s04: 2, s0
 
 ### What this does not show
 
-- The metric does not check order, so a converter that reorders text (for example while flattening a layout table) is not caught by it; only the by-eye review does, and only the three largest messages have been read.
+- The metric does not check order; order was checked on four messages (the by-eye review below), not on the whole corpus.
 - Which messages have data-like tables or hidden text, and whether the corpus extras are alt text, list numerals, or glued words.
 - The corpus is one producer; nesting deeper than 300 and inputs larger than the corpus are untested; no data-table, hidden-text, or tracking-URL policy is decided; the maintenance status of `markup5ever_rcdom` and whether `htmd` 0.5.5 changes any figure.
 
@@ -494,6 +494,24 @@ Synthetic set, preprocessed: `htmd` 1 missing (case s16) and 3 extra (s04: 2, s0
 - **Template and table counts from the owner:** five messages (001, 009, 023, 024, 027) show 14 `display:none` occurrences each in a plain string count, which includes style sheets and comments, so they share a template. Tables: 024 (51 `<tr>`, 71 `<td>`), 001 (39, 73), 007 (33, 55), 023 (32, 52), 009 (30, 46), 008 (26, 33), 015 (16, 24), and 027 (2, 6); the other messages have at most 2 rows or none. No header cells anywhere.
 - **Policies accepted by the owner:** see the plan's "Decisions in force". The converter ADR is drafted (`ADRs/html-to-markdown-converter-and-preprocessing.md`, proposed).
 
+### By-eye review (2026-10-12): 007, 015, 022 (the smallest), 027
+
+The owner supplied the four HTML and Markdown pairs. Method: the visible word sequence of each HTML file (comments, head, style, and script removed; inline tags with no Markdown delimiter glued) against each Markdown file (image alt text, link destinations, and list numerals removed), compared in order with `difflib`; plus counts of links, images, headings, lists, and tables, and a read of the hidden elements and of the Markdown.
+
+| Pair | HTML to Markdown (bytes) | Words | In-order match | Links | Images |
+|---|---|---|---|---|---|
+| 022 | 40 to 17 | 3 | 3 of 3 | 0 of 0 | 0 of 0 |
+| 015 | 40,737 to 3,911 | 223 | 223 of 223 | n/a | n/a |
+| 007 | 65,159 to 31,769 | 2,181 | 2,181 of 2,181 | 49 of 49 | 20 of 20 |
+| 027 | 43,497 to 9,087 | 253 | 253 of 253 | 7 of 7 | 6 of 6 |
+
+**No difference of any kind in the word sequence in any of the four** (zero non-equal operations). No data table was flattened (007: 27 tables, 33 rows, all layout; 027: one table of 2 rows and 6 cells, layout; 015: a stack of embedded posts in layout tables), nothing was reordered, no link or image was lost, and no CSS, raw tag, or entity was left behind. Findings that change no decision:
+
+- **022** is a one-line message (`<div dir="ltr">` around one sentence); the Markdown is that sentence.
+- **015:** the avatar images' alt text equals their image URLs, which is the source of most of its 86 alt-text extra words. The corpus's only U+FFFD is here, present in the HTML before conversion: the known Windows-1255 limit of the de-encapsulation, not a converter defect. `cid:` images stay as `cid:` references (M4e-2 and M4f). A literal `<...>` in the text is escaped, and one link has empty text.
+- **007:** 11 headings (h1, h3, h4), all present. One is nested in a list item and indented four spaces; the harness's heading count ignores lines indented that far, which is the corpus's "31 of 32". Ordered lists show doubled numerals (`1.  1.`) because the HTML carries a literal number in each item, and a "brought to you by" list renders as `*   \*` items inside a blockquote because the HTML carries a literal asterisk glyph; both are faithful to the source and look noisy.
+- **007 and 027:** a hidden preheader sentence is kept as a plain paragraph, followed by a hidden padding element that survives as 200 combining grapheme joiners (U+034F), 200 soft hyphens (U+00AD), and about 200 no-break spaces, roughly 1.5 KB of invisible characters per message. This is the template shared by 001, 009, 023, 024, and 027, and it is a candidate for a normalization rule in the second ADR.
+
 ### Status
 
-**Not closed.** The choice (`htmd` 0.5.4, default mode, behind the preprocessing described above) is recorded in a proposed ADR and the owner has accepted the policies; the gate is met when the owner accepts the ADR, after the by-eye sample. What remains is listed in the plan's "Decisions still needed" (item 1).
+**M4e-0 complete (2026-10-12).** The choice (`htmd` 0.5.4, default mode, behind the preprocessing described above) is recorded in `ADRs/html-to-markdown-converter-and-preprocessing.md`, accepted by the owner, and the by-eye review found no defect. M4e (M4e-0 and M4e-1) is complete; M4e-2 (the body pipeline) is next and starts with the second body-policy ADR (the plan's "Decisions still needed", item 1).
