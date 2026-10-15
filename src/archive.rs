@@ -1,4 +1,6 @@
-//! Pure rendering of the archive files (M4c): `message.md`, `metadata.json`, and `folder.json`.
+//! Pure rendering of the archive files (M4c): `message.md`, `metadata.json`, and `folder.json`,
+//! and since M4e-2b the body: what is selected and converted, the original body files that are
+//! kept, and the `body` object in `metadata.json`.
 //!
 //! No I/O. Output is deterministic: struct fields serialize in declaration order, there are no
 //! maps, no absolute paths, and no export-time values, so two exports of the same input are
@@ -9,8 +11,13 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
-use crate::model::{Address, Envelope, MessageContent, PlainBody, RecipientKind};
+use crate::body::{
+    BodySource, ConversionFailed, Rendered, Selection, convert_html_isolated, count_cid_references,
+    render_with, select_body,
+};
+use crate::model::{Address, BodyForms, Envelope, MessageContent, RecipientKind};
 use crate::naming::NameFlag;
 
 pub(crate) const SCHEMA_VERSION: &str = "0.1-draft";
@@ -23,6 +30,20 @@ pub(crate) const STATUS_COMPLETE: &str = "complete";
 pub(crate) const STATUS_INCOMPLETE: &str = "incomplete";
 const UNTITLED: &str = "(no subject)";
 
+/// The kept original body files (body ADR, decision 2). Each is shorter than `metadata.json`
+/// (13 units), which already sets the worst-case child reservation.
+pub(crate) const BODY_HTML_NAME: &str = "body.html";
+pub(crate) const BODY_RTF_NAME: &str = "body.rtf";
+pub(crate) const BODY_TXT_NAME: &str = "body.txt";
+
+/// The converter recorded in the `body` object. Pinned `=0.5.4` in `Cargo.toml`; a change of the
+/// pin must change this too (the converter ADR's revisit condition).
+pub(crate) const CONVERTER_NAME: &str = "htmd";
+pub(crate) const CONVERTER_VERSION: &str = "0.5.4";
+
+const NOTE_AS_STORED: &str = "as_stored";
+const NOTE_RECOVERED_FROM_RTF: &str = "recovered_from_rtf_charset_declaration_stale";
+
 /// How a directory name was derived from the source name.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct NameRecord {
@@ -33,14 +54,56 @@ pub(crate) struct NameRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct ConverterRecord {
+    pub(crate) name: &'static str,
+    pub(crate) version: &'static str,
+}
+
+/// One kept original body file.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct OriginalRecord {
+    pub(crate) file: &'static str,
+    pub(crate) bytes: u64,
+    /// SHA-256 of the file's bytes as lower-case hex.
+    pub(crate) sha256: String,
+    /// `as_stored` (native HTML bytes), `recovered_from_rtf_charset_declaration_stale` (HTML
+    /// recovered from the RTF, UTF-8, whose `charset=` declaration is stale), or null.
+    pub(crate) note: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CidRecord {
+    pub(crate) total: u64,
+    pub(crate) distinct: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct LossRecord {
+    pub(crate) reason: &'static str,
+    pub(crate) count: u64,
+}
+
+/// The `body` object (draft schema; body ADR, decision 4). Field order is the serialization
+/// order.
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct BodyRecord {
-    /// `present`, `empty`, or `absent`.
-    pub(crate) plain_text: &'static str,
-    /// How the plain text appears in `message.md`.
-    pub(crate) markdown: &'static str,
-    pub(crate) html_native: bool,
-    pub(crate) html_via_rtf: bool,
-    pub(crate) rtf: bool,
+    /// `native_html`, `rtf_html`, `plain_text`, or `none`: the source actually used.
+    pub(crate) source: &'static str,
+    /// Set when the Markdown in `message.md` came from a conversion.
+    pub(crate) converter: Option<ConverterRecord>,
+    /// Preprocessing steps that changed something, from the closed list.
+    pub(crate) preprocessing: Vec<&'static str>,
+    /// `PidTagInternetCodepage` as stored, when the message has one.
+    pub(crate) internet_codepage: Option<u32>,
+    /// Kept original files, in the order `body.html`, `body.rtf`, `body.txt`.
+    pub(crate) originals: Vec<OriginalRecord>,
+    /// `cid:` link destinations in `message.md` (they stay as written until M4f).
+    pub(crate) cid_references: CidRecord,
+    /// Formatting loss, in the vocabulary's order, only reasons with a count above zero.
+    pub(crate) loss: Vec<LossRecord>,
+    /// The kept files are byte copies of source content and are exempt from the file contract's
+    /// UTF-8-without-BOM and LF rules.
+    pub(crate) kept_files_exempt_from_file_rules: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -406,12 +469,106 @@ fn envelope_lines(envelope: &Envelope) -> Vec<String> {
     lines
 }
 
-/// `message.md` (provisional until the body-policy ADR, M4e): a heading with the subject, a list
-/// of the envelope fields the message has (each value in a code span so nothing in it is
-/// interpreted as Markdown), then the plain-text body verbatim inside a `text` code fence. Line
-/// endings become LF and trailing newlines are trimmed. A message with no envelope fields and no
-/// plain text is the heading alone.
-pub(crate) fn render_message_md(content: &MessageContent) -> String {
+// =============================================================================
+// The body: selection, conversion, kept originals
+// =============================================================================
+
+/// One original body file to write next to `message.md`: a byte copy of source content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OriginalFile {
+    pub(crate) name: &'static str,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) note: Option<&'static str>,
+}
+
+/// Everything the body contributes to one message, computed once so `message.md`,
+/// `metadata.json`, the kept files, and the report all agree (and the converter runs once).
+#[derive(Debug, Clone)]
+pub(crate) struct BodyOutcome {
+    pub(crate) rendered: Rendered,
+    /// `body.html`, `body.rtf`, `body.txt`, in that order, each only if that form exists.
+    pub(crate) originals: Vec<OriginalFile>,
+    pub(crate) cid_total: u64,
+    pub(crate) cid_distinct: u64,
+}
+
+/// Selects, converts, and collects the originals, with the production converter.
+pub(crate) fn body_outcome(forms: &BodyForms) -> BodyOutcome {
+    body_outcome_with(forms, &convert_html_isolated)
+}
+
+/// [`body_outcome`] with the converter supplied (so layout and failure paths can be tested).
+pub(crate) fn body_outcome_with(
+    forms: &BodyForms,
+    convert: &dyn Fn(&str) -> Result<String, ConversionFailed>,
+) -> BodyOutcome {
+    let selection = select_body(forms);
+    let rendered = render_with(&selection, convert);
+    let originals = original_files(forms, &selection);
+    let (cid_total, cid_distinct) = rendered
+        .markdown
+        .as_deref()
+        .map_or((0, 0), count_cid_references);
+    BodyOutcome {
+        rendered,
+        originals,
+        cid_total,
+        cid_distinct,
+    }
+}
+
+/// The original body files (body ADR, decision 2): each form that exists (present and not
+/// zero-length), whether or not it was selected. `body.html` is the native HTML as stored; when
+/// there is none, the HTML recovered from the RTF (UTF-8). Never altered.
+fn original_files(forms: &BodyForms, selection: &Selection) -> Vec<OriginalFile> {
+    let mut files = Vec::new();
+    let native = forms.native_html.as_ref().filter(|bytes| !bytes.is_empty());
+    let recovered = if selection.source == BodySource::RtfHtml {
+        selection.html.as_deref()
+    } else {
+        None
+    };
+    match (native, recovered) {
+        (Some(bytes), _) => files.push(OriginalFile {
+            name: BODY_HTML_NAME,
+            bytes: bytes.clone(),
+            note: Some(NOTE_AS_STORED),
+        }),
+        (None, Some(html)) => files.push(OriginalFile {
+            name: BODY_HTML_NAME,
+            bytes: html.as_bytes().to_vec(),
+            note: Some(NOTE_RECOVERED_FROM_RTF),
+        }),
+        (None, None) => {}
+    }
+    if let Some(rtf) = forms.rtf.as_ref().filter(|bytes| !bytes.is_empty()) {
+        files.push(OriginalFile {
+            name: BODY_RTF_NAME,
+            bytes: rtf.clone(),
+            note: None,
+        });
+    }
+    if let Some(text) = forms.plain_text.as_ref().filter(|text| !text.is_empty()) {
+        files.push(OriginalFile {
+            name: BODY_TXT_NAME,
+            bytes: text.as_bytes().to_vec(),
+            note: None,
+        });
+    }
+    files
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `message.md`: a heading with the subject, a list of the envelope fields the message has (each
+/// value in a code span so nothing in it is interpreted as Markdown), then the body. An HTML
+/// source's Markdown follows as converted (LF line endings, no leading or trailing blank lines,
+/// one final newline); a plain-text source is written verbatim inside a code fence longer than
+/// any backtick run in it. A message with no envelope fields and no body is the heading alone.
+pub(crate) fn render_message_md(content: &MessageContent, outcome: &BodyOutcome) -> String {
     let mut out = format!("# {}\n", title_for(content.subject.as_deref()));
     let lines = envelope_lines(&content.envelope);
     if !lines.is_empty() {
@@ -421,7 +578,15 @@ pub(crate) fn render_message_md(content: &MessageContent) -> String {
             out.push('\n');
         }
     }
-    if let PlainBody::Text(text) = &content.plain_body {
+    if let Some(markdown) = &outcome.rendered.markdown {
+        let normalized = normalize_newlines(markdown);
+        let body = normalized.trim_start_matches('\n').trim_end();
+        if !body.is_empty() {
+            out.push('\n');
+            out.push_str(body);
+            out.push('\n');
+        }
+    } else if let Some(text) = &outcome.rendered.plain_text {
         let normalized = normalize_newlines(text);
         let body = normalized.trim_end_matches('\n');
         let fence = fence_for(body);
@@ -477,25 +642,67 @@ fn envelope_record(envelope: &Envelope) -> EnvelopeRecord {
     }
 }
 
+fn body_record(forms: &BodyForms, outcome: &BodyOutcome) -> BodyRecord {
+    BodyRecord {
+        source: outcome.rendered.source.label(),
+        converter: outcome.rendered.markdown.as_ref().map(|_| ConverterRecord {
+            name: CONVERTER_NAME,
+            version: CONVERTER_VERSION,
+        }),
+        preprocessing: outcome.rendered.preprocessing.clone(),
+        internet_codepage: forms.native_html_code_page,
+        originals: outcome
+            .originals
+            .iter()
+            .map(|original| OriginalRecord {
+                file: original.name,
+                bytes: original.bytes.len() as u64,
+                sha256: sha256_hex(&original.bytes),
+                note: original.note,
+            })
+            .collect(),
+        cid_references: CidRecord {
+            total: outcome.cid_total,
+            distinct: outcome.cid_distinct,
+        },
+        loss: outcome
+            .rendered
+            .loss
+            .iter()
+            .map(|loss| LossRecord {
+                reason: loss.reason.label(),
+                count: loss.count,
+            })
+            .collect(),
+        kept_files_exempt_from_file_rules: true,
+    }
+}
+
 /// `metadata.json`. The status is always `partial` for now: properties the model does not yet
-/// carry are not preserved (`other_properties_not_preserved`, always listed), and attachments and
-/// formatted bodies are not extracted yet; each gap that applies to this message is listed.
+/// carry are not preserved (`other_properties_not_preserved`, always listed), and attachments
+/// are not extracted yet; each gap that applies to this message is listed.
+/// `formatted_bodies_not_converted` is listed only when an HTML or RTF form existed and the body
+/// used ended up plain text or none (a failed conversion, an unusable RTF, or an RTF that could
+/// not be decompressed); a converted body no longer carries it (body ADR, decision 4).
 pub(crate) fn message_metadata(
     source_file: &str,
     content: &MessageContent,
+    outcome: &BodyOutcome,
     directory: NameRecord,
     attachments: usize,
 ) -> MessageMetadata {
-    let (plain_text, markdown) = match &content.plain_body {
-        PlainBody::Text(_) => ("present", "fenced_text_provisional"),
-        PlainBody::Empty => ("empty", "no_body_text"),
-        PlainBody::Absent => ("absent", "no_body_text"),
-    };
+    let forms = &content.bodies;
+    let formatted_form_existed =
+        forms.native_html.is_some() || forms.rtf.is_some() || forms.rtf_decompression_failed;
+    let fell_back = matches!(
+        outcome.rendered.source,
+        BodySource::PlainText | BodySource::None
+    );
     let mut status_reasons = vec!["other_properties_not_preserved"];
     if attachments > 0 {
         status_reasons.push("attachments_not_extracted");
     }
-    if content.bodies.html_native || content.bodies.html_via_rtf {
+    if formatted_form_existed && fell_back {
         status_reasons.push("formatted_bodies_not_converted");
     }
     MessageMetadata {
@@ -506,13 +713,7 @@ pub(crate) fn message_metadata(
         internet_message_id: content.internet_message_id.clone(),
         time_filetime: content.time_filetime,
         directory,
-        body: BodyRecord {
-            plain_text,
-            markdown,
-            html_native: content.bodies.html_native,
-            html_via_rtf: content.bodies.html_via_rtf,
-            rtf: content.bodies.rtf,
-        },
+        body: body_record(forms, outcome),
         envelope: envelope_record(&content.envelope),
         attachments_not_extracted: attachments,
         status: "partial",
@@ -523,30 +724,48 @@ pub(crate) fn message_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BodyAvailability, Recipient};
+    use crate::model::Recipient;
+
+    const ENCAPSULATED: &[u8] = br"{\rtf1\ansi\ansicpg1252\fromhtml1 \deff0{\fonttbl{\f0\fswiss\fcharset0 Arial;}}{\*\htmltag64}{\*\htmltag84 <b>}Hello{\*\htmltag92 </b>}}";
+    const PLAIN_RTF: &[u8] = br"{\rtf1\ansi Hello}";
 
     /// A message whose envelope holds only a delivery time (what the synthetic `.msg` files built
     /// by the export tests carry), so the pure renderer and a real export can share goldens.
-    fn content(subject: Option<&str>, body: PlainBody) -> MessageContent {
-        let mut c = bare(subject, body);
+    fn content(subject: Option<&str>, plain: Option<&str>) -> MessageContent {
+        let mut c = bare(subject, plain);
         c.envelope.delivery_time = Some(133_000_000_000_000_000);
         c
     }
 
     /// A message with an empty envelope.
-    fn bare(subject: Option<&str>, body: PlainBody) -> MessageContent {
+    fn bare(subject: Option<&str>, plain: Option<&str>) -> MessageContent {
         MessageContent {
             subject: subject.map(str::to_string),
             internet_message_id: None,
             time_filetime: Some(133_000_000_000_000_000),
-            plain_body: body,
-            bodies: BodyAvailability {
-                html_native: false,
-                html_via_rtf: false,
-                rtf: false,
+            bodies: BodyForms {
+                plain_text: plain.map(str::to_string),
+                ..BodyForms::default()
             },
             envelope: Envelope::default(),
         }
+    }
+
+    fn md(c: &MessageContent) -> String {
+        render_message_md(c, &body_outcome(&c.bodies))
+    }
+
+    fn meta_for(c: &MessageContent, original: &str, attachments: usize) -> MessageMetadata {
+        message_metadata(
+            "m.msg",
+            c,
+            &body_outcome(&c.bodies),
+            NameRecord {
+                original: original.to_string(),
+                adjustments: vec![],
+            },
+            attachments,
+        )
     }
 
     fn addr(
@@ -565,10 +784,7 @@ mod tests {
 
     /// A message that exercises every envelope field.
     fn full_envelope_content() -> MessageContent {
-        let mut c = bare(
-            Some("Budget review"),
-            PlainBody::Text("Please review.".to_string()),
-        );
+        let mut c = bare(Some("Budget review"), Some("Please review."));
         c.envelope = Envelope {
             sender: Some(addr(
                 Some("Alice Sender"),
@@ -617,6 +833,12 @@ mod tests {
         s.replace("\r\n", "\n")
     }
 
+    fn html_content(html: &[u8]) -> MessageContent {
+        let mut c = content(Some("S"), None);
+        c.bodies.native_html = Some(html.to_vec());
+        c
+    }
+
     #[test]
     fn titles_collapse_whitespace_and_fall_back() {
         assert_eq!(
@@ -637,29 +859,14 @@ mod tests {
 
     #[test]
     fn the_message_markdown_matches_the_committed_golden_file() {
-        let md = render_message_md(&content(
-            Some("Hello World"),
-            PlainBody::Text("Line one\r\nLine two\r\n".to_string()),
-        ));
-        assert_eq!(md, lf(include_str!("../tests/golden/hello/message.md")));
+        let c = content(Some("Hello World"), Some("Line one\r\nLine two\r\n"));
+        assert_eq!(md(&c), lf(include_str!("../tests/golden/hello/message.md")));
     }
 
     #[test]
     fn the_message_metadata_matches_the_committed_golden_file() {
-        let c = content(
-            Some("Hello World"),
-            PlainBody::Text("Line one\r\nLine two\r\n".to_string()),
-        );
-        let meta = message_metadata(
-            "m.msg",
-            &c,
-            NameRecord {
-                original: "Hello World".to_string(),
-                adjustments: vec![],
-            },
-            0,
-        );
-        let json = to_json(&meta).unwrap();
+        let c = content(Some("Hello World"), Some("Line one\r\nLine two\r\n"));
+        let json = to_json(&meta_for(&c, "Hello World", 0)).unwrap();
         assert_eq!(
             json,
             lf(include_str!("../tests/golden/hello/metadata.json"))
@@ -668,38 +875,186 @@ mod tests {
 
     #[test]
     fn a_message_without_plain_text_is_the_heading_alone() {
-        assert_eq!(
-            render_message_md(&bare(Some("Only a title"), PlainBody::Absent)),
-            "# Only a title\n"
-        );
-        assert_eq!(
-            render_message_md(&bare(None, PlainBody::Empty)),
-            "# (no subject)\n"
-        );
+        assert_eq!(md(&bare(Some("Only a title"), None)), "# Only a title\n");
+        // A zero-length plain body is no body.
+        assert_eq!(md(&bare(None, Some(""))), "# (no subject)\n");
     }
 
     #[test]
     fn a_body_with_backticks_and_bare_carriage_returns_is_preserved_verbatim() {
-        let md = render_message_md(&bare(
-            Some("S"),
-            PlainBody::Text("a ``` b\rsecond\n\n".to_string()),
-        ));
-        assert_eq!(md, "# S\n\n````text\na ``` b\nsecond\n````\n");
+        let c = bare(Some("S"), Some("a ``` b\rsecond\n\n"));
+        assert_eq!(md(&c), "# S\n\n````text\na ``` b\nsecond\n````\n");
     }
 
     #[test]
-    fn gaps_are_listed_as_status_reasons() {
-        let mut c = content(Some("S"), PlainBody::Absent);
-        c.bodies.html_via_rtf = true;
+    fn converted_markdown_follows_the_envelope_normalized() {
+        let c = html_content(b"<p>x</p>");
+        let outcome = body_outcome_with(&c.bodies, &|_| {
+            Ok("\n\r\nFirst\r\n\r\nSecond  \r\n\n\n".to_string())
+        });
+        assert_eq!(
+            render_message_md(&c, &outcome),
+            "# S\n\n- **Date:** 2022-06-18T04:26:40Z\n\nFirst\n\nSecond\n"
+        );
+    }
+
+    #[test]
+    fn blank_converted_markdown_leaves_the_heading_and_envelope_only() {
+        let c = html_content(b"<p>x</p>");
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok("  \n".to_string()));
+        assert_eq!(
+            render_message_md(&c, &outcome),
+            "# S\n\n- **Date:** 2022-06-18T04:26:40Z\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_conversion_falls_back_to_the_fenced_plain_text() {
+        let mut c = html_content(b"<p>x</p>");
+        c.bodies.plain_text = Some("fallback".to_string());
+        let outcome = body_outcome_with(&c.bodies, &|_| Err(ConversionFailed));
+        assert_eq!(
+            render_message_md(&c, &outcome),
+            "# S\n\n- **Date:** 2022-06-18T04:26:40Z\n\n```text\nfallback\n```\n"
+        );
         let meta = message_metadata(
             "m.msg",
             &c,
+            &outcome,
             NameRecord {
                 original: "S".to_string(),
                 adjustments: vec![],
             },
-            2,
+            0,
         );
+        assert_eq!(meta.body.source, "plain_text");
+        assert!(meta.body.converter.is_none());
+        assert_eq!(meta.body.loss.len(), 1);
+        assert_eq!(meta.body.loss[0].reason, "html_conversion_failed");
+        assert!(
+            meta.status_reasons
+                .contains(&"formatted_bodies_not_converted")
+        );
+    }
+
+    #[test]
+    fn a_converted_body_records_the_converter_and_drops_the_status_reason() {
+        let c = html_content(b"<style>p{}</style><p>x</p>");
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok("x".to_string()));
+        let meta = message_metadata(
+            "m.msg",
+            &c,
+            &outcome,
+            NameRecord {
+                original: "S".to_string(),
+                adjustments: vec![],
+            },
+            0,
+        );
+        assert_eq!(meta.body.source, "native_html");
+        let converter = meta.body.converter.as_ref().unwrap();
+        assert_eq!((converter.name, converter.version), ("htmd", "0.5.4"));
+        assert_eq!(meta.body.preprocessing, vec!["style"]);
+        assert_eq!(meta.status_reasons, vec!["other_properties_not_preserved"]);
+    }
+
+    #[test]
+    fn originals_are_kept_verbatim_with_sizes_and_hashes() {
+        let mut c = content(Some("S"), Some("caf\u{e9}"));
+        c.bodies.native_html = Some(b"<p>caf\xe9</p>".to_vec());
+        c.bodies.native_html_code_page = Some(1252);
+        c.bodies.rtf = Some(ENCAPSULATED.to_vec());
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok("caf\u{e9}".to_string()));
+        let names: Vec<&str> = outcome.originals.iter().map(|o| o.name).collect();
+        assert_eq!(names, vec!["body.html", "body.rtf", "body.txt"]);
+        assert_eq!(outcome.originals[0].bytes, b"<p>caf\xe9</p>");
+        assert_eq!(outcome.originals[0].note, Some("as_stored"));
+        assert_eq!(outcome.originals[1].bytes, ENCAPSULATED);
+        assert_eq!(outcome.originals[2].bytes, "caf\u{e9}".as_bytes());
+
+        let record = body_record(&c.bodies, &outcome);
+        assert_eq!(record.internet_codepage, Some(1252));
+        assert_eq!(record.originals[0].bytes, 11);
+        assert_eq!(record.originals[0].sha256, sha256_hex(b"<p>caf\xe9</p>"));
+        assert!(record.kept_files_exempt_from_file_rules);
+    }
+
+    #[test]
+    fn the_hash_function_matches_a_known_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn html_recovered_from_the_rtf_is_kept_when_there_is_no_native_html() {
+        let mut c = content(Some("S"), None);
+        c.bodies.rtf = Some(ENCAPSULATED.to_vec());
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok("**Hello**".to_string()));
+        assert_eq!(outcome.rendered.source, BodySource::RtfHtml);
+        assert_eq!(outcome.originals.len(), 2);
+        assert_eq!(outcome.originals[0].name, "body.html");
+        assert_eq!(outcome.originals[0].bytes, b"<b>Hello</b>");
+        assert_eq!(
+            outcome.originals[0].note,
+            Some("recovered_from_rtf_charset_declaration_stale")
+        );
+        assert_eq!(outcome.originals[1].name, "body.rtf");
+    }
+
+    #[test]
+    fn native_html_is_kept_even_when_the_rtf_html_was_selected() {
+        let mut c = content(Some("S"), None);
+        c.bodies.native_html = Some(b" \r\n ".to_vec());
+        c.bodies.rtf = Some(ENCAPSULATED.to_vec());
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok("**Hello**".to_string()));
+        assert_eq!(outcome.rendered.source, BodySource::RtfHtml);
+        assert_eq!(outcome.originals[0].bytes, b" \r\n ");
+        assert_eq!(outcome.originals[0].note, Some("as_stored"));
+    }
+
+    #[test]
+    fn missing_and_zero_length_forms_keep_nothing() {
+        let mut c = content(Some("S"), Some(""));
+        c.bodies.native_html = Some(Vec::new());
+        c.bodies.rtf = Some(Vec::new());
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok(String::new()));
+        assert!(outcome.originals.is_empty());
+        assert!(body_outcome(&BodyForms::default()).originals.is_empty());
+    }
+
+    #[test]
+    fn a_whitespace_only_plain_body_is_kept_but_not_shown() {
+        let c = content(Some("S"), Some(" \r\n"));
+        let outcome = body_outcome(&c.bodies);
+        assert_eq!(outcome.originals.len(), 1);
+        assert_eq!(outcome.originals[0].bytes, b" \r\n");
+        assert_eq!(
+            render_message_md(&c, &outcome),
+            "# S\n\n- **Date:** 2022-06-18T04:26:40Z\n"
+        );
+    }
+
+    #[test]
+    fn cid_references_are_counted_in_the_markdown() {
+        let c = html_content(b"<p>x</p>");
+        let outcome = body_outcome_with(&c.bodies, &|_| {
+            Ok("![a](cid:one@x) ![b](cid:ONE@x) ![c](cid:two@x)".to_string())
+        });
+        assert_eq!((outcome.cid_total, outcome.cid_distinct), (3, 2));
+        let record = body_record(&c.bodies, &outcome);
+        assert_eq!(
+            (record.cid_references.total, record.cid_references.distinct),
+            (3, 2)
+        );
+    }
+
+    #[test]
+    fn gaps_are_listed_as_status_reasons() {
+        let mut c = content(Some("S"), None);
+        c.bodies.rtf = Some(PLAIN_RTF.to_vec());
+        let meta = meta_for(&c, "S", 2);
         assert_eq!(meta.status, "partial");
         assert_eq!(
             meta.status_reasons,
@@ -709,8 +1064,44 @@ mod tests {
                 "formatted_bodies_not_converted"
             ]
         );
-        assert_eq!(meta.body.plain_text, "absent");
-        assert!(meta.body.html_via_rtf);
+        assert_eq!(meta.body.source, "none");
+        assert_eq!(meta.body.loss[0].reason, "rtf_not_converted");
+        assert_eq!(meta.body.originals.len(), 1);
+        assert_eq!(meta.body.originals[0].file, "body.rtf");
+    }
+
+    #[test]
+    fn an_rtf_that_could_not_be_decompressed_is_recorded() {
+        let mut c = content(Some("S"), Some("x"));
+        c.bodies.rtf_decompression_failed = true;
+        let meta = meta_for(&c, "S", 0);
+        assert_eq!(meta.body.source, "plain_text");
+        assert_eq!(meta.body.loss.len(), 1);
+        assert_eq!(meta.body.loss[0].reason, "rtf_decompression_failed");
+        assert!(
+            meta.status_reasons
+                .contains(&"formatted_bodies_not_converted")
+        );
+    }
+
+    #[test]
+    fn the_body_object_serializes_in_the_documented_order() {
+        let c = content(Some("S"), Some("x"));
+        let json = to_json(&meta_for(&c, "S", 0)).unwrap();
+        let positions: Vec<usize> = [
+            "\"source\": \"plain_text\"",
+            "\"converter\"",
+            "\"preprocessing\"",
+            "\"internet_codepage\"",
+            "\"originals\"",
+            "\"cid_references\"",
+            "\"loss\"",
+            "\"kept_files_exempt_from_file_rules\"",
+        ]
+        .iter()
+        .map(|key| json.find(key).unwrap_or_else(|| panic!("missing {key}")))
+        .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
@@ -808,22 +1199,14 @@ mod tests {
 
     #[test]
     fn the_envelope_markdown_matches_the_committed_golden_file() {
-        let md = render_message_md(&full_envelope_content());
+        let md = md(&full_envelope_content());
         assert_eq!(md, lf(include_str!("../tests/golden/envelope/message.md")));
     }
 
     #[test]
     fn the_envelope_is_recorded_in_the_metadata() {
         let c = full_envelope_content();
-        let meta = message_metadata(
-            "e.msg",
-            &c,
-            NameRecord {
-                original: "Budget review".to_string(),
-                adjustments: vec![],
-            },
-            0,
-        );
+        let meta = meta_for(&c, "Budget review", 0);
         let value: serde_json::Value = serde_json::from_str(&to_json(&meta).unwrap()).unwrap();
         let env = &value["envelope"];
         assert_eq!(env["sender"]["display_name"], "Alice Sender");
@@ -851,22 +1234,22 @@ mod tests {
 
     #[test]
     fn unusual_importance_and_sensitivity_values_are_shown_not_guessed() {
-        let mut c = bare(Some("S"), PlainBody::Absent);
+        let mut c = bare(Some("S"), None);
         c.envelope.importance = Some(7);
         c.envelope.sensitivity = Some(9);
-        let md = render_message_md(&c);
-        assert!(md.contains("- **Importance:** unknown (7)"));
-        assert!(md.contains("- **Sensitivity:** unknown (9)"));
+        let shown = md(&c);
+        assert!(shown.contains("- **Importance:** unknown (7)"));
+        assert!(shown.contains("- **Sensitivity:** unknown (9)"));
         c.envelope.importance = Some(1);
         c.envelope.sensitivity = Some(0);
-        assert_eq!(render_message_md(&c), "# S\n");
+        assert_eq!(md(&c), "# S\n");
     }
 
     #[test]
     fn a_missing_or_unrepresentable_time_shows_no_date() {
-        let mut c = bare(Some("S"), PlainBody::Absent);
+        let mut c = bare(Some("S"), None);
         c.envelope.submit_time = Some(i64::MAX);
-        assert_eq!(render_message_md(&c), "# S\n");
+        assert_eq!(md(&c), "# S\n");
         assert!(envelope_record(&c.envelope).date_utc.is_none());
         assert_eq!(
             envelope_record(&c.envelope).submit_time_filetime,

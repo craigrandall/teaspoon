@@ -1,10 +1,10 @@
-//! The body pipeline (M4e-2a): the pure part. Decided by the accepted ADRs
-//! [HTML-to-Markdown converter and preprocessing] and [Body selection, original bodies, and
-//! formatting-loss recording].
+//! The body pipeline (M4e-2a, wired into the export in M4e-2b): the pure part. Decided by the
+//! accepted ADRs [HTML-to-Markdown converter and preprocessing] and [Body selection, original
+//! bodies, and formatting-loss recording].
 //!
 //! No file I/O and no adapter types: the `.msg` reader (and later the PST reader) fills a
-//! [`BodyForms`], [`select_body`] picks the body, and [`render_body`] turns it into what
-//! `message.md` and `metadata.json` need, with the loss recorded.
+//! [`BodyForms`] (defined in `model.rs`), [`select_body`] picks the body, and [`render_body`]
+//! turns it into what `message.md` and `metadata.json` need, with the loss recorded.
 //!
 //! - **Selection** (ADR 2, decision 1): native HTML, else HTML recovered from the RTF, else the
 //!   plain-text body, else none. An RTF that could not be used is flagged, not converted.
@@ -17,16 +17,16 @@
 //!   failure is recorded and falls back to the plain-text body.
 //! - **Invisible padding** (ADR 2, decision 5): runs of invisible formatting characters are
 //!   removed from the Markdown only; the original body is untouched (the caller keeps it).
-//! - **Loss** (ADR 2, decision 4): a closed list of reasons with counts.
+//! - **Loss** (ADR 2, decision 4, amended twice): a closed list of reasons with counts.
 //!
-//! Not here: reading the forms out of a message, writing the kept original files, the
-//! `metadata.json` object (all M4e-2b), and the content-preservation check (M4e-2c).
-//!
-//! The module is not called by the export until M4e-2b, so unused items are allowed for now.
-#![allow(dead_code)]
+//! Not here: reading the forms out of a message (`oxmsg_extract::read_body_forms`), the kept
+//! original files and the `metadata.json` object (`archive.rs`), and the content-preservation
+//! check (M4e-2c).
 
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 
+use crate::model::BodyForms;
 use crate::oxmsg_decode::{String8Decoded, decode_string8_with_codepage};
 use crate::rtf_deencap::{Limits, RtfKind, deencapsulate_html, recognize};
 
@@ -67,19 +67,6 @@ impl BodySource {
     }
 }
 
-/// The body forms a message carries, as the source stores them.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct BodyForms {
-    /// `PidTagHtml`: the native HTML bytes.
-    pub(crate) native_html: Option<Vec<u8>>,
-    /// `PidTagInternetCodepage`, the code page of the native HTML.
-    pub(crate) native_html_code_page: Option<u32>,
-    /// The decompressed RTF (`PidTagRtfCompressed`, decompressed).
-    pub(crate) rtf: Option<Vec<u8>>,
-    /// `PidTagBody`, as read.
-    pub(crate) plain_text: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Selection {
     pub(crate) source: BodySource,
@@ -91,8 +78,12 @@ pub(crate) struct Selection {
     pub(crate) plain_text: Option<String>,
     /// An RTF existed and was not used (and no HTML was selected).
     pub(crate) rtf_not_converted: bool,
-    /// The kind of the RTF, when the message has one.
+    /// The kind of the RTF, when the message has one. Read by tests; the export records the RTF
+    /// kind when M4g settles the status vocabulary.
+    #[allow(dead_code)]
     pub(crate) rtf_kind: Option<RtfKind>,
+    /// A non-empty RTF existed and could not be decompressed (recorded as loss).
+    pub(crate) rtf_decompression_failed: bool,
     /// Bytes replaced by U+FFFD while reading the selected HTML (a code page that is not
     /// implemented, invalid UTF-8, or the de-encapsulation's own count).
     pub(crate) undecodable_bytes: u64,
@@ -156,6 +147,7 @@ pub(crate) fn select_body(forms: &BodyForms) -> Selection {
                 plain_text,
                 rtf_not_converted: false,
                 rtf_kind,
+                rtf_decompression_failed: forms.rtf_decompression_failed,
                 undecodable_bytes: undecodable,
             };
         }
@@ -171,6 +163,7 @@ pub(crate) fn select_body(forms: &BodyForms) -> Selection {
             plain_text,
             rtf_not_converted: false,
             rtf_kind,
+            rtf_decompression_failed: forms.rtf_decompression_failed,
             undecodable_bytes: recovered.diagnostics.undecodable_bytes,
         };
     }
@@ -185,6 +178,7 @@ pub(crate) fn select_body(forms: &BodyForms) -> Selection {
         plain_text,
         rtf_not_converted: forms.rtf.is_some(),
         rtf_kind,
+        rtf_decompression_failed: forms.rtf_decompression_failed,
         undecodable_bytes: 0,
     }
 }
@@ -362,6 +356,7 @@ pub(crate) fn preprocess_html_detailed(html: &str) -> (String, Applied) {
 }
 
 /// The preprocessing before conversion (the bake-off harness calls this too).
+#[allow(dead_code)] // called by the bake-off harness, which not every build compiles
 pub(crate) fn preprocess_html(html: &str) -> String {
     preprocess_html_detailed(html).0
 }
@@ -506,13 +501,39 @@ fn count_markdown_table_rows(markdown: &str) -> u64 {
         .count() as u64
 }
 
+/// The `cid:` link destinations in converted Markdown: how many, and how many distinct (the
+/// content ID compared without regard to case). Only a destination (`](cid:...)` or
+/// `](<cid:...>)`) counts, so ordinary text such as "acid:" does not.
+pub(crate) fn count_cid_references(markdown: &str) -> (u64, u64) {
+    let mut total = 0u64;
+    let mut distinct: BTreeSet<String> = BTreeSet::new();
+    let mut rest = markdown;
+    while let Some(at) = rest.find("](") {
+        let after = &rest[at + 2..];
+        let destination = after.strip_prefix('<').unwrap_or(after);
+        if let Some(prefix) = destination.get(..4)
+            && prefix.eq_ignore_ascii_case("cid:")
+        {
+            let id: String = destination[4..]
+                .chars()
+                .take_while(|c| !matches!(c, ')' | '>') && !c.is_whitespace())
+                .collect();
+            total += 1;
+            distinct.insert(id.to_ascii_lowercase());
+        }
+        rest = after;
+    }
+    (total, distinct.len() as u64)
+}
+
 // =============================================================================
 // Rendering and loss
 // =============================================================================
 
 /// The closed vocabulary of formatting-loss reasons (draft schema `0.1-draft`; a new reason is a
 /// schema change). The first four are decided by ADR 2; `HtmlConversionFailed` records a
-/// conversion that failed and fell back to the plain-text body.
+/// conversion that failed and fell back to the plain-text body; `RtfDecompressionFailed` records
+/// an RTF property that existed and could not be decompressed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum LossReason {
     /// Table rows in the HTML that have no Markdown table row.
@@ -525,9 +546,21 @@ pub(crate) enum LossReason {
     InvisiblePaddingRemoved,
     /// The converter failed; the plain-text body (if any) was used instead.
     HtmlConversionFailed,
+    /// A non-empty RTF property existed and could not be decompressed.
+    RtfDecompressionFailed,
 }
 
 impl LossReason {
+    /// Every reason, in the vocabulary's order (the order `loss` is written in).
+    pub(crate) const ALL: [LossReason; 6] = [
+        LossReason::TablesFlattened,
+        LossReason::RtfNotConverted,
+        LossReason::UndecodableBytesReplaced,
+        LossReason::InvisiblePaddingRemoved,
+        LossReason::HtmlConversionFailed,
+        LossReason::RtfDecompressionFailed,
+    ];
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             LossReason::TablesFlattened => "tables_flattened",
@@ -535,6 +568,7 @@ impl LossReason {
             LossReason::UndecodableBytesReplaced => "undecodable_bytes_replaced",
             LossReason::InvisiblePaddingRemoved => "invisible_padding_removed",
             LossReason::HtmlConversionFailed => "html_conversion_failed",
+            LossReason::RtfDecompressionFailed => "rtf_decompression_failed",
         }
     }
 }
@@ -567,6 +601,7 @@ fn push_loss(loss: &mut Vec<Loss>, reason: LossReason, count: u64) {
 }
 
 /// Renders the selected body with the production converter.
+#[allow(dead_code)] // the export calls `render_with` through `archive::body_outcome`
 pub(crate) fn render_body(selection: &Selection) -> Rendered {
     render_with(selection, &convert_html_isolated)
 }
@@ -577,6 +612,7 @@ pub(crate) fn render_with(
     selection: &Selection,
     convert: &dyn Fn(&str) -> Result<String, ConversionFailed>,
 ) -> Rendered {
+    let rtf_decompression_failed = u64::from(selection.rtf_decompression_failed);
     let Some(html) = &selection.html else {
         // Plain text or no body at all.
         let mut loss = Vec::new();
@@ -584,6 +620,11 @@ pub(crate) fn render_with(
             &mut loss,
             LossReason::RtfNotConverted,
             u64::from(selection.rtf_not_converted),
+        );
+        push_loss(
+            &mut loss,
+            LossReason::RtfDecompressionFailed,
+            rtf_decompression_failed,
         );
         return Rendered {
             source: selection.source,
@@ -602,6 +643,11 @@ pub(crate) fn render_with(
         // The conversion failed: use the plain-text body if there is one, and say so.
         let mut loss = Vec::new();
         push_loss(&mut loss, LossReason::HtmlConversionFailed, 1);
+        push_loss(
+            &mut loss,
+            LossReason::RtfDecompressionFailed,
+            rtf_decompression_failed,
+        );
         let plain_text = selection.plain_text.clone();
         return Rendered {
             source: if plain_text.is_some() {
@@ -627,6 +673,11 @@ pub(crate) fn render_with(
         selection.undecodable_bytes,
     );
     push_loss(&mut loss, LossReason::InvisiblePaddingRemoved, padding_runs);
+    push_loss(
+        &mut loss,
+        LossReason::RtfDecompressionFailed,
+        rtf_decompression_failed,
+    );
     Rendered {
         source: selection.source,
         markdown: Some(markdown),
@@ -954,6 +1005,15 @@ mod tests {
         assert_eq!(count_markdown_table_rows(md), 2);
     }
 
+    #[test]
+    fn cid_references_count_destinations_only() {
+        let md =
+            "![a](cid:one@x) and [b](<CID:ONE@x>) ![c](cid:two@x) [d](http://x) acid:zzz [e](cid:)";
+        assert_eq!(count_cid_references(md), (4, 3));
+        assert_eq!(count_cid_references("no links"), (0, 0));
+        assert_eq!(count_cid_references("](cid:a) ](cid:a)"), (2, 1));
+    }
+
     // ----- rendering -----
 
     #[test]
@@ -984,6 +1044,50 @@ mod tests {
                 reason: LossReason::RtfNotConverted,
                 count: 1
             }]
+        );
+    }
+
+    #[test]
+    fn an_rtf_that_could_not_be_decompressed_is_recorded_on_every_path() {
+        let failed = BodyForms {
+            rtf_decompression_failed: true,
+            plain_text: Some("x".to_string()),
+            ..forms()
+        };
+        let plain = render_with(&select_body(&failed), &ok("unused"));
+        assert_eq!(
+            plain.loss,
+            vec![Loss {
+                reason: LossReason::RtfDecompressionFailed,
+                count: 1
+            }]
+        );
+        let with_html = BodyForms {
+            native_html: Some(b"<p>x</p>".to_vec()),
+            rtf_decompression_failed: true,
+            ..forms()
+        };
+        let converted = render_with(&select_body(&with_html), &ok("x"));
+        assert_eq!(
+            converted.loss,
+            vec![Loss {
+                reason: LossReason::RtfDecompressionFailed,
+                count: 1
+            }]
+        );
+        let broken = render_with(&select_body(&with_html), &|_| Err(ConversionFailed));
+        assert_eq!(
+            broken.loss,
+            vec![
+                Loss {
+                    reason: LossReason::HtmlConversionFailed,
+                    count: 1
+                },
+                Loss {
+                    reason: LossReason::RtfDecompressionFailed,
+                    count: 1
+                }
+            ]
         );
     }
 
@@ -1074,20 +1178,18 @@ mod tests {
     }
 
     #[test]
-    fn the_loss_labels_are_the_recorded_ones() {
-        assert_eq!(LossReason::TablesFlattened.label(), "tables_flattened");
-        assert_eq!(LossReason::RtfNotConverted.label(), "rtf_not_converted");
+    fn the_loss_labels_are_the_recorded_ones_in_the_vocabulary_order() {
+        let labels: Vec<&str> = LossReason::ALL.iter().map(|r| r.label()).collect();
         assert_eq!(
-            LossReason::UndecodableBytesReplaced.label(),
-            "undecodable_bytes_replaced"
-        );
-        assert_eq!(
-            LossReason::InvisiblePaddingRemoved.label(),
-            "invisible_padding_removed"
-        );
-        assert_eq!(
-            LossReason::HtmlConversionFailed.label(),
-            "html_conversion_failed"
+            labels,
+            vec![
+                "tables_flattened",
+                "rtf_not_converted",
+                "undecodable_bytes_replaced",
+                "invisible_padding_removed",
+                "html_conversion_failed",
+                "rtf_decompression_failed"
+            ]
         );
     }
 

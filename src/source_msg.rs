@@ -15,7 +15,7 @@ use crate::dry_run::{
     InternetIdTracker, PROP_ATTACH_FILENAME, PROP_ATTACH_LONG_FILENAME, PROP_DELIVERY_TIME,
     PROP_INTERNET_MESSAGE_ID, PROP_SUBJECT, PROP_SUBMIT_TIME, SourceCensus, strip_subject_marker,
 };
-use crate::model::{BodyAvailability, MessageContent, PlainBody};
+use crate::model::MessageContent;
 use crate::oxmsg_classify::{
     EMBEDDED_OBJECT_STORAGE_NAME, OxmsgEntryKind, OxmsgEntryScope, cfb_entry_name,
     classify_oxmsg_entry,
@@ -25,9 +25,9 @@ use crate::oxmsg_decode::{
     properties_stream_header_len, read_stream_bytes,
 };
 use crate::oxmsg_envelope::extract_envelope;
-use crate::oxmsg_extract::{extract_body_flags, read_string_property};
+use crate::oxmsg_extract::{read_body_forms, read_string_property};
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
-use crate::shared::{CompoundFile, PROP_ATTACH_METHOD, PROP_BODY};
+use crate::shared::{CompoundFile, PROP_ATTACH_METHOD};
 
 /// Deepest directory nesting mirrored (guards against link loops).
 const MAX_DIRECTORY_DEPTH: usize = 64;
@@ -228,9 +228,10 @@ impl Builder {
     }
 }
 
-/// Reads what the export writes for one top-level message (M4c): subject, Internet message ID,
-/// time, the plain-text body, and which other body forms exist. Content stays in memory and goes
-/// only into the archive directory the user named.
+/// Reads what the export writes for one top-level message (M4c, M4e-2b): subject, Internet
+/// message ID, time, the body forms as stored (plain text, native HTML, decompressed RTF, and
+/// the Internet code page), and the envelope. Content stays in memory and goes only into the
+/// archive directory the user named.
 pub(crate) fn read_message_content(path: &Path) -> Result<MessageContent> {
     let mut comp = cfb::open(path).context("failed to open a .msg file for export")?;
     let base = Path::new("/");
@@ -243,24 +244,14 @@ pub(crate) fn read_message_content(path: &Path) -> Result<MessageContent> {
         read_string_property(&mut comp, base, PROP_INTERNET_MESSAGE_ID, codepage)
             .filter(|id| !id.trim().is_empty());
     let time_filetime = message_time(&mut comp, base, header_len);
-    let plain_body = match read_string_property(&mut comp, base, PROP_BODY, codepage) {
-        None => PlainBody::Absent,
-        Some(text) if text.trim().is_empty() => PlainBody::Empty,
-        Some(text) => PlainBody::Text(text),
-    };
-    let flags = extract_body_flags(&mut comp);
+    let bodies = read_body_forms(&mut comp, codepage);
     let envelope = extract_envelope(&mut comp);
 
     Ok(MessageContent {
         subject,
         internet_message_id,
         time_filetime,
-        plain_body,
-        bodies: BodyAvailability {
-            html_native: flags.has_html_native,
-            html_via_rtf: flags.has_html_via_rtf,
-            rtf: flags.has_rtf,
-        },
+        bodies,
         envelope,
     })
 }
@@ -468,7 +459,11 @@ mod tests {
         assert_eq!(content.subject.as_deref(), Some("RE: Hello"));
         assert_eq!(content.time_filetime, Some(133_000_000_000_000_000));
         assert_eq!(content.internet_message_id, None);
-        assert_eq!(content.plain_body, PlainBody::Text("Body text".to_string()));
+        assert_eq!(content.bodies.plain_text.as_deref(), Some("Body text"));
+        assert!(content.bodies.native_html.is_none());
+        assert!(content.bodies.rtf.is_none());
+        assert!(!content.bodies.rtf_decompression_failed);
+        assert!(content.bodies.native_html_code_page.is_none());
         assert_eq!(
             content.envelope.delivery_time,
             Some(133_000_000_000_000_000)
@@ -476,12 +471,52 @@ mod tests {
         assert_eq!(content.envelope.submit_time, None);
         assert_eq!(content.envelope.sender, None);
         assert!(content.envelope.recipients.is_empty());
-        assert!(!content.bodies.html_native);
-        assert!(!content.bodies.html_via_rtf);
-        assert!(!content.bodies.rtf);
 
         std::fs::write(dir.join("broken.msg"), b"not a compound file").expect("write broken");
         assert!(read_message_content(&dir.join("broken.msg")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn body_forms_are_read_as_stored() {
+        let dir = temp_dir("forms");
+        let file = dir.join("f.msg");
+        {
+            let mut comp = cfb::create(&file).expect("create CFB");
+            let mut props = vec![0u8; 32];
+            let mut code_page = [0u8; 8];
+            code_page[..4].copy_from_slice(&1252i32.to_le_bytes());
+            props.extend(entry(0x0003, 0x3FDE, code_page));
+            put(&mut comp, "/__properties_version1.0", &props);
+            put(&mut comp, "/__substg1.0_1000001F", &utf16("plain"));
+            put(&mut comp, "/__substg1.0_10130102", b"<p>caf\xe9</p>");
+            // Too short to decompress: the form exists and is unusable.
+            put(&mut comp, "/__substg1.0_10090102", b"short");
+        }
+        let content = read_message_content(&file).expect("read content");
+        assert_eq!(content.bodies.plain_text.as_deref(), Some("plain"));
+        assert_eq!(
+            content.bodies.native_html.as_deref(),
+            Some(&b"<p>caf\xe9</p>"[..])
+        );
+        assert_eq!(content.bodies.native_html_code_page, Some(1252));
+        assert!(content.bodies.rtf.is_none());
+        assert!(content.bodies.rtf_decompression_failed);
+
+        // Zero-length binary streams are absent; a zero-length plain body stays `Some("")`.
+        let empty = dir.join("e.msg");
+        {
+            let mut comp = cfb::create(&empty).expect("create CFB");
+            put(&mut comp, "/__properties_version1.0", &[0u8; 32]);
+            put(&mut comp, "/__substg1.0_1000001F", &[]);
+            put(&mut comp, "/__substg1.0_10130102", &[]);
+            put(&mut comp, "/__substg1.0_10090102", &[]);
+        }
+        let content = read_message_content(&empty).expect("read content");
+        assert_eq!(content.bodies.plain_text.as_deref(), Some(""));
+        assert!(content.bodies.native_html.is_none());
+        assert!(content.bodies.rtf.is_none());
+        assert!(!content.bodies.rtf_decompression_failed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,28 +2,33 @@
 //!
 //! Pure data with no adapter types, so the `.msg` reader (and later the PST reader) can fill it
 //! and the archive renderer can read it without either knowing about the other. It holds what
-//! the stages so far extract: the plain-text body and the *envelope* (sender, recipients, times,
-//! importance, sensitivity, transport headers, conversation fields). Attachments, embedded
-//! messages, the raw property bag, and named properties join it when the stages that fill them
-//! (M4f, M4g) exist: a field nothing fills would be dead code and a promise nothing keeps.
+//! the stages so far extract: the body forms as the source stores them (M4e-2b) and the
+//! *envelope* (sender, recipients, times, importance, sensitivity, transport headers,
+//! conversation fields). Attachments, embedded messages, the raw property bag, and named
+//! properties join it when the stages that fill them (M4f, M4g) exist: a field nothing fills
+//! would be dead code and a promise nothing keeps.
 
-/// The plain-text body as the source holds it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PlainBody {
-    /// No `PidTagBody` value.
-    Absent,
-    /// A value that is empty or only whitespace.
-    Empty,
-    Text(String),
-}
-
-/// Which other body forms the message carries. Not yet converted, so the export records their
-/// presence instead of dropping them silently.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BodyAvailability {
-    pub(crate) html_native: bool,
-    pub(crate) html_via_rtf: bool,
-    pub(crate) rtf: bool,
+/// The body forms a message carries, as the source stores them. The reader fills this; the body
+/// pipeline (`body.rs`) selects and converts from it, and the export keeps each form that exists
+/// as an original file.
+///
+/// A form that is absent or zero-length is `None`, with one exception: `plain_text` is whatever
+/// the property decoded to, so a zero-length value is `Some("")`. The archive keeps only
+/// non-empty forms, and the export report counts a zero-length or whitespace-only plain body as
+/// "empty" and a missing one as "absent".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BodyForms {
+    /// `PidTagHtml` (`0x1013`, `PT_BINARY`): the native HTML bytes.
+    pub(crate) native_html: Option<Vec<u8>>,
+    /// `PidTagInternetCodepage` as stored (positive values only), the code page of the native
+    /// HTML. Recorded in `metadata.json` whenever the message has one.
+    pub(crate) native_html_code_page: Option<u32>,
+    /// The decompressed RTF (`PidTagRtfCompressed`, decompressed).
+    pub(crate) rtf: Option<Vec<u8>>,
+    /// A non-empty `PidTagRtfCompressed` existed and could not be decompressed.
+    pub(crate) rtf_decompression_failed: bool,
+    /// `PidTagBody`, as read.
+    pub(crate) plain_text: Option<String>,
 }
 
 /// One mail address as the source stores it. Nothing is derived or "fixed up": a display name
@@ -94,7 +99,6 @@ pub(crate) struct MessageContent {
     pub(crate) internet_message_id: Option<String>,
     /// Delivery time, falling back to submit time, as FILETIME ticks (the planner's ordering time).
     pub(crate) time_filetime: Option<i64>,
-    pub(crate) plain_body: PlainBody,
-    pub(crate) bodies: BodyAvailability,
+    pub(crate) bodies: BodyForms,
     pub(crate) envelope: Envelope,
 }

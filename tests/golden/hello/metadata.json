@@ -10,11 +10,24 @@
     "adjustments": []
   },
   "body": {
-    "plain_text": "present",
-    "markdown": "fenced_text_provisional",
-    "html_native": false,
-    "html_via_rtf": false,
-    "rtf": false
+    "source": "plain_text",
+    "converter": null,
+    "preprocessing": [],
+    "internet_codepage": null,
+    "originals": [
+      {
+        "file": "body.txt",
+        "bytes": 20,
+        "sha256": "13187ebc90c47a525637071656826b946089b1806bc3c94555c6acb529ab0bf8",
+        "note": null
+      }
+    ],
+    "cid_references": {
+      "total": 0,
+      "distinct": 0
+    },
+    "loss": [],
+    "kept_files_exempt_from_file_rules": true
   },
   "envelope": {
     "sender": null,

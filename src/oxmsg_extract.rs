@@ -1,11 +1,12 @@
 //! Custom MS-OXMSG extraction layer: real property reads feeding the default `.msg` report and
-//! `--verify`.
+//! `--verify`, and (since M4e-2b) the body forms the export keeps and converts.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::model::BodyForms;
 use crate::msg_report::{
     MSG_ATTACH_METHOD_EMBEDDED_MESSAGE, MsgTotals, PROP_TYPE_ERROR, PROP_TYPE_UNSPECIFIED,
     print_msg_report, record_embedded_message_class, record_msg_class, record_msg_recipients,
@@ -15,10 +16,10 @@ use crate::oxmsg_classify::{
     top_level_storage_paths,
 };
 use crate::oxmsg_decode::{
-    DecodedFixedValue, PROP_MESSAGE_CLASS, String8Decoded, decode_fixed_value,
-    decode_properties_stream, decode_string8_with_codepage, decode_unicode_value,
-    expected_variable_stream_path, extract_string8_codepage, properties_stream_header_len,
-    read_stream_bytes,
+    DecodedFixedValue, PROP_INTERNET_CODEPAGE, PROP_MESSAGE_CLASS, String8Decoded,
+    decode_fixed_value, decode_properties_stream, decode_string8_with_codepage,
+    decode_unicode_value, expected_variable_stream_path, extract_string8_codepage,
+    properties_stream_header_len, read_long_property, read_stream_bytes,
 };
 use crate::shared::{
     CompoundFile, PROP_ATTACH_CONTENT_ID, PROP_ATTACH_METHOD, PROP_BODY, PROP_BODY_HTML,
@@ -32,7 +33,8 @@ use crate::shared::{
 // Unlike the structural accounting, these functions return real content.
 // They are only ever consumed by the default report (which prints only
 // counters) and --verify (which prints only match/mismatch counts) --
-// never printed directly.
+// never printed directly. The one exception is `read_body_forms`, whose
+// content the export writes into the archive (M4e-2b); it is never printed.
 // =============================================================================
 
 /// Reads a string property by ID from `parent`: PT_UNICODE if present,
@@ -158,6 +160,68 @@ pub(crate) fn extract_body_flags(comp: &mut CompoundFile) -> BodyFlags {
         has_rtf,
         decompression_failed,
         decompressed_rtf_len,
+    }
+}
+
+/// What reading the message's compressed RTF gave.
+enum RtfRead {
+    Absent,
+    DecompressionFailed,
+    Bytes(Vec<u8>),
+}
+
+/// Reads and decompresses `PidTagRtfCompressed` (MS-OXRTFCP, via `compressed-rtf`). A zero-length
+/// stream is absent, as in [`extract_body_flags`]. (`verify_deencap.rs` keeps an identical private
+/// copy; deduplicate in a later housekeeping change.)
+fn read_decompressed_rtf(comp: &mut CompoundFile) -> RtfRead {
+    let Some(compressed) = read_stream_bytes(
+        comp,
+        &expected_variable_stream_path(Path::new("/"), PROP_RTF_COMPRESSED, 0x0102),
+    )
+    .filter(|bytes| !bytes.is_empty()) else {
+        return RtfRead::Absent;
+    };
+    // `compressed_rtf::decompress_rtf` indexes the first 16 bytes unconditionally.
+    if compressed.len() < 16 {
+        return RtfRead::DecompressionFailed;
+    }
+    match compressed_rtf::decompress_rtf(&compressed) {
+        Ok(rtf) => RtfRead::Bytes(rtf.as_bytes().to_vec()),
+        Err(_) => RtfRead::DecompressionFailed,
+    }
+}
+
+/// Reads the body forms of the top-level message as stored (M4e-2b): the plain-text body
+/// (decoded under `string8_codepage` when it is `PT_STRING8`), the native HTML bytes (`0x1013`,
+/// `PT_BINARY` only; a string-typed variant is not read), the Internet code page (a positive
+/// value only), and the decompressed RTF. A zero-length binary stream is `None`; a zero-length
+/// plain body stays `Some("")`. The content stays in memory and is never printed here.
+pub(crate) fn read_body_forms(comp: &mut CompoundFile, string8_codepage: u32) -> BodyForms {
+    let root = Path::new("/");
+    let plain_text = read_string_property(comp, root, PROP_BODY, string8_codepage);
+    let native_html = read_stream_bytes(
+        comp,
+        &expected_variable_stream_path(root, PROP_BODY_HTML, 0x0102),
+    )
+    .filter(|bytes| !bytes.is_empty());
+    let header_len = properties_stream_header_len(OxmsgEntryScope::Message).unwrap_or(32);
+    let native_html_code_page = read_stream_bytes(comp, &root.join("__properties_version1.0"))
+        .and_then(|bytes| decode_properties_stream(&bytes, header_len))
+        .and_then(|decoded| read_long_property(&decoded, PROP_INTERNET_CODEPAGE))
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|&value| value > 0);
+    let (rtf, rtf_decompression_failed) = match read_decompressed_rtf(comp) {
+        RtfRead::Absent => (None, false),
+        RtfRead::DecompressionFailed => (None, true),
+        RtfRead::Bytes(bytes) if bytes.is_empty() => (None, false),
+        RtfRead::Bytes(bytes) => (Some(bytes), false),
+    };
+    BodyForms {
+        native_html,
+        native_html_code_page,
+        rtf,
+        rtf_decompression_failed,
+        plain_text,
     }
 }
 

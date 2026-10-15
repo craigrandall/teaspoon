@@ -1,4 +1,4 @@
-//! Export writer (M4c walking skeleton): `tsp <input.msg|dir> --out <dir>`.
+//! Export writer (M4c walking skeleton, body added in M4e-2b): `tsp <input.msg|dir> --out <dir>`.
 //!
 //! Pipeline: read the source tree, plan names and paths (the same pure planner as `--dry-run`),
 //! refuse if the plan breaks a gate, render every file in memory, compare with what is already
@@ -6,10 +6,12 @@
 //! everything back, and print content-free counts. Archive content goes only into the directory
 //! the user named; stdout and stderr never carry names, subjects, or paths.
 //!
-//! Limits, stated plainly: only `.msg` input and the plain-text body are exported; attachments
-//! and embedded messages are counted and recorded as not extracted (M4f); the whole archive is
-//! rendered in memory before anything is written (fine for a skeleton, revisited in M4h); each
-//! file is replaced atomically, but the archive as a whole is not all-or-nothing -- an
+//! Limits, stated plainly: only `.msg` input is exported, with its body (converted to Markdown
+//! in `message.md`, plus each original body form kept as `body.html`, `body.rtf`, or `body.txt`);
+//! attachments and embedded messages are counted and recorded as not extracted (M4f); the whole
+//! archive, original bodies included, is rendered in memory before anything is written (fine for
+//! `.msg` input of this size, and the reason M4h pulls streaming forward -- see the M4h plan);
+//! each file is replaced atomically, but the archive as a whole is not all-or-nothing -- an
 //! interrupted run leaves the root `folder.json` marked `incomplete`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,13 +22,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
 use crate::archive::{
-    ChildRecord, FOLDER_JSON_NAME, FolderMetadata, KIND_ARCHIVE_ROOT, MESSAGE_MD_NAME,
-    METADATA_JSON_NAME, NameRecord, RootCounts, RootRecord, RootSpec, STATUS_COMPLETE,
-    STATUS_INCOMPLETE, SourceRecord, TOOL_NAME, adjustment_names, message_metadata,
-    render_message_md, to_json,
+    BODY_HTML_NAME, BODY_RTF_NAME, BODY_TXT_NAME, BodyOutcome, ChildRecord, FOLDER_JSON_NAME,
+    FolderMetadata, KIND_ARCHIVE_ROOT, MESSAGE_MD_NAME, METADATA_JSON_NAME, NameRecord, RootCounts,
+    RootRecord, RootSpec, STATUS_COMPLETE, STATUS_INCOMPLETE, SourceRecord, TOOL_NAME,
+    adjustment_names, body_outcome, message_metadata, render_message_md, to_json,
 };
+use crate::body::{BodySource, LossReason};
 use crate::dry_run::{SourceKind, classify_source, input_leaf_name, root_stem, root_units};
-use crate::model::PlainBody;
 use crate::naming::{collision_key, utf16_len};
 use crate::plan::{EntryKind, Plan, Policy, SourceFolder, SourceMessage, plan_export, verify_plan};
 use crate::source_msg::{MsgFileMap, build_msg_export_source, read_message_content};
@@ -157,11 +159,12 @@ fn refusal_message(reason: RefuseReason, p: &Preflight) -> String {
     }
 }
 
-/// One file the export will write, relative to the archive root.
+/// One file the export will write, relative to the archive root. The content is bytes: the text
+/// files are UTF-8, and the kept original body files are byte copies of source content.
 #[derive(Debug, Clone)]
 struct Generated {
     rel: Vec<String>,
-    content: String,
+    content: Vec<u8>,
 }
 
 /// Content-free results printed at the end (all keys always printed, zero when not applicable).
@@ -193,8 +196,44 @@ pub(crate) struct ExportReport {
     bodies_plain_present: usize,
     bodies_plain_empty: usize,
     bodies_plain_absent: usize,
+    body_source_native_html: usize,
+    body_source_rtf_html: usize,
+    body_source_plain_text: usize,
+    body_source_none: usize,
+    body_files_kept_html: usize,
+    body_files_kept_rtf: usize,
+    body_files_kept_txt: usize,
+    /// Sum of the loss counts per reason, in `LossReason::ALL` order.
+    body_loss: [u64; LossReason::ALL.len()],
+    body_cid_references_total: u64,
     readback_mismatches: usize,
     tree_sha256: String,
+}
+
+impl ExportReport {
+    /// Tallies one message's body into the content-free counters.
+    fn note_body(&mut self, outcome: &BodyOutcome) {
+        match outcome.rendered.source {
+            BodySource::NativeHtml => self.body_source_native_html += 1,
+            BodySource::RtfHtml => self.body_source_rtf_html += 1,
+            BodySource::PlainText => self.body_source_plain_text += 1,
+            BodySource::None => self.body_source_none += 1,
+        }
+        for original in &outcome.originals {
+            match original.name {
+                BODY_HTML_NAME => self.body_files_kept_html += 1,
+                BODY_RTF_NAME => self.body_files_kept_rtf += 1,
+                BODY_TXT_NAME => self.body_files_kept_txt += 1,
+                _ => {}
+            }
+        }
+        for loss in &outcome.rendered.loss {
+            if let Some(index) = LossReason::ALL.iter().position(|r| *r == loss.reason) {
+                self.body_loss[index] += loss.count;
+            }
+        }
+        self.body_cid_references_total += outcome.cid_total;
+    }
 }
 
 fn print_export_report(r: &ExportReport) {
@@ -238,6 +277,23 @@ fn print_export_report(r: &ExportReport) {
     println!("export_bodies_plain_present={}", r.bodies_plain_present);
     println!("export_bodies_plain_empty={}", r.bodies_plain_empty);
     println!("export_bodies_plain_absent={}", r.bodies_plain_absent);
+    println!(
+        "export_body_source_native_html={}",
+        r.body_source_native_html
+    );
+    println!("export_body_source_rtf_html={}", r.body_source_rtf_html);
+    println!("export_body_source_plain_text={}", r.body_source_plain_text);
+    println!("export_body_source_none={}", r.body_source_none);
+    println!("export_body_files_kept_html={}", r.body_files_kept_html);
+    println!("export_body_files_kept_rtf={}", r.body_files_kept_rtf);
+    println!("export_body_files_kept_txt={}", r.body_files_kept_txt);
+    for (reason, total) in LossReason::ALL.iter().zip(r.body_loss) {
+        println!("export_body_loss_{}={}", reason.label(), total);
+    }
+    println!(
+        "export_body_cid_references_total={}",
+        r.body_cid_references_total
+    );
     println!("export_readback_mismatches={}", r.readback_mismatches);
     println!("export_tree_sha256={}", r.tree_sha256);
 }
@@ -425,7 +481,7 @@ fn render_archive(
                 );
                 files.push(Generated {
                     rel: rel_with(&entry.components, FOLDER_JSON_NAME),
-                    content: to_json(&meta)?,
+                    content: to_json(&meta)?.into_bytes(),
                 });
                 report.folder_files += 1;
             }
@@ -437,9 +493,11 @@ fn render_archive(
                     .get(&entry.source_id)
                     .ok_or_else(|| anyhow!("internal error: a planned message has no file"))?;
                 let content = read_message_content(path)?;
+                let outcome = body_outcome(&content.bodies);
                 let meta = message_metadata(
                     &relative_source_name(input, path),
                     &content,
+                    &outcome,
                     NameRecord {
                         original: entry.original.clone(),
                         adjustments: adjustment_names(&entry.flags),
@@ -448,17 +506,24 @@ fn render_archive(
                 );
                 files.push(Generated {
                     rel: rel_with(&entry.components, MESSAGE_MD_NAME),
-                    content: render_message_md(&content),
+                    content: render_message_md(&content, &outcome).into_bytes(),
                 });
                 files.push(Generated {
                     rel: rel_with(&entry.components, METADATA_JSON_NAME),
-                    content: to_json(&meta)?,
+                    content: to_json(&meta)?.into_bytes(),
                 });
                 report.message_directories += 1;
-                match content.plain_body {
-                    PlainBody::Text(_) => report.bodies_plain_present += 1,
-                    PlainBody::Empty => report.bodies_plain_empty += 1,
-                    PlainBody::Absent => report.bodies_plain_absent += 1,
+                match content.bodies.plain_text.as_deref() {
+                    None => report.bodies_plain_absent += 1,
+                    Some(text) if text.trim().is_empty() => report.bodies_plain_empty += 1,
+                    Some(_) => report.bodies_plain_present += 1,
+                }
+                report.note_body(&outcome);
+                for original in outcome.originals {
+                    files.push(Generated {
+                        rel: rel_with(&entry.components, original.name),
+                        content: original.bytes,
+                    });
                 }
             }
             EntryKind::AttachmentFile => report.attachments_not_extracted += 1,
@@ -488,7 +553,7 @@ fn render_archive(
     };
     files.push(Generated {
         rel: vec![FOLDER_JSON_NAME.to_string()],
-        content: root.render(STATUS_COMPLETE)?,
+        content: root.render(STATUS_COMPLETE)?.into_bytes(),
     });
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
     report.folder_files += 1;
@@ -506,7 +571,7 @@ fn tree_hash(files: &[Generated]) -> String {
     for file in files {
         hasher.update(file.rel.join("/").as_bytes());
         hasher.update([0u8]);
-        hasher.update(hex(Sha256::digest(file.content.as_bytes())).as_bytes());
+        hasher.update(hex(Sha256::digest(&file.content)).as_bytes());
         hasher.update(b"\n");
     }
     hex(hasher.finalize())
@@ -611,7 +676,7 @@ fn preflight(root_dir: &Path, files: &[Generated], source: &SourceRecord) -> Pre
     for file in files {
         match std::fs::read(join_path(root_dir, &file.rel)) {
             Ok(existing) => {
-                if existing == file.content.as_bytes() {
+                if existing == file.content {
                     p.identical += 1;
                 } else {
                     p.to_replace += 1;
@@ -671,13 +736,13 @@ fn prepare_staging(staging: &Path) -> Result<()> {
     }
 }
 
-fn put_file(staging: &Path, counter: &mut u64, final_path: &Path, content: &str) -> Result<()> {
+fn put_file(staging: &Path, counter: &mut u64, final_path: &Path, content: &[u8]) -> Result<()> {
     if let Some(parent) = final_path.parent() {
         std::fs::create_dir_all(parent).context("failed to create an output directory")?;
     }
     *counter += 1;
     let staged = staging.join(counter.to_string());
-    std::fs::write(&staged, content.as_bytes()).context("failed to write a staged file")?;
+    std::fs::write(&staged, content).context("failed to write a staged file")?;
     // On Windows `rename` replaces an existing file (MoveFileExW with MOVEFILE_REPLACE_EXISTING).
     std::fs::rename(&staged, final_path).context("failed to move a staged file into place")?;
     Ok(())
@@ -701,11 +766,12 @@ fn write_archive(
     let mut counter = 0u64;
 
     let root_path = root_dir.join(FOLDER_JSON_NAME);
+    let incomplete_root = rendered.root.render(STATUS_INCOMPLETE)?;
     put_file(
         &staging,
         &mut counter,
         &root_path,
-        &rendered.root.render(STATUS_INCOMPLETE)?,
+        incomplete_root.as_bytes(),
     )?;
 
     let mut written = 0usize;
@@ -718,7 +784,7 @@ fn write_archive(
         }
         let path = join_path(root_dir, &file.rel);
         let same = std::fs::read(&path)
-            .map(|existing| existing == file.content.as_bytes())
+            .map(|existing| existing == file.content)
             .unwrap_or(false);
         if same {
             unchanged += 1;
@@ -741,7 +807,7 @@ fn read_back_mismatches(root_dir: &Path, files: &[Generated]) -> usize {
         .iter()
         .filter(|file| {
             std::fs::read(join_path(root_dir, &file.rel))
-                .map(|bytes| bytes != file.content.as_bytes())
+                .map(|bytes| bytes != file.content)
                 .unwrap_or(true)
         })
         .count()
@@ -938,6 +1004,61 @@ mod tests {
         }
     }
 
+    /// A message with chosen body forms: plain text, native HTML bytes, the bytes of the
+    /// compressed-RTF stream, and an Internet code page.
+    fn write_msg_forms(
+        path: &Path,
+        subject: &str,
+        plain: Option<&str>,
+        html: Option<&[u8]>,
+        rtf_stream: Option<&[u8]>,
+        code_page: Option<i32>,
+    ) {
+        let mut comp = cfb::create(path).expect("create CFB");
+        let ticks: u64 = 133_000_000_000_000_000;
+        let mut props = vec![0u8; 32];
+        props.extend(entry(0x0040, 0x0E06, ticks.to_le_bytes()));
+        if let Some(cp) = code_page {
+            let mut value = [0u8; 8];
+            value[..4].copy_from_slice(&cp.to_le_bytes());
+            props.extend(entry(0x0003, 0x3FDE, value));
+        }
+        put(&mut comp, "/__properties_version1.0", &props);
+        put(&mut comp, "/__substg1.0_0037001F", &utf16(subject));
+        if let Some(text) = plain {
+            put(&mut comp, "/__substg1.0_1000001F", &utf16(text));
+        }
+        if let Some(bytes) = html {
+            put(&mut comp, "/__substg1.0_10130102", bytes);
+        }
+        if let Some(bytes) = rtf_stream {
+            put(&mut comp, "/__substg1.0_10090102", bytes);
+        }
+    }
+
+    /// An MS-OXRTFCP "uncompressed" container (COMPTYPE `MELA`): the header, then the raw RTF.
+    /// The tests that use it first check the premise that `compressed-rtf` accepts this form; if
+    /// that check fails, replace this helper with an `LZFu` stream taken from a corpus file.
+    fn mela(rtf: &[u8]) -> Vec<u8> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&(rtf.len() as u32 + 12).to_le_bytes());
+        stream.extend_from_slice(&(rtf.len() as u32).to_le_bytes());
+        stream.extend_from_slice(b"MELA");
+        stream.extend_from_slice(&0u32.to_le_bytes());
+        stream.extend_from_slice(rtf);
+        stream
+    }
+
+    fn assert_mela_premise(rtf: &[u8]) {
+        assert!(
+            compressed_rtf::decompress_rtf(&mela(rtf)).is_ok(),
+            "premise: compressed-rtf accepts MELA (uncompressed) containers; if this fails, \
+             replace mela() with an LZFu stream taken from a corpus file"
+        );
+    }
+
+    const ENCAPSULATED: &[u8] = br"{\rtf1\ansi\ansicpg1252\fromhtml1 \deff0{\fonttbl{\f0\fswiss\fcharset0 Arial;}}{\*\htmltag64}{\*\htmltag84 <b>}Hello{\*\htmltag92 </b>}}";
+
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tsp-exp-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -986,6 +1107,10 @@ mod tests {
         files
     }
 
+    fn meta_of(files: &BTreeMap<String, Vec<u8>>, key: &str) -> serde_json::Value {
+        serde_json::from_slice(&files[key]).expect("metadata is JSON")
+    }
+
     fn lf(s: &str) -> String {
         s.replace("\r\n", "\n")
     }
@@ -1019,11 +1144,15 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "m/Hello World/body.txt",
                 "m/Hello World/message.md",
                 "m/Hello World/metadata.json",
                 "m/folder.json"
             ]
         );
+        // The kept original is a byte copy, CRLF and all (an inline constant, not a golden file:
+        // a checkout that converts line endings would corrupt a golden `.txt`).
+        assert_eq!(files["m/Hello World/body.txt"], b"Line one\r\nLine two\r\n");
         assert_eq!(
             lf(&String::from_utf8(files["m/Hello World/message.md"].clone()).unwrap()),
             lf(include_str!("../tests/golden/hello/message.md"))
@@ -1217,8 +1346,190 @@ mod tests {
         );
         let meta: serde_json::Value =
             serde_json::from_slice(&files["n/Empty one/metadata.json"]).unwrap();
-        assert_eq!(meta["body"]["plain_text"], "absent");
+        assert_eq!(meta["body"]["source"], "none");
+        assert_eq!(meta["body"]["originals"], serde_json::json!([]));
+        assert!(!files.keys().any(|k| k.contains("/body.")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- bodies (M4e-2b) ---------------------------------------------------
+
+    #[test]
+    fn a_native_html_message_exports_markdown_and_keeps_the_original_forms() {
+        let dir = temp_dir("nativehtml");
+        let file = dir.join("h.msg");
+        let html: &[u8] = b"<html><head><title>T</title><style>p{}</style></head><body><p>Hello <b>world</b></p></body></html>";
+        write_msg_forms(
+            &file,
+            "Page",
+            Some("Hello world"),
+            Some(html),
+            None,
+            Some(1252),
+        );
+        let out = dir.join("out");
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+
+        let files = tree_files(&out);
+        let names: Vec<&str> = files.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            vec![
+                "h/Page/body.html",
+                "h/Page/body.txt",
+                "h/Page/message.md",
+                "h/Page/metadata.json",
+                "h/folder.json"
+            ]
+        );
+        assert_eq!(files["h/Page/body.html"].as_slice(), html);
+        assert_eq!(files["h/Page/body.txt"].as_slice(), b"Hello world");
+        let md = String::from_utf8(files["h/Page/message.md"].clone()).unwrap();
+        assert!(md.starts_with("# Page\n\n- **Date:** 2022-06-18T04:26:40Z\n\n"));
+        assert!(md.contains("Hello **world**"));
+        assert!(!md.contains("p{}"));
+        assert!(md.ends_with('\n') && !md.contains('\r'));
+
+        let meta = meta_of(&files, "h/Page/metadata.json");
+        let body = &meta["body"];
+        assert_eq!(body["source"], "native_html");
+        assert_eq!(body["converter"]["name"], "htmd");
+        assert_eq!(body["converter"]["version"], "0.5.4");
+        assert_eq!(body["preprocessing"], serde_json::json!(["style", "title"]));
+        assert_eq!(body["internet_codepage"], 1252);
+        assert_eq!(body["originals"][0]["file"], "body.html");
+        assert_eq!(body["originals"][0]["bytes"], html.len());
+        assert_eq!(body["originals"][0]["note"], "as_stored");
+        assert_eq!(body["originals"][0]["sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(body["originals"][1]["file"], "body.txt");
+        assert_eq!(body["loss"], serde_json::json!([]));
+        assert_eq!(
+            meta["status_reasons"],
+            serde_json::json!(["other_properties_not_preserved"])
+        );
+
+        // Deterministic, including the converter thread.
+        let again = dir.join("again");
+        export(&file, &again, &opts(false, false));
+        assert_eq!(tree_files(&again), files);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_rtf_only_message_exports_the_recovered_html_and_the_rtf() {
+        assert_mela_premise(ENCAPSULATED);
+        let dir = temp_dir("rtfonly");
+        let file = dir.join("r.msg");
+        write_msg_forms(
+            &file,
+            "Rich",
+            Some("Hello"),
+            None,
+            Some(&mela(ENCAPSULATED)),
+            None,
+        );
+        let out = dir.join("out");
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+
+        let files = tree_files(&out);
+        assert_eq!(files["r/Rich/body.rtf"].as_slice(), ENCAPSULATED);
+        assert_eq!(files["r/Rich/body.html"].as_slice(), b"<b>Hello</b>");
+        let md = String::from_utf8(files["r/Rich/message.md"].clone()).unwrap();
+        assert!(md.contains("**Hello**"));
+        let body = meta_of(&files, "r/Rich/metadata.json")["body"].clone();
+        assert_eq!(body["source"], "rtf_html");
+        assert_eq!(
+            body["originals"][0]["note"],
+            "recovered_from_rtf_charset_declaration_stale"
+        );
+        assert_eq!(body["originals"][1]["file"], "body.rtf");
+        assert_eq!(body["originals"][2]["file"], "body.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_rtf_without_html_is_kept_and_the_plain_text_is_used() {
+        let rtf: &[u8] = br"{\rtf1\ansi Hello}";
+        assert_mela_premise(rtf);
+        let dir = temp_dir("plainrtf");
+        let file = dir.join("p.msg");
+        write_msg_forms(&file, "Plain", Some("Hello"), None, Some(&mela(rtf)), None);
+        let out = dir.join("out");
+        export(&file, &out, &opts(false, false));
+        let files = tree_files(&out);
+        assert_eq!(files["p/Plain/body.rtf"].as_slice(), rtf);
+        assert!(!files.contains_key("p/Plain/body.html"));
+        let meta = meta_of(&files, "p/Plain/metadata.json");
+        assert_eq!(meta["body"]["source"], "plain_text");
+        assert_eq!(meta["body"]["loss"][0]["reason"], "rtf_not_converted");
+        assert!(
+            meta["status_reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("formatted_bodies_not_converted"))
+        );
+        let md = String::from_utf8(files["p/Plain/message.md"].clone()).unwrap();
+        assert!(md.contains("```text\nHello\n```"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_rtf_that_cannot_be_decompressed_is_recorded_as_loss() {
+        let dir = temp_dir("badrtf");
+        let file = dir.join("b.msg");
+        write_msg_forms(&file, "Broken", Some("Hello"), None, Some(b"short"), None);
+        let out = dir.join("out");
+        export(&file, &out, &opts(false, false));
+        let files = tree_files(&out);
+        assert!(!files.contains_key("b/Broken/body.rtf"));
+        let meta = meta_of(&files, "b/Broken/metadata.json");
+        assert_eq!(meta["body"]["source"], "plain_text");
+        assert_eq!(
+            meta["body"]["loss"][0]["reason"],
+            "rtf_decompression_failed"
+        );
+        assert_eq!(meta["body"]["loss"][0]["count"], 1);
+        assert!(
+            meta["status_reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("formatted_bodies_not_converted"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_body_counters_tally_source_files_loss_and_cid_references() {
+        use crate::archive::body_outcome_with;
+        use crate::model::BodyForms;
+        let forms = BodyForms {
+            native_html: Some(b"<p>x</p>".to_vec()),
+            rtf: Some(br"{\rtf1\ansi Hello}".to_vec()),
+            plain_text: Some("x".to_string()),
+            ..BodyForms::default()
+        };
+        let outcome = body_outcome_with(&forms, &|_| Ok("![a](cid:one@x)".to_string()));
+        let mut report = ExportReport::default();
+        report.note_body(&outcome);
+        report.note_body(&outcome);
+        assert_eq!(report.body_source_native_html, 2);
+        assert_eq!(report.body_source_plain_text, 0);
+        assert_eq!(
+            (
+                report.body_files_kept_html,
+                report.body_files_kept_rtf,
+                report.body_files_kept_txt
+            ),
+            (2, 2, 2)
+        );
+        assert_eq!(report.body_cid_references_total, 2);
+        assert_eq!(report.body_loss.iter().sum::<u64>(), 0);
     }
 
     // ---- the overwrite matrix ----------------------------------------------
@@ -1467,11 +1778,11 @@ mod tests {
     fn tree_hashes_depend_on_paths_and_content() {
         let a = vec![Generated {
             rel: vec!["x".to_string(), "message.md".to_string()],
-            content: "one".to_string(),
+            content: b"one".to_vec(),
         }];
         let mut b = a.clone();
         assert_eq!(tree_hash(&a), tree_hash(&b));
-        b[0].content = "two".to_string();
+        b[0].content = b"two".to_vec();
         assert_ne!(tree_hash(&a), tree_hash(&b));
         let mut c = a.clone();
         c[0].rel[0] = "y".to_string();

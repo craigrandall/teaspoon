@@ -560,3 +560,58 @@ The default release build is about 6 s slower, from a single measurement; the fe
 ### Not yet confirmed
 
 The `body.rs` selection and loss paths are covered by unit tests with stand-in converters and by three real `htmd` conversions; they have not run on the corpus (M4e-2b and M4e-2c). The native-HTML decoding has no real data. The `html_conversion_failed` fallback has only been exercised through a stand-in that fails.
+
+## M4e-2b - the body in the export (release v0.1.31): verified on the corpus (owner review pending)
+
+Status as of 2026-10-14. The automated gate was run on the corpus and passed; the owner review of exported messages is pending, and the items under "Not done, or raised by the run" are open.
+
+**Build finding (first build of the drop).** The build failed under `-D warnings` with `field selection is never read` for `BodyOutcome` in `src/archive.rs` (`-D dead-code` implied by `-D warnings`). Resolution: the field was removed. The source used is in `Rendered`, the kept files are decided before `BodyOutcome` is built, and nothing else needs the selection; a test that reads the field only to satisfy the lint was rejected because it would keep a field alive that has no user. `cargo update --verbose` on the same machine moved `equivalent` 1.0.2 to 1.0.3 and `teaspoon` 0.1.30 to 0.1.31; `htmd` 0.5.4 (0.5.5 available) and `html-to-markdown-rs` 3.11.0 (3.17.2 available) were unchanged because both are pinned with `=`. Advice recorded in `docs/plans/m4-plan.md` (Decisions still needed, item 9): update neither in this change; update `htmd` as its own change after the corpus run and `--verify-bodies` exist.
+
+**What to run and report (the M4e-2b gate, in order):**
+
+1. `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`: clean; the number of tests passing (it was 272 at `v0.1.30`; expect more).
+2. `verify-split.ps1` against the pre-change baseline: the default, `--verify`, and PST outputs byte-identical (no diagnostic code changed).
+3. Export the corpus to a short `--out` and report the `export_*` lines. Expected: `export_readback_mismatches=0`; `export_body_loss_html_conversion_failed=0`; `export_body_loss_rtf_decompression_failed=0`; `export_body_source_native_html=0`; `export_body_source_rtf_html` equal to the count of exported messages with encapsulated HTML (27 of the 29 top-level files, plus any in the subdirectories); `export_body_files_kept_html` equal to that count; `export_body_files_kept_rtf` equal to the number of messages with an RTF; `export_body_files_kept_txt` equal to the number with a non-empty plain body. Record the new `export_tree_sha256` as the baseline (the `v0.1.25.1` value, `72d85534...c2e5`, no longer applies).
+4. A second export into a different directory: the same `export_tree_sha256`; a repeat into the same directory writes nothing.
+5. Reconciliation, counts only: every `metadata.json` has a `body` object; each kept file's size and SHA-256 equal its `originals` entry; the kept-file counts equal the report's.
+6. Owner review of two or three exported messages (suggested: a newsletter-template message, to confirm the document title and the invisible padding are gone from `message.md` and present in `body.html`, and a smaller message).
+
+**Results (run 2026-10-14 on Windows, corpus of 34 `.msg` messages: 29 top-level and 5 in subdirectories).**
+
+1. **Build and tests: pass.** `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (293 passed, 0 failed; 272 at `v0.1.30`; includes `fixture_corpus_verify_is_clean`, which passed), `cargo build --release`, and `cargo build --release --features bakeoff` are clean. A second `cargo update --verbose` after the fix locked 0 packages.
+2. **Diagnostic outputs unchanged: pass.** `verify-split.ps1`: the default output (850 bytes, 33 lines) and the `--verify` output (2705 bytes, 82 lines) are IDENTICAL to the baseline. `--verify` over the 29 top-level files: parity on every comparable field, `structural_gate_violations=0`, `rtf_decompressed_bytes_mismatch=1` with delta -1 (the known `msg_parser` dictionary divergence). The `verify-split.ps1` PST check printed `EMPTY (invalid check)` with 140 bytes on stderr; the cause has not been seen (no PST code changed in this release), so it is open.
+3. **PST dry run at a short `--out` (an open item since v0.1.22): recorded.** At `C:\o.31` (root 18 units): 154 entries, 10 folders, 60 messages, 84 attachment files, longest path 253 of 259 units, `plan_gate_violations=0`, `plan_budget_exceeded=0`. At `C:\o.31.run2` (root 23 units) the totals are identical and the longest relative path falls from 235 to 230 units because names are shortened further. The PST counts are the same as at `v0.1.22`.
+4. **Export of the `.msg` corpus: pass.** Counts reported by the first run (the second run into a different directory, and the repeat run into the first, printed the same body counts):
+
+| Key | Value |
+|---|---|
+| `plan_entries_total` / `plan_messages` / `plan_folders` | 74 / 34 / 3 |
+| `plan_gate_violations` / `plan_budget_exceeded` / `plan_max_relative_path_units` | 0 / 0 / 181 |
+| `export_files_written` (first run) | 171 (4 `folder.json`, 68 `message.md` and `metadata.json`, 99 kept body files) |
+| `export_readback_mismatches` | 0 |
+| `export_bodies_plain_present` / `_empty` / `_absent` | 34 / 0 / 0 |
+| `export_body_source_native_html` / `_rtf_html` / `_plain_text` / `_none` | 0 / 31 / 3 / 0 |
+| `export_body_files_kept_html` / `_rtf` / `_txt` | 31 / 34 / 34 |
+| `export_body_loss_tables_flattened` | 237 |
+| `export_body_loss_rtf_not_converted` | 3 |
+| `export_body_loss_undecodable_bytes_replaced` | 1 |
+| `export_body_loss_invisible_padding_removed` | 1 |
+| `export_body_loss_html_conversion_failed` / `_rtf_decompression_failed` | 0 / 0 |
+| `export_body_cid_references_total` | 26 |
+| `export_tree_sha256` | `dafb32909fa95df2be2c15b46add0bed03d1de9e2c8a784635d6ec52d34893c8` |
+
+   The new baseline tree hash is the one above (the `v0.1.25.1` value `72d85534...c2e5` no longer applies). Reading the counts: 31 of the 34 messages carry encapsulated HTML (27 of the 29 top-level files, so 4 of the 5 in subdirectories) and use the HTML recovered from the RTF; the other 3 have an RTF with no encapsulated HTML, fall back to the plain text, and are recorded as `rtf_not_converted`, which is the same 3. No message has native HTML, none failed conversion, and none failed RTF decompression, as expected. The 1 undecodable byte is the known single Windows-1255 byte.
+5. **Determinism and re-run: pass.** The export into `C:\o.31` and the one into `C:\o.31.b` (a different directory, root 12 and 14 units) have the same `export_tree_sha256`. Repeating the export into `C:\o.31` wrote nothing (`export_target_state=owned`, `export_preflight_identical=171`, `export_files_written=0`, `export_files_unchanged=171`, `export_consent=not_needed`).
+6. **Reconciliation: pass (counts only).** 34 `metadata.json` files; every one has a `body` object (0 without); 31 `body.html`, 34 `body.rtf`, and 34 `body.txt` files, equal to the `export_body_files_kept_*` counts; of 99 kept files (31 + 34 + 34), the size and SHA-256 of every file equal its `originals` entry (0 mismatches, 0 missing).
+
+**Not done, or raised by the run (carried forward):**
+
+- **Owner review of exported messages (gate item 6) has not been reported.** It is the check that the document title and the invisible padding are gone from `message.md` and present in `body.html`, and that the Markdown reads well.
+- **Padding: one run was removed in the whole corpus.** The body ADR evidence expected padding in at least two messages of the same newsletter template. Possible reasons are that `htmd` already drops or rewrites some of the characters, or that only one exported message carries a run of 8 or more; neither has been checked. A counts-only check (padding characters remaining in `message.md`, and in `body.html`) is in the release notes of this change; the originals are kept, so nothing is lost either way.
+- **`tables_flattened` is 237 rows over the 31 HTML messages.** It is recorded loss, not a failure, and is consistent with layout-table newsletters. The ADR question remains open: whether the count should be of rows or of tables, and how large a count should become a status concern at M4g.
+- **The `verify-split.ps1` PST check is EMPTY** (cause unseen).
+- **Not covered by this gate:** the content-preservation check over the corpus (`--verify-bodies`, M4e-2c).
+
+**Premises this change could not check** (the author had no Rust toolchain): that `compressed-rtf` accepts an MS-OXRTFCP uncompressed (`MELA`) container (two export tests begin with a check that fails with a clear message if it does not); the exact Markdown `htmd` produces for the small HTML in the export tests (assertions use `contains`); and `rustfmt` output (run `cargo fmt`).
+
+**Open items carried forward:** `--verify-bodies` (M4e-2c); the native-HTML path on real data (the corpus has none); a string-typed `PidTagBodyHtml` is not read; `rtf_decompression_failed` was 0 on the corpus; the streaming export (M4h-0) for multi-gigabyte inputs; the `htmd` update after the evidence exists; the items listed under "Not done, or raised by the run".
