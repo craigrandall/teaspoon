@@ -615,3 +615,39 @@ Status as of 2026-10-14. The automated gate was run on the corpus and passed; th
 **Premises this change could not check** (the author had no Rust toolchain): that `compressed-rtf` accepts an MS-OXRTFCP uncompressed (`MELA`) container (two export tests begin with a check that fails with a clear message if it does not); the exact Markdown `htmd` produces for the small HTML in the export tests (assertions use `contains`); and `rustfmt` output (run `cargo fmt`).
 
 **Open items carried forward:** `--verify-bodies` (M4e-2c); the native-HTML path on real data (the corpus has none); a string-typed `PidTagBodyHtml` is not read; `rtf_decompression_failed` was 0 on the corpus; the streaming export (M4h-0) for multi-gigabyte inputs; the `htmd` update after the evidence exists; the items listed under "Not done, or raised by the run".
+
+## M4e-2c: `--verify-bodies` (v0.1.32, 2026-10-15)
+
+Built clean, 312 tests pass (293 plus 19 new in `src/verify_bodies.rs`). `cargo fmt --check` and `clippy -D warnings` output and the corpus export tree hash were not reported for this tag.
+
+Command: `tsp --verify-bodies --recursive <corpus>` (34 files, 0 subdirectories skipped):
+
+```text
+open_errors=0
+messages_read=34
+body_selected_native_html=0
+body_selected_rtf_html=31
+body_selected_plain_text=3
+body_selected_none=0
+html_bodies_checked=31
+html_conversions_failed=0
+words_html_total=26145
+words_markdown_total=26385
+words_matched_in_order=26145
+words_missing_from_markdown=0
+words_extra_in_markdown=0
+markdown_syntax_words_excused=240
+missing_runs=0
+extra_runs=0
+unresynced_words=0
+html_unresolved_entities_total=0
+messages_identical=31
+messages_with_difference=0
+body_check_gate_violations=0
+```
+
+Reading: every HTML word of the 31 checked bodies appears in the Markdown in the same order, and every Markdown word is either matched or one of 240 syntax words (26,145 + 240 = 26,385). The totals are not comparable with the M4e-0 bake-off's 26,952 words over 27 bodies (different tokenization: the bake-off split at every tag and counted title, head, and padding text; this check joins inline tags and removes them), and the two were not reconciled.
+
+Limits: the check starts from the HTML after the production preprocessing, so text removed by the preprocessing is not covered; emphasis and padding characters are stripped on both sides by design; the 240 excused words were not listed; one producer; the comparison is greedy (zero is exact, a non-zero count would be approximate). Differences from the wording of ADR decision 6 are listed in the plan (v4.21, "What changed from v4.20", item 5).
+
+`verify-split.ps1 -Pst tsp-tester.pst` (baseline v0.1.19.1 against the new build): default 850 bytes / 33 lines, `--verify` 2705 / 82, PST diagnostic 1092 / 44, all IDENTICAL with empty stderr; `structural_gate_violations=0`, `rtf_decompressed_bytes_mismatch=1`, `embedded_message_class_readable_total=1`. The EMPTY PST check recorded at v0.1.31 did not recur.

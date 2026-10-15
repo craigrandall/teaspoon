@@ -52,6 +52,25 @@ pub(crate) struct Args {
     #[arg(long, value_name = "DIR", requires = "verify_deencap")]
     pub(crate) dump_deencap: Option<PathBuf>,
 
+    /// Content-preservation check (M4e-2c): for each message whose body is HTML (native, or
+    /// recovered from the RTF), run the export's own preprocessing and conversion and compare,
+    /// in order, the visible words of the HTML with the words of the Markdown. Reads real
+    /// content internally and prints only counts (words in each, words matched in order, words
+    /// missing, words extra, per-message difference counts) -- never the words.
+    #[arg(
+        long,
+        conflicts_with_all = ["verify", "verify_envelope", "verify_deencap", "dump_deencap", "bakeoff_md", "bakeoff_dump", "out", "dry_run"]
+    )]
+    pub(crate) verify_bodies: bool,
+
+    /// With `--verify-bodies`, write the two normalized word lists (one word per line) of every
+    /// message that has a difference into DIR (`NNN.html.words.txt`, `NNN.markdown.words.txt`,
+    /// where NNN is the message's position in the scanned list), so they can be compared
+    /// locally with any diff tool. This is the only place message content goes; standard output
+    /// stays content-free. DIR must be new or empty.
+    #[arg(long, value_name = "DIR", requires = "verify_bodies")]
+    pub(crate) dump_bodies: Option<PathBuf>,
+
     /// Run the HTML-to-Markdown bake-off (M4e-0) over the `NNN.custom.html` files in the input
     /// directory (the directory `--dump-deencap` wrote) and a built-in set of synthetic and
     /// adversarial cases, and print only content-free scores. Needs a build with
@@ -67,8 +86,9 @@ pub(crate) struct Args {
     #[arg(long, value_name = "DIR", requires = "bakeoff_md")]
     pub(crate) bakeoff_dump: Option<PathBuf>,
 
-    /// With `--verify-envelope` or `--verify-deencap`, descend into subdirectories of a directory
-    /// input (the default scan is non-recursive, as for `--verify`).
+    /// With `--verify-envelope`, `--verify-deencap`, or `--verify-bodies`, descend into
+    /// subdirectories of a directory input (the default scan is non-recursive, as for
+    /// `--verify`).
     #[arg(long)]
     pub(crate) recursive: bool,
 
