@@ -1,18 +1,22 @@
-//! Export writer (M4c walking skeleton, body added in M4e-2b): `tsp <input.msg|dir> --out <dir>`.
+//! Export writer (M4c walking skeleton, body added in M4e-2b, streamed in M4h-0):
+//! `tsp <input.msg|dir> --out <dir>`.
 //!
 //! Pipeline: read the source tree, plan names and paths (the same pure planner as `--dry-run`),
-//! refuse if the plan breaks a gate, render every file in memory, compare with what is already
-//! on disk (preflight, counts only), decide consent, write through a staging directory, read
-//! everything back, and print content-free counts. Archive content goes only into the directory
-//! the user named; stdout and stderr never carry names, subjects, or paths.
+//! refuse if the plan breaks a gate, refuse early if the target directory is not ours, then
+//! render each message once and write its files straight to the staging directory (`stage.rs`),
+//! keeping only a manifest (path, size, SHA-256) in memory. The manifest is compared with what
+//! is already on disk (preflight, counts only), consent is decided, the staged files are renamed
+//! into place (identical ones are deleted from staging), and everything is read back by hash.
+//! Archive content goes only into the directory the user named; stdout and stderr never carry
+//! names, subjects, or paths.
 //!
 //! Limits, stated plainly: only `.msg` input is exported, with its body (converted to Markdown
 //! in `message.md`, plus each original body form kept as `body.html`, `body.rtf`, or `body.txt`);
-//! attachments and embedded messages are counted and recorded as not extracted (M4f); the whole
-//! archive, original bodies included, is rendered in memory before anything is written (fine for
-//! `.msg` input of this size, and the reason M4h pulls streaming forward -- see the M4h plan);
-//! each file is replaced atomically, but the archive as a whole is not all-or-nothing -- an
-//! interrupted run leaves the root `folder.json` marked `incomplete`.
+//! attachments and embedded messages are counted and recorded as not extracted (M4f). Memory no
+//! longer grows with the archive (one message at a time, plus the manifest), but `--out` and its
+//! `.tsp-tmp` staging directory are now created before the consent decision and removed again if
+//! the run is refused; each file is replaced atomically, but the archive as a whole is not
+//! all-or-nothing -- an interrupted run leaves the root `folder.json` marked `incomplete`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -32,12 +36,10 @@ use crate::dry_run::{SourceKind, classify_source, input_leaf_name, root_stem, ro
 use crate::naming::{collision_key, utf16_len};
 use crate::plan::{EntryKind, Plan, Policy, SourceFolder, SourceMessage, plan_export, verify_plan};
 use crate::source_msg::{MsgFileMap, build_msg_export_source, read_message_content};
+use crate::stage::{
+    Disposition, STAGING_TAIL_UNITS, StagedFile, Stager, hash_file, hex, join_path,
+};
 
-/// Staging directory directly under `--out`. Files are written here under short numeric names
-/// and then renamed into place, so a half-written file never appears at its final path.
-const STAGING_DIR: &str = ".tsp-tmp";
-/// `<out>\.tsp-tmp\<up to 10 digits>`: the longest staged path is `out + 1 + 8 + 1 + 10`.
-const STAGING_TAIL_UNITS: usize = 1 + 8 + 1 + 10;
 const MAX_PATH_UNITS: usize = 259;
 
 #[derive(Debug, Clone)]
@@ -159,12 +161,16 @@ fn refusal_message(reason: RefuseReason, p: &Preflight) -> String {
     }
 }
 
-/// One file the export will write, relative to the archive root. The content is bytes: the text
-/// files are UTF-8, and the kept original body files are byte copies of source content.
-#[derive(Debug, Clone)]
-struct Generated {
-    rel: Vec<String>,
-    content: Vec<u8>,
+/// A preflight with no counts, for a refusal that happens before any file is compared.
+fn empty_preflight(ownership: Ownership) -> Preflight {
+    Preflight {
+        ownership,
+        to_create: 0,
+        identical: 0,
+        to_replace: 0,
+        blocked: 0,
+        unrelated_present: 0,
+    }
 }
 
 /// Content-free results printed at the end (all keys always printed, zero when not applicable).
@@ -302,14 +308,6 @@ fn print_export_report(r: &ExportReport) {
 // Small helpers
 // -----------------------------------------------------------------------------
 
-fn hex(bytes: impl AsRef<[u8]>) -> String {
-    bytes
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
-}
-
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
     let mut file = std::fs::File::open(path).context("failed to open a source file for hashing")?;
     let mut hasher = Sha256::new();
@@ -343,14 +341,6 @@ fn relative_source_name(input: &Path, file: &Path) -> String {
     file.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-fn join_path(root: &Path, rel: &[String]) -> PathBuf {
-    let mut path = root.to_path_buf();
-    for part in rel {
-        path.push(part);
-    }
-    path
 }
 
 fn rel_with(components: &[String], leaf: &str) -> Vec<String> {
@@ -425,24 +415,34 @@ fn index_tree<'a>(
 }
 
 // -----------------------------------------------------------------------------
-// Rendering the archive in memory
+// Rendering the archive into the staging directory, one message at a time
 // -----------------------------------------------------------------------------
 
-struct Rendered {
-    /// Every file, including the root `folder.json` (complete status), sorted by path.
-    files: Vec<Generated>,
-    root: RootSpec,
+/// The read-only inputs of the staging pass, bundled so the function that stages stays short.
+struct ArchiveInput<'a> {
+    input: &'a Path,
+    tree: &'a SourceFolder,
+    plan: &'a Plan,
+    policy: &'a Policy,
+    sources: &'a MsgFileMap,
 }
 
-fn render_archive(
-    input: &Path,
-    tree: &SourceFolder,
-    plan: &Plan,
-    policy: &Policy,
-    sources: &MsgFileMap,
+/// Renders every file of the archive and hands it to the stager the moment it exists, so only
+/// one message's content is in memory at a time. Returns the root description, which the commit
+/// uses for the `incomplete` marker (the complete root is staged like any other file, last).
+fn stage_archive(
+    archive: &ArchiveInput<'_>,
     source: SourceRecord,
     report: &mut ExportReport,
-) -> Result<Rendered> {
+    stager: &mut Stager,
+) -> Result<RootSpec> {
+    let ArchiveInput {
+        input,
+        tree,
+        plan,
+        policy,
+        sources,
+    } = *archive;
     let mut folders = BTreeMap::new();
     let mut messages = BTreeMap::new();
     index_tree(tree, &mut folders, &mut messages);
@@ -462,72 +462,6 @@ fn render_archive(
                     kind,
                     directory_name: last.clone(),
                 });
-        }
-    }
-
-    let mut files: Vec<Generated> = Vec::new();
-    for entry in &plan.entries {
-        match entry.kind {
-            EntryKind::Folder => {
-                if !folders.contains_key(&entry.source_id) {
-                    bail!("internal error: a planned folder has no source folder");
-                }
-                let meta = FolderMetadata::folder(
-                    NameRecord {
-                        original: entry.original.clone(),
-                        adjustments: adjustment_names(&entry.flags),
-                    },
-                    children.remove(&entry.components).unwrap_or_default(),
-                );
-                files.push(Generated {
-                    rel: rel_with(&entry.components, FOLDER_JSON_NAME),
-                    content: to_json(&meta)?.into_bytes(),
-                });
-                report.folder_files += 1;
-            }
-            EntryKind::Message => {
-                let message = messages
-                    .get(&entry.source_id)
-                    .ok_or_else(|| anyhow!("internal error: a planned message has no source"))?;
-                let path = sources
-                    .get(&entry.source_id)
-                    .ok_or_else(|| anyhow!("internal error: a planned message has no file"))?;
-                let content = read_message_content(path)?;
-                let outcome = body_outcome(&content.bodies);
-                let meta = message_metadata(
-                    &relative_source_name(input, path),
-                    &content,
-                    &outcome,
-                    NameRecord {
-                        original: entry.original.clone(),
-                        adjustments: adjustment_names(&entry.flags),
-                    },
-                    message.attachments.len(),
-                );
-                files.push(Generated {
-                    rel: rel_with(&entry.components, MESSAGE_MD_NAME),
-                    content: render_message_md(&content, &outcome).into_bytes(),
-                });
-                files.push(Generated {
-                    rel: rel_with(&entry.components, METADATA_JSON_NAME),
-                    content: to_json(&meta)?.into_bytes(),
-                });
-                report.message_directories += 1;
-                match content.bodies.plain_text.as_deref() {
-                    None => report.bodies_plain_absent += 1,
-                    Some(text) if text.trim().is_empty() => report.bodies_plain_empty += 1,
-                    Some(_) => report.bodies_plain_present += 1,
-                }
-                report.note_body(&outcome);
-                for original in outcome.originals {
-                    files.push(Generated {
-                        rel: rel_with(&entry.components, original.name),
-                        content: original.bytes,
-                    });
-                }
-            }
-            EntryKind::AttachmentFile => report.attachments_not_extracted += 1,
-            EntryKind::EmbeddedMessage => report.embedded_messages_not_extracted += 1,
         }
     }
 
@@ -551,30 +485,76 @@ fn render_archive(
         },
         children: children.remove(&Vec::new()).unwrap_or_default(),
     };
-    files.push(Generated {
-        rel: vec![FOLDER_JSON_NAME.to_string()],
-        content: root.render(STATUS_COMPLETE)?.into_bytes(),
-    });
-    files.sort_by(|a, b| a.rel.cmp(&b.rel));
-    report.folder_files += 1;
-    Ok(Rendered { files, root })
-}
 
-fn is_root_file(file: &Generated) -> bool {
-    file.rel.len() == 1 && file.rel[0] == FOLDER_JSON_NAME
-}
-
-/// One hash over all relative paths and file hashes, so two exports can be compared by a single
-/// line of output.
-fn tree_hash(files: &[Generated]) -> String {
-    let mut hasher = Sha256::new();
-    for file in files {
-        hasher.update(file.rel.join("/").as_bytes());
-        hasher.update([0u8]);
-        hasher.update(hex(Sha256::digest(&file.content)).as_bytes());
-        hasher.update(b"\n");
+    for entry in &plan.entries {
+        match entry.kind {
+            EntryKind::Folder => {
+                if !folders.contains_key(&entry.source_id) {
+                    bail!("internal error: a planned folder has no source folder");
+                }
+                let meta = FolderMetadata::folder(
+                    NameRecord {
+                        original: entry.original.clone(),
+                        adjustments: adjustment_names(&entry.flags),
+                    },
+                    children.remove(&entry.components).unwrap_or_default(),
+                );
+                stager.add(
+                    rel_with(&entry.components, FOLDER_JSON_NAME),
+                    to_json(&meta)?.as_bytes(),
+                )?;
+                report.folder_files += 1;
+            }
+            EntryKind::Message => {
+                let message = messages
+                    .get(&entry.source_id)
+                    .ok_or_else(|| anyhow!("internal error: a planned message has no source"))?;
+                let path = sources
+                    .get(&entry.source_id)
+                    .ok_or_else(|| anyhow!("internal error: a planned message has no file"))?;
+                let content = read_message_content(path)?;
+                let outcome = body_outcome(&content.bodies);
+                let meta = message_metadata(
+                    &relative_source_name(input, path),
+                    &content,
+                    &outcome,
+                    NameRecord {
+                        original: entry.original.clone(),
+                        adjustments: adjustment_names(&entry.flags),
+                    },
+                    message.attachments.len(),
+                );
+                stager.add(
+                    rel_with(&entry.components, MESSAGE_MD_NAME),
+                    render_message_md(&content, &outcome).as_bytes(),
+                )?;
+                stager.add(
+                    rel_with(&entry.components, METADATA_JSON_NAME),
+                    to_json(&meta)?.as_bytes(),
+                )?;
+                report.message_directories += 1;
+                match content.bodies.plain_text.as_deref() {
+                    None => report.bodies_plain_absent += 1,
+                    Some(text) if text.trim().is_empty() => report.bodies_plain_empty += 1,
+                    Some(_) => report.bodies_plain_present += 1,
+                }
+                report.note_body(&outcome);
+                for original in &outcome.originals {
+                    stager.add(rel_with(&entry.components, original.name), &original.bytes)?;
+                }
+            }
+            EntryKind::AttachmentFile => report.attachments_not_extracted += 1,
+            EntryKind::EmbeddedMessage => report.embedded_messages_not_extracted += 1,
+        }
     }
-    hex(hasher.finalize())
+
+    stager.add(
+        vec![FOLDER_JSON_NAME.to_string()],
+        root.render(STATUS_COMPLETE)?.as_bytes(),
+    )?;
+    report.folder_files += 1;
+    stager.finish();
+    Ok(root)
 }
 
 // -----------------------------------------------------------------------------
@@ -634,7 +614,7 @@ fn key_of(parts: &[String]) -> String {
         .join("/")
 }
 
-fn count_unrelated(root_dir: &Path, files: &[Generated]) -> usize {
+fn count_unrelated(root_dir: &Path, files: &[StagedFile]) -> usize {
     let mut known: BTreeSet<String> = BTreeSet::new();
     for file in files {
         for i in 1..=file.rel.len() {
@@ -663,33 +643,56 @@ fn count_unrelated(root_dir: &Path, files: &[Generated]) -> usize {
     unrelated
 }
 
-fn preflight(root_dir: &Path, files: &[Generated], source: &SourceRecord) -> Preflight {
-    let ownership = classify_target(root_dir, source);
-    let mut p = Preflight {
-        ownership,
-        to_create: 0,
-        identical: 0,
-        to_replace: 0,
-        blocked: 0,
-        unrelated_present: 0,
-    };
+/// Compares the manifest with the target by size and hash (an existing file is streamed through
+/// the hasher, never held whole), and records for each staged file how it compares, so the
+/// commit does not hash the target again.
+fn compare_with_target(
+    root_dir: &Path,
+    ownership: Ownership,
+    files: &[StagedFile],
+) -> (Preflight, Vec<Disposition>) {
+    let mut p = empty_preflight(ownership);
+    let mut dispositions = Vec::with_capacity(files.len());
     for file in files {
-        match std::fs::read(join_path(root_dir, &file.rel)) {
-            Ok(existing) => {
-                if existing == file.content {
-                    p.identical += 1;
-                } else {
-                    p.to_replace += 1;
-                }
+        let path = join_path(root_dir, &file.rel);
+        let disposition = match std::fs::metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                p.to_create += 1;
+                Disposition::Create
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => p.to_create += 1,
-            Err(_) => p.blocked += 1,
-        }
+            Err(_) => {
+                p.blocked += 1;
+                Disposition::Replace
+            }
+            Ok(meta) if !meta.is_file() => {
+                p.blocked += 1;
+                Disposition::Replace
+            }
+            Ok(meta) if meta.len() != file.size => {
+                p.to_replace += 1;
+                Disposition::Replace
+            }
+            Ok(_) => match hash_file(&path) {
+                Ok((digest, _)) if digest == file.digest => {
+                    p.identical += 1;
+                    Disposition::Identical
+                }
+                Ok(_) => {
+                    p.to_replace += 1;
+                    Disposition::Replace
+                }
+                Err(_) => {
+                    p.blocked += 1;
+                    Disposition::Replace
+                }
+            },
+        };
+        dispositions.push(disposition);
     }
     if ownership == Ownership::Owned {
         p.unrelated_present = count_unrelated(root_dir, files);
     }
-    p
+    (p, dispositions)
 }
 
 /// Asks on standard error (standard output stays counts-only). Only an explicit yes continues.
@@ -707,110 +710,13 @@ pub(crate) fn prompt_for_consent(p: &Preflight) -> bool {
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-// -----------------------------------------------------------------------------
-// Writing
-// -----------------------------------------------------------------------------
-
-fn prepare_staging(staging: &Path) -> Result<()> {
-    match std::fs::read_dir(staging) {
-        Ok(entries) => {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
-                let leftover =
-                    is_file && !name.is_empty() && name.chars().all(|c| c.is_ascii_digit());
-                if !leftover {
-                    bail!(
-                        "the staging directory .tsp-tmp already holds entries this tool did not create; remove it and retry"
-                    );
-                }
-                std::fs::remove_file(entry.path())
-                    .context("failed to remove a leftover staged file")?;
-            }
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(staging).context("failed to create the staging directory")
-        }
-        Err(_) => bail!("the staging path .tsp-tmp exists but is not a readable directory"),
+/// Drops the staged files after a refusal or a failure, and removes `--out` again if this run
+/// created it and nothing else is in it.
+fn abandon(stager: Stager, out: &Path, out_existed: bool) {
+    stager.discard();
+    if !out_existed {
+        let _ = std::fs::remove_dir(out);
     }
-}
-
-fn put_file(staging: &Path, counter: &mut u64, final_path: &Path, content: &[u8]) -> Result<()> {
-    if let Some(parent) = final_path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create an output directory")?;
-    }
-    *counter += 1;
-    let staged = staging.join(counter.to_string());
-    std::fs::write(&staged, content).context("failed to write a staged file")?;
-    // On Windows `rename` replaces an existing file (MoveFileExW with MOVEFILE_REPLACE_EXISTING).
-    std::fs::rename(&staged, final_path).context("failed to move a staged file into place")?;
-    Ok(())
-}
-
-/// Writes only what differs. The root `folder.json` is written as `incomplete` first and
-/// replaced with the complete version last, so an interrupted run is recognizable. Returns
-/// (files written, files left unchanged).
-fn write_archive(
-    out: &Path,
-    root_dir: &Path,
-    rendered: &Rendered,
-    pre: &Preflight,
-) -> Result<(usize, usize)> {
-    if pre.to_create + pre.to_replace == 0 {
-        return Ok((0, rendered.files.len()));
-    }
-    std::fs::create_dir_all(out).context("failed to create the output directory")?;
-    let staging = out.join(STAGING_DIR);
-    prepare_staging(&staging)?;
-    let mut counter = 0u64;
-
-    let root_path = root_dir.join(FOLDER_JSON_NAME);
-    let incomplete_root = rendered.root.render(STATUS_INCOMPLETE)?;
-    put_file(
-        &staging,
-        &mut counter,
-        &root_path,
-        incomplete_root.as_bytes(),
-    )?;
-
-    let mut written = 0usize;
-    let mut unchanged = 0usize;
-    let mut root_file: Option<&Generated> = None;
-    for file in &rendered.files {
-        if is_root_file(file) {
-            root_file = Some(file);
-            continue;
-        }
-        let path = join_path(root_dir, &file.rel);
-        let same = std::fs::read(&path)
-            .map(|existing| existing == file.content)
-            .unwrap_or(false);
-        if same {
-            unchanged += 1;
-        } else {
-            put_file(&staging, &mut counter, &path, &file.content)?;
-            written += 1;
-        }
-    }
-    if let Some(file) = root_file {
-        put_file(&staging, &mut counter, &root_path, &file.content)?;
-        written += 1;
-    }
-    // Best effort: the directory is empty now; a failure here leaves only an empty folder.
-    let _ = std::fs::remove_dir(&staging);
-    Ok((written, unchanged))
-}
-
-fn read_back_mismatches(root_dir: &Path, files: &[Generated]) -> usize {
-    files
-        .iter()
-        .filter(|file| {
-            std::fs::read(join_path(root_dir, &file.rel))
-                .map(|bytes| bytes != file.content)
-                .unwrap_or(true)
-        })
-        .count()
 }
 
 // -----------------------------------------------------------------------------
@@ -868,33 +774,53 @@ pub(crate) fn run_export(
     if gate.violations() > 0 || plan.counters.budget_exceeded > 0 {
         report.result = refusal_label(RefuseReason::PlanOverBudget);
         print_export_report(&report);
-        let none = Preflight {
-            ownership: Ownership::Absent,
-            to_create: 0,
-            identical: 0,
-            to_replace: 0,
-            blocked: 0,
-            unrelated_present: 0,
-        };
-        eprintln!("{}", refusal_message(RefuseReason::PlanOverBudget, &none));
+        eprintln!(
+            "{}",
+            refusal_message(
+                RefuseReason::PlanOverBudget,
+                &empty_preflight(Ownership::Absent)
+            )
+        );
         return Ok(ExportStatus::Refused);
     }
 
     let source = source_record(input, &sources, options.source_hash)?;
-    let rendered = render_archive(
-        input,
-        &tree,
-        &plan,
-        &policy,
-        &sources,
-        source.clone(),
-        &mut report,
-    )?;
-    report.tree_sha256 = tree_hash(&rendered.files);
 
+    // A target that is not ours is refused before anything is rendered or staged.
     let root_dir = out.join(&stem);
-    let pre = preflight(&root_dir, &rendered.files, &source);
-    report.target_state = pre.ownership.label();
+    let ownership = classify_target(&root_dir, &source);
+    report.target_state = ownership.label();
+    let early_refusal = match ownership {
+        Ownership::NotOwned => Some(RefuseReason::NotOwned),
+        Ownership::OtherSource => Some(RefuseReason::SourceMismatch),
+        Ownership::Absent | Ownership::Empty | Ownership::Owned => None,
+    };
+    if let Some(reason) = early_refusal {
+        report.result = refusal_label(reason);
+        print_export_report(&report);
+        eprintln!("{}", refusal_message(reason, &empty_preflight(ownership)));
+        return Ok(ExportStatus::Refused);
+    }
+
+    let out_existed = out.exists();
+    let mut stager = Stager::begin(out)?;
+    let archive = ArchiveInput {
+        input,
+        tree: &tree,
+        plan: &plan,
+        policy: &policy,
+        sources: &sources,
+    };
+    let root = match stage_archive(&archive, source, &mut report, &mut stager) {
+        Ok(root) => root,
+        Err(error) => {
+            abandon(stager, out, out_existed);
+            return Err(error);
+        }
+    };
+    report.tree_sha256 = stager.tree_hash();
+
+    let (pre, dispositions) = compare_with_target(&root_dir, ownership, stager.files());
     report.pre_to_create = pre.to_create;
     report.pre_identical = pre.identical;
     report.pre_to_replace = pre.to_replace;
@@ -930,14 +856,21 @@ pub(crate) fn run_export(
         }
     };
     if !proceed {
+        abandon(stager, out, out_existed);
         print_export_report(&report);
         return Ok(ExportStatus::Refused);
     }
 
-    let (written, unchanged) = write_archive(out, &root_dir, &rendered, &pre)?;
+    let incomplete_root = root.render(STATUS_INCOMPLETE)?;
+    let (written, unchanged) = stager.commit(
+        &root_dir,
+        incomplete_root.as_bytes(),
+        &dispositions,
+        pre.to_create + pre.to_replace,
+    )?;
     report.files_written = written;
     report.files_unchanged = unchanged;
-    report.readback_mismatches = read_back_mismatches(&root_dir, &rendered.files);
+    report.readback_mismatches = stager.read_back_mismatches(&root_dir);
     print_export_report(&report);
     if report.readback_mismatches > 0 {
         bail!(
@@ -951,6 +884,7 @@ pub(crate) fn run_export(
 mod tests {
     use super::*;
     use crate::cli::Args;
+    use crate::stage::STAGING_DIR;
     use clap::Parser;
 
     // ---- synthetic input ----------------------------------------------------
@@ -1211,6 +1145,10 @@ mod tests {
             ExportStatus::Completed
         );
         assert_eq!(tree_files(&out), before);
+        assert!(
+            !out.join(STAGING_DIR).exists(),
+            "the staged copies of identical files are removed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1543,15 +1481,16 @@ mod tests {
         let target = out.join("m").join("Hello World").join("message.md");
         let good = std::fs::read(&target).unwrap();
 
-        // Not interactive, no --overwrite: refused, file untouched.
+        // Not interactive, no --overwrite: refused, file untouched, nothing left staged.
         std::fs::write(&target, b"edited by hand").unwrap();
         assert_eq!(
             export(&input, &out, &opts(false, false)),
             ExportStatus::Refused
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"edited by hand");
+        assert!(!out.join(STAGING_DIR).exists());
 
-        // Interactive and the user says no: refused, file untouched.
+        // Interactive and the user says no: refused, file untouched, nothing left staged.
         let mut asked = 0;
         let status = run_export(&input, &out, &opts(false, true), &mut |p| {
             asked += 1;
@@ -1562,6 +1501,7 @@ mod tests {
         assert_eq!(status, ExportStatus::Refused);
         assert_eq!(asked, 1);
         assert_eq!(std::fs::read(&target).unwrap(), b"edited by hand");
+        assert!(!out.join(STAGING_DIR).exists());
 
         // Interactive and the user says yes: replaced.
         let status = run_export(&input, &out, &opts(false, true), &mut |_| true).unwrap();
@@ -1614,12 +1554,13 @@ mod tests {
         std::fs::create_dir_all(out.join("m")).unwrap();
         std::fs::write(out.join("m").join("keep.txt"), b"not yours").unwrap();
 
-        // Even with --overwrite.
+        // Even with --overwrite, and before anything is staged.
         assert_eq!(
             export(&input, &out, &opts(true, false)),
             ExportStatus::Refused
         );
         assert_eq!(tree_files(&out).len(), 1);
+        assert!(!out.join(STAGING_DIR).exists());
         assert_eq!(
             std::fs::read(out.join("m").join("keep.txt")).unwrap(),
             b"not yours"
@@ -1663,6 +1604,7 @@ mod tests {
             ExportStatus::Refused
         );
         assert_eq!(tree_files(&out), before);
+        assert!(!out.join(STAGING_DIR).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1732,6 +1674,135 @@ mod tests {
         assert!(err.to_string().contains("not implemented"));
     }
 
+    // ---- the streamed pipeline (M4h-0) ---------------------------------------
+
+    #[test]
+    fn the_preflight_compares_the_manifest_with_the_target_by_size_and_hash() {
+        let dir = temp_dir("compare");
+        let out = dir.join("out");
+        let root_dir = out.join("m");
+        std::fs::create_dir_all(root_dir.join("a")).unwrap();
+        std::fs::write(root_dir.join("a").join("same.txt"), b"same").unwrap();
+        std::fs::write(root_dir.join("a").join("size.txt"), b"longer than staged").unwrap();
+        std::fs::write(root_dir.join("a").join("hash.txt"), b"four").unwrap();
+        std::fs::create_dir_all(root_dir.join("a").join("blocked.txt")).unwrap();
+        std::fs::write(root_dir.join("stray.txt"), b"mine").unwrap();
+
+        let mut stager = Stager::begin(&out).unwrap();
+        for (name, content) in [
+            ("same.txt", &b"same"[..]),
+            ("size.txt", b"short"),
+            ("hash.txt", b"FOUR"),
+            ("blocked.txt", b"x"),
+            ("new.txt", b"new"),
+        ] {
+            stager
+                .add(vec!["a".to_string(), name.to_string()], content)
+                .unwrap();
+        }
+        stager.finish();
+        let (pre, dispositions) = compare_with_target(&root_dir, Ownership::Owned, stager.files());
+        assert_eq!(
+            (pre.identical, pre.to_replace, pre.to_create, pre.blocked),
+            (1, 2, 1, 1)
+        );
+        assert_eq!(pre.unrelated_present, 1);
+        assert_eq!(dispositions.len(), stager.files().len());
+        assert_eq!(
+            dispositions
+                .iter()
+                .filter(|d| **d == Disposition::Identical)
+                .count(),
+            1
+        );
+        stager.discard();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_streamed_export_hashes_the_tree_exactly_as_the_files_on_disk_do() {
+        // Independent of the stager: the documented formula applied to the exported tree.
+        let dir = temp_dir("treeformula");
+        let input = hello(&dir);
+        let out = dir.join("out");
+        export(&input, &out, &opts(false, false));
+        let mut expected = Sha256::new();
+        for (path, bytes) in tree_files(&out.join("m")) {
+            expected.update(path.as_bytes());
+            expected.update([0u8]);
+            expected.update(hex(Sha256::digest(&bytes)).as_bytes());
+            expected.update(b"\n");
+        }
+        let on_disk = hex(expected.finalize());
+
+        // The manifest's hash, from a second export staged and then discarded.
+        let archive_dir = temp_dir("treeformula-b");
+        let out_b = archive_dir.join("out");
+        let stem = root_stem(&input);
+        let policy = Policy::new(root_units(&out_b, &stem).unwrap());
+        let (tree, _census, sources) = build_msg_export_source(&input).unwrap();
+        let plan = plan_export(&tree, &policy);
+        let source = source_record(&input, &sources, true).unwrap();
+        let mut report = ExportReport::default();
+        let mut stager = Stager::begin(&out_b).unwrap();
+        let archive = ArchiveInput {
+            input: &input,
+            tree: &tree,
+            plan: &plan,
+            policy: &policy,
+            sources: &sources,
+        };
+        stage_archive(&archive, source, &mut report, &mut stager).unwrap();
+        assert_eq!(stager.tree_hash(), on_disk);
+        stager.discard();
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&archive_dir);
+    }
+
+    /// Generates a large synthetic corpus for the M4h-0 memory gate; it asserts nothing.
+    /// `TSP_BIG_CORPUS_DIR` names a new directory; `TSP_BIG_COUNT` (default 200) is the number of
+    /// messages and `TSP_BIG_MB` (default 2) the size of each message's HTML and plain-text
+    /// body. Run by hand: `cargo test --release generate_a_large_synthetic_corpus -- --ignored`.
+    #[test]
+    #[ignore = "generates a large synthetic corpus by hand (M4h-0 memory gate)"]
+    fn generate_a_large_synthetic_corpus() {
+        let dir = PathBuf::from(
+            std::env::var("TSP_BIG_CORPUS_DIR").expect("set TSP_BIG_CORPUS_DIR to a new directory"),
+        );
+        let count: usize = std::env::var("TSP_BIG_COUNT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        let megabytes: usize = std::env::var("TSP_BIG_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        std::fs::create_dir_all(&dir).expect("create the corpus directory");
+        for n in 0..count {
+            let mut html = String::from("<html><body>");
+            let mut plain = String::new();
+            let mut i = 0usize;
+            while html.len() < megabytes * 1024 * 1024 {
+                html.push_str(&format!(
+                    "<p>Message {n} paragraph {i}: the quick <b>brown</b> fox jumps over the <a href=\"http://example.com/{n}/{i}\">lazy</a> dog.</p>\n"
+                ));
+                plain.push_str(&format!(
+                    "Message {n} paragraph {i}: the quick brown fox jumps over the lazy dog.\r\n"
+                ));
+                i += 1;
+            }
+            html.push_str("</body></html>");
+            write_msg_forms(
+                &dir.join(format!("big-{n:05}.msg")),
+                &format!("Big message {n:05}"),
+                Some(&plain),
+                Some(html.as_bytes()),
+                None,
+                Some(65001),
+            );
+        }
+    }
+
     // ---- pure pieces --------------------------------------------------------
 
     fn pre(ownership: Ownership, replace: usize, blocked: usize) -> Preflight {
@@ -1772,27 +1843,6 @@ mod tests {
             decide(&pre(Own::Owned, 0, 2), true, true),
             Refuse(Why::Blocked)
         );
-    }
-
-    #[test]
-    fn tree_hashes_depend_on_paths_and_content() {
-        let a = vec![Generated {
-            rel: vec!["x".to_string(), "message.md".to_string()],
-            content: b"one".to_vec(),
-        }];
-        let mut b = a.clone();
-        assert_eq!(tree_hash(&a), tree_hash(&b));
-        b[0].content = b"two".to_vec();
-        assert_ne!(tree_hash(&a), tree_hash(&b));
-        let mut c = a.clone();
-        c[0].rel[0] = "y".to_string();
-        assert_ne!(tree_hash(&a), tree_hash(&c));
-        assert_eq!(tree_hash(&a).len(), 64);
-    }
-
-    #[test]
-    fn hex_encodes_lowercase_with_leading_zeros() {
-        assert_eq!(hex([0x00u8, 0x0f, 0xa0, 0xff]), "000fa0ff");
     }
 
     #[test]

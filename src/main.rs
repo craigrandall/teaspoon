@@ -20,6 +20,7 @@ mod rtf_deencap;
 mod shared;
 mod source_msg;
 mod source_pst;
+mod stage;
 #[cfg(test)]
 mod tests;
 mod verify;

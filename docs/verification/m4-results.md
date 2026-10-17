@@ -651,3 +651,36 @@ Reading: every HTML word of the 31 checked bodies appears in the Markdown in the
 Limits: the check starts from the HTML after the production preprocessing, so text removed by the preprocessing is not covered; emphasis and padding characters are stripped on both sides by design; the 240 excused words were not listed; one producer; the comparison is greedy (zero is exact, a non-zero count would be approximate). Differences from the wording of ADR decision 6 are listed in the plan (v4.21, "What changed from v4.20", item 5).
 
 `verify-split.ps1 -Pst tsp-tester.pst` (baseline v0.1.19.1 against the new build): default 850 bytes / 33 lines, `--verify` 2705 / 82, PST diagnostic 1092 / 44, all IDENTICAL with empty stderr; `structural_gate_violations=0`, `rtf_decompressed_bytes_mismatch=1`, `embedded_message_class_readable_total=1`. The EMPTY PST check recorded at v0.1.31 did not recur.
+
+## M4h-0: the streamed export (v0.1.33, 2026-10-17)
+
+Quality gate: `cargo fmt --check` and `clippy -D warnings` clean; 321 tests pass, 1 ignored (the generator of the large corpus); release builds with and without the `bakeoff` feature clean. `Cargo.toml` stays at 0.1.32. `--verify-bodies` unchanged (26,145 matched, 0 missing, 0 extra); `verify-split.ps1`: default, `--verify`, and PST outputs IDENTICAL.
+
+Corpus export (34 messages, short `--out`): 171 files written, `export_readback_mismatches=0`, `export_tree_sha256=1daa76fc2bb7ff8e4077e8b54888e44362ef137c815d241ca11e81faf277d53f`; the same hash for an export into a second directory and for a repeat run (171 identical, 0 written); no `.tsp-tmp` left. Worktrees of exactly `v0.1.31` and `v0.1.32` (fresh `git worktree add`; `v0.1.32` is commit `083630e`) print the same hash. An earlier attempt used a folder named `teaspoon_v0.1.32` that was not a git worktree (no `.git`, no `stage.rs`); it printed the same hash too, but is not counted as evidence because its commit is unknown.
+
+The `dafb32909fa95df2be2c15b46add0bed03d1de9e2c8a784635d6ec52d34893c8` recorded above for `v0.1.31` (2026-10-14) was not reproduced: both old tags now print `1daa76fc...`. `Cargo.toml` says 0.1.32 at both tags. The cause is not identified (candidates: the tool version recorded in the root `folder.json`, the input folder name, or the fixture files); `1daa76fc...` is the baseline from here.
+
+Consent paths by hand on real output (an edited `message.md` and two files of the owner's own added to the archive; counts and exit codes only):
+
+| Case | exit code | consent | result | files written | `.tsp-tmp` after | message.md original | added files |
+|---|---|---|---|---|---|---|---|
+| non-interactive, no `--overwrite` | 2 | `non_interactive_declined` | `refused_needs_consent` | 0 | absent | no (edit kept) | kept |
+| interactive, `n` | 2 | `prompted_declined` | `refused_declined` | 0 | absent | no (edit kept) | kept |
+| interactive, `y` | 0 | `prompted_accepted` | `completed` | 2 | absent | yes | kept |
+| `--overwrite` | 0 | `overwrite_flag` | `completed` | 2 | absent | yes | kept |
+| directory `tsp` did not create, `--overwrite` | 2 | not applicable | `refused_target_not_owned` | 0 | absent | not applicable | its file untouched |
+
+In the first four cases the preflight reported 1 file to replace and 2 unrelated entries.
+
+Memory (synthetic corpus: 300 messages, each with a 25 MB HTML body and a plain-text body, about 45 MB per message, 15.7 GB, generated in 107.64 s; `measure-peak.ps1`, which polls the process):
+
+| Build | Messages | Peak working set | Peak paged memory | Elapsed | Files written | Read-back mismatches | `export_tree_sha256` |
+|---|---|---|---|---|---|---|---|
+| old (`v0.1.32`) | 20 | 1,668 MB | 2,089 MB | 41.1 s | 81 | 0 | `12477df68c45ee8994257db9bf219d477eda6d5c36f5fa0acd35710d6c12ca36` |
+| new (streamed) | 20 | 521 MB | 535 MB | 37.9 s | 81 | 0 | `12477df68c45ee8994257db9bf219d477eda6d5c36f5fa0acd35710d6c12ca36` |
+| new | 50 | 522 MB | 541 MB | 92.2 s | 201 | 0 | `c84acd8f71d651ac2ae86e13d6cf288d90edabebe555b2cca76baa8a38252103` |
+| new | 300 | 523 MB | 546 MB | 888.5 s | 1,201 | 0 | `26f7218e0991dcdc1530ff59d507f24d2ba901ea410d6b95afc47a794beb034e` |
+
+Reading: the streamed writer's peak is flat (15 times more messages, about 0.4% more memory) and the old and new writers produce the same hash at 20 messages. The old writer's growth works out to about 58 MB per message; the old build was not run above 20 messages, so any figure for 300 would be an extrapolation (on the order of 18 GB). The 520 MB that remains is the cost of converting one 25 MB message.
+
+Limits: time per message rose from about 1.9 s (20 and 50 messages) to about 3.0 s (300) with flat memory (cause not measured; disk and antivirus load are the likely reason); only 1,201 files were staged in the flat staging directory and no manifest at millions of files was tried; the messages are synthetic and uniform; a whole message is still held while it is rendered.
