@@ -654,11 +654,11 @@ Limits: the check starts from the HTML after the production preprocessing, so te
 
 ## M4h-0: the streamed export (v0.1.33, 2026-10-17)
 
-Quality gate: `cargo fmt --check` and `clippy -D warnings` clean; 321 tests pass, 1 ignored (the generator of the large corpus); release builds with and without the `bakeoff` feature clean. `Cargo.toml` stays at 0.1.32. `--verify-bodies` unchanged (26,145 matched, 0 missing, 0 extra); `verify-split.ps1`: default, `--verify`, and PST outputs IDENTICAL.
+Quality gate: `cargo fmt --check` and `clippy -D warnings` clean; 321 tests pass, 1 ignored (the generator of the large corpus); release builds with and without the `bakeoff` feature clean. `Cargo.toml` was 0.1.32 for these runs (bumped to 0.1.33 in the tagged commit; see the addendum at the end of this section). `--verify-bodies` unchanged (26,145 matched, 0 missing, 0 extra); `verify-split.ps1`: default, `--verify`, and PST outputs IDENTICAL.
 
 Corpus export (34 messages, short `--out`): 171 files written, `export_readback_mismatches=0`, `export_tree_sha256=1daa76fc2bb7ff8e4077e8b54888e44362ef137c815d241ca11e81faf277d53f`; the same hash for an export into a second directory and for a repeat run (171 identical, 0 written); no `.tsp-tmp` left. Worktrees of exactly `v0.1.31` and `v0.1.32` (fresh `git worktree add`; `v0.1.32` is commit `083630e`) print the same hash. An earlier attempt used a folder named `teaspoon_v0.1.32` that was not a git worktree (no `.git`, no `stage.rs`); it printed the same hash too, but is not counted as evidence because its commit is unknown.
 
-The `dafb32909fa95df2be2c15b46add0bed03d1de9e2c8a784635d6ec52d34893c8` recorded above for `v0.1.31` (2026-10-14) was not reproduced: both old tags now print `1daa76fc...`. `Cargo.toml` says 0.1.32 at both tags. The cause is not identified (candidates: the tool version recorded in the root `folder.json`, the input folder name, or the fixture files); `1daa76fc...` is the baseline from here.
+The `dafb32909fa95df2be2c15b46add0bed03d1de9e2c8a784635d6ec52d34893c8` recorded above for `v0.1.31` (2026-10-14) was not reproduced: both old tags now print `1daa76fc...`. `Cargo.toml` says 0.1.32 at both tags. The cause is not identified (candidates: the tool version recorded in the root `folder.json`, the input folder name, or the fixture files); `1daa76fc...` is the baseline for `Cargo.toml` 0.1.32 and the current fixtures (see the addendum at the end of this section for the tag).
 
 Consent paths by hand on real output (an edited `message.md` and two files of the owner's own added to the archive; counts and exit codes only):
 
@@ -684,3 +684,5 @@ Memory (synthetic corpus: 300 messages, each with a 25 MB HTML body and a plain-
 Reading: the streamed writer's peak is flat (15 times more messages, about 0.4% more memory) and the old and new writers produce the same hash at 20 messages. The old writer's growth works out to about 58 MB per message; the old build was not run above 20 messages, so any figure for 300 would be an extrapolation (on the order of 18 GB). The 520 MB that remains is the cost of converting one 25 MB message.
 
 Limits: time per message rose from about 1.9 s (20 and 50 messages) to about 3.0 s (300) with flat memory (cause not measured; disk and antivirus load are the likely reason); only 1,201 files were staged in the flat staging directory and no manifest at millions of files was tried; the messages are synthetic and uniform; a whole message is still held while it is rendered.
+
+Addendum, the tagged `v0.1.33` (2026-10-17): `Cargo.toml` was bumped to 0.1.33 in the tagged commit. Two exports of the 34-message corpus from the tagged build are identical: `export_tree_sha256=4ab06cc0de4dc2ec55a583d1ae5bc04926b0941ad0b18ac5b9c664ab860ede56`. The difference from `1daa76fc...` is expected, because the root `folder.json` records the tool version; it was not confirmed by comparing the two trees. The baseline for `Cargo.toml` 0.1.33 is `4ab06cc0...`.
