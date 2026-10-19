@@ -44,6 +44,7 @@
     "transport_headers": null
   },
   "attachments_not_extracted": 0,
+  "attachments": [],
   "status": "partial",
   "status_reasons": [
     "other_properties_not_preserved"

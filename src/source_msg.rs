@@ -3,10 +3,13 @@
 //! subdirectories as folders. Names are read into memory only; nothing is printed.
 //!
 //! M4c adds two things for the export writer: the map from each top-level message's source ID to
-//! the `.msg` file it came from, and [`read_message_content`], which re-reads one message's
-//! content when the writer needs it.
+//! the `.msg` file it came from, and the reader of one message's content when the writer needs
+//! it. Since M4f that reader is [`open_message`]: it returns the content (with a descriptor for
+//! each attachment, never its bytes) together with a handle that streams one attachment's data
+//! at a time. [`read_message_content`] is the content-only convenience over it.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -15,19 +18,21 @@ use crate::dry_run::{
     InternetIdTracker, PROP_ATTACH_FILENAME, PROP_ATTACH_LONG_FILENAME, PROP_DELIVERY_TIME,
     PROP_INTERNET_MESSAGE_ID, PROP_SUBJECT, PROP_SUBMIT_TIME, SourceCensus, strip_subject_marker,
 };
-use crate::model::MessageContent;
+use crate::model::{AttachmentInfo, MessageContent};
 use crate::oxmsg_classify::{
     EMBEDDED_OBJECT_STORAGE_NAME, OxmsgEntryKind, OxmsgEntryScope, cfb_entry_name,
     classify_oxmsg_entry,
 };
 use crate::oxmsg_decode::{
-    DecodedFixedValue, decode_fixed_value, decode_properties_stream, extract_string8_codepage,
-    properties_stream_header_len, read_stream_bytes,
+    DecodedFixedValue, decode_fixed_value, decode_properties_stream, expected_variable_stream_path,
+    extract_string8_codepage, properties_stream_header_len, read_stream_bytes, stream_len,
 };
 use crate::oxmsg_envelope::extract_envelope;
 use crate::oxmsg_extract::{read_body_forms, read_string_property};
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
-use crate::shared::{CompoundFile, PROP_ATTACH_METHOD};
+use crate::shared::{
+    CompoundFile, PROP_ATTACH_CONTENT_ID, PROP_ATTACH_DATA_BINARY, PROP_ATTACH_METHOD,
+};
 
 /// Deepest directory nesting mirrored (guards against link loops).
 const MAX_DIRECTORY_DEPTH: usize = 64;
@@ -83,6 +88,24 @@ fn is_msg_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("msg"))
+}
+
+/// Storage paths of the attachments directly under `base`, sorted: the order the planner's
+/// source attachments and the model's descriptors share.
+fn attachment_storage_paths(comp: &CompoundFile, base: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = comp
+        .walk()
+        .filter(|e| {
+            e.path().parent() == Some(base)
+                && matches!(
+                    classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
+                    OxmsgEntryKind::AttachmentStorage
+                )
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect();
+    paths.sort();
+    paths
 }
 
 impl Builder {
@@ -180,18 +203,7 @@ impl Builder {
         codepage: u32,
         depth: usize,
     ) -> Vec<SourceAttachment> {
-        let mut paths: Vec<PathBuf> = comp
-            .walk()
-            .filter(|e| {
-                e.path().parent() == Some(base)
-                    && matches!(
-                        classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
-                        OxmsgEntryKind::AttachmentStorage
-                    )
-            })
-            .map(|e| e.path().to_path_buf())
-            .collect();
-        paths.sort();
+        let paths = attachment_storage_paths(comp, base);
 
         let mut attachments = Vec::with_capacity(paths.len());
         for attach_path in paths {
@@ -228,11 +240,53 @@ impl Builder {
     }
 }
 
-/// Reads what the export writes for one top-level message (M4c, M4e-2b): subject, Internet
-/// message ID, time, the body forms as stored (plain text, native HTML, decompressed RTF, and
-/// the Internet code page), and the envelope. Content stays in memory and goes only into the
-/// archive directory the user named.
-pub(crate) fn read_message_content(path: &Path) -> Result<MessageContent> {
+/// An open `.msg`: the content the export writes, and a handle that streams attachment data one
+/// attachment at a time. Holds the open container and the storage paths, never attachment bytes.
+pub(crate) struct OpenMessage {
+    pub(crate) content: MessageContent,
+    pub(crate) attachments: MsgAttachments,
+}
+
+/// Streams the data of one message's top-level attachments, by position in storage order (the
+/// order of [`MessageContent::attachments`] and of the planner's source attachments).
+pub(crate) struct MsgAttachments {
+    comp: CompoundFile,
+    paths: Vec<PathBuf>,
+}
+
+impl MsgAttachments {
+    /// The data of attachment `index` as a stream, with the length its directory entry declares.
+    /// `None` when the index is out of range or there is no data stream that can be opened.
+    pub(crate) fn open_data(&mut self, index: usize) -> Option<(impl Read, u64)> {
+        let path =
+            expected_variable_stream_path(self.paths.get(index)?, PROP_ATTACH_DATA_BINARY, 0x0102);
+        let len = stream_len(&self.comp, &path)?;
+        let stream = self.comp.open_stream(&path).ok()?;
+        Some((stream, len))
+    }
+}
+
+fn read_attachment_info(
+    comp: &mut CompoundFile,
+    attach_path: &Path,
+    codepage: u32,
+) -> AttachmentInfo {
+    AttachmentInfo {
+        method: attach_method(comp, attach_path),
+        content_id: read_string_property(comp, attach_path, PROP_ATTACH_CONTENT_ID, codepage)
+            .filter(|id| !id.trim().is_empty()),
+        data_len: stream_len(
+            comp,
+            &expected_variable_stream_path(attach_path, PROP_ATTACH_DATA_BINARY, 0x0102),
+        ),
+    }
+}
+
+/// Opens one top-level message for export (M4c, M4e-2b, M4f): subject, Internet message ID,
+/// time, the body forms as stored (plain text, native HTML, decompressed RTF, and the Internet
+/// code page), the envelope, and a descriptor for each attachment. Content stays in memory and
+/// goes only into the archive directory the user named; attachment data is not read here.
+pub(crate) fn open_message(path: &Path) -> Result<OpenMessage> {
     let mut comp = cfb::open(path).context("failed to open a .msg file for export")?;
     let base = Path::new("/");
     let header_len = properties_stream_header_len(OxmsgEntryScope::Message).unwrap_or(32);
@@ -246,14 +300,30 @@ pub(crate) fn read_message_content(path: &Path) -> Result<MessageContent> {
     let time_filetime = message_time(&mut comp, base, header_len);
     let bodies = read_body_forms(&mut comp, codepage);
     let envelope = extract_envelope(&mut comp);
+    let paths = attachment_storage_paths(&comp, base);
+    let infos: Vec<AttachmentInfo> = paths
+        .iter()
+        .map(|p| read_attachment_info(&mut comp, p, codepage))
+        .collect();
 
-    Ok(MessageContent {
-        subject,
-        internet_message_id,
-        time_filetime,
-        bodies,
-        envelope,
+    Ok(OpenMessage {
+        content: MessageContent {
+            subject,
+            internet_message_id,
+            time_filetime,
+            bodies,
+            envelope,
+            attachments: infos,
+        },
+        attachments: MsgAttachments { comp, paths },
     })
+}
+
+/// The content of one message without a handle on its attachment data. Kept for callers that
+/// need only the content (the tests here); the export uses [`open_message`].
+#[allow(dead_code)]
+pub(crate) fn read_message_content(path: &Path) -> Result<MessageContent> {
+    open_message(path).map(|open| open.content)
 }
 
 /// Delivery time, falling back to submit time, as FILETIME ticks.
@@ -517,6 +587,106 @@ mod tests {
         assert!(content.bodies.native_html.is_none());
         assert!(content.bodies.rtf.is_none());
         assert!(!content.bodies.rtf_decompression_failed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stream_lengths_come_from_the_directory_entry_and_by_draining() {
+        use crate::oxmsg_decode::drain_stream_len;
+        let dir = temp_dir("streamlen");
+        let file = dir.join("s.msg");
+        {
+            let mut comp = cfb::create(&file).expect("create CFB");
+            put(&mut comp, "/data", &vec![7u8; 70_000]);
+            put(&mut comp, "/empty", &[]);
+            comp.create_storage("/store").expect("create storage");
+        }
+        let mut comp = cfb::open(&file).expect("open");
+        assert_eq!(stream_len(&comp, Path::new("/data")), Some(70_000));
+        assert_eq!(stream_len(&comp, Path::new("/empty")), Some(0));
+        assert_eq!(stream_len(&comp, Path::new("/store")), None);
+        assert_eq!(stream_len(&comp, Path::new("/missing")), None);
+        assert_eq!(
+            drain_stream_len(&mut comp, Path::new("/data")),
+            Some(70_000)
+        );
+        assert_eq!(drain_stream_len(&mut comp, Path::new("/empty")), Some(0));
+        assert_eq!(drain_stream_len(&mut comp, Path::new("/store")), None);
+        assert_eq!(drain_stream_len(&mut comp, Path::new("/missing")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn attachment_descriptors_and_data_streams_are_read_in_storage_order() {
+        let dir = temp_dir("attdata");
+        let file = dir.join("d.msg");
+        let payload: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+        {
+            let mut comp = cfb::create(&file).expect("create CFB");
+            put(&mut comp, "/__properties_version1.0", &[0u8; 32]);
+            let specs = [
+                (1i32, Some(payload.as_slice()), Some("logo@x")),
+                (6, None, None),
+                (1, None, None),
+            ];
+            for (i, (method, data, cid)) in specs.into_iter().enumerate() {
+                let storage = format!("/__attach_version1.0_#{i:08X}");
+                comp.create_storage(&storage)
+                    .expect("create attachment storage");
+                let mut props = vec![0u8; 8];
+                let mut value = [0u8; 8];
+                value[..4].copy_from_slice(&method.to_le_bytes());
+                props.extend(entry(0x0003, PROP_ATTACH_METHOD, value));
+                put(
+                    &mut comp,
+                    &format!("{storage}/__properties_version1.0"),
+                    &props,
+                );
+                if let Some(data) = data {
+                    put(&mut comp, &format!("{storage}/__substg1.0_37010102"), data);
+                }
+                if let Some(cid) = cid {
+                    put(
+                        &mut comp,
+                        &format!("{storage}/__substg1.0_3712001F"),
+                        &utf16(cid),
+                    );
+                }
+            }
+        }
+        let OpenMessage {
+            content,
+            mut attachments,
+        } = open_message(&file).expect("open");
+        assert_eq!(content.attachments.len(), 3);
+        assert_eq!(
+            content.attachments[0],
+            AttachmentInfo {
+                method: Some(1),
+                content_id: Some("logo@x".to_string()),
+                data_len: Some(70_000)
+            }
+        );
+        assert_eq!(content.attachments[1].method, Some(6));
+        assert_eq!(content.attachments[1].data_len, None);
+        assert_eq!(
+            content.attachments[2],
+            AttachmentInfo {
+                method: Some(1),
+                content_id: None,
+                data_len: None
+            }
+        );
+
+        let (mut stream, len) = attachments.open_data(0).expect("data stream");
+        assert_eq!(len, 70_000);
+        let mut read_back = Vec::new();
+        stream.read_to_end(&mut read_back).expect("read");
+        assert_eq!(read_back, payload);
+        drop(stream);
+        assert!(attachments.open_data(1).is_none());
+        assert!(attachments.open_data(2).is_none());
+        assert!(attachments.open_data(9).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

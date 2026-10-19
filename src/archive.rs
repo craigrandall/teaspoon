@@ -1,6 +1,7 @@
 //! Pure rendering of the archive files (M4c): `message.md`, `metadata.json`, and `folder.json`,
 //! and since M4e-2b the body: what is selected and converted, the original body files that are
-//! kept, and the `body` object in `metadata.json`.
+//! kept, and the `body` object in `metadata.json`. Since M4f, `metadata.json` also records every
+//! attachment (extracted or not, with size and SHA-256 when extracted).
 //!
 //! No I/O. Output is deterministic: struct fields serialize in declaration order, there are no
 //! maps, no absolute paths, and no export-time values, so two exports of the same input are
@@ -29,6 +30,16 @@ pub(crate) const KIND_ARCHIVE_ROOT: &str = "archive_root";
 pub(crate) const STATUS_COMPLETE: &str = "complete";
 pub(crate) const STATUS_INCOMPLETE: &str = "incomplete";
 const UNTITLED: &str = "(no subject)";
+
+/// An attachment's status in `metadata.json`: its data was written to a file.
+pub(crate) const ATTACHMENT_EXTRACTED: &str = "extracted";
+/// An attachment's status: not extracted by design (an embedded message until M4f-2, an OLE
+/// object, a by-reference attachment, or a method this tool does not read); the `reason` says
+/// which.
+pub(crate) const ATTACHMENT_NOT_EXTRACTED: &str = "not_extracted";
+/// An attachment's status: it is by value but its data was missing, unreadable, or of another
+/// length than the source declared; the `reason` says which.
+pub(crate) const ATTACHMENT_FAILED: &str = "failed";
 
 /// The kept original body files (body ADR, decision 2). Each is shorter than `metadata.json`
 /// (13 units), which already sets the worst-case child reservation.
@@ -97,7 +108,7 @@ pub(crate) struct BodyRecord {
     pub(crate) internet_codepage: Option<u32>,
     /// Kept original files, in the order `body.html`, `body.rtf`, `body.txt`.
     pub(crate) originals: Vec<OriginalRecord>,
-    /// `cid:` link destinations in `message.md` (they stay as written until M4f).
+    /// `cid:` link destinations in `message.md` (they stay as written until M4f-2).
     pub(crate) cid_references: CidRecord,
     /// Formatting loss, in the vocabulary's order, only reasons with a count above zero.
     pub(crate) loss: Vec<LossRecord>,
@@ -144,6 +155,43 @@ pub(crate) struct EnvelopeRecord {
     pub(crate) transport_headers: Option<String>,
 }
 
+/// `PidTagAttachMethod` as a stable label.
+pub(crate) fn method_label(method: Option<i32>) -> &'static str {
+    match method {
+        None => "unreadable",
+        Some(0) => "none",
+        Some(1) => "by_value",
+        Some(2) => "by_reference",
+        Some(3) => "by_reference_resolve",
+        Some(4) => "by_reference_only",
+        Some(5) => "embedded_message",
+        Some(6) => "ole",
+        Some(_) => "unrecognized",
+    }
+}
+
+/// One attachment as recorded in `metadata.json` (draft schema), in storage order. Every
+/// attachment has a record whether or not a file was written.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AttachmentRecord {
+    /// The source name before any change, and what the naming rules did to it.
+    pub(crate) name: NameRecord,
+    /// `by_value`, `by_reference`, `embedded_message`, `ole`, and so on (see [`method_label`]).
+    pub(crate) method: &'static str,
+    /// `PidTagAttachMethod` as stored, when it could be read.
+    pub(crate) method_code: Option<i32>,
+    pub(crate) content_id: Option<String>,
+    /// `extracted`, `not_extracted`, or `failed`.
+    pub(crate) status: &'static str,
+    /// Why an attachment was not extracted or failed; null when extracted.
+    pub(crate) reason: Option<&'static str>,
+    /// The file name under `attachments/` when extracted.
+    pub(crate) file: Option<String>,
+    /// Size and SHA-256 (lower-case hex) of what was written, when extracted.
+    pub(crate) bytes: Option<u64>,
+    pub(crate) sha256: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct MessageMetadata {
     pub(crate) schema_version: &'static str,
@@ -157,7 +205,10 @@ pub(crate) struct MessageMetadata {
     pub(crate) directory: NameRecord,
     pub(crate) body: BodyRecord,
     pub(crate) envelope: EnvelopeRecord,
+    /// How many of this message's attachments are not extracted (status other than `extracted`).
     pub(crate) attachments_not_extracted: usize,
+    /// Every top-level attachment, in storage order.
+    pub(crate) attachments: Vec<AttachmentRecord>,
     pub(crate) status: &'static str,
     pub(crate) status_reasons: Vec<&'static str>,
 }
@@ -186,6 +237,10 @@ pub(crate) struct SourceRecord {
 pub(crate) struct RootCounts {
     pub(crate) folders: usize,
     pub(crate) messages: usize,
+    /// Attachment files written (by-value attachments extracted).
+    pub(crate) attachments_extracted: usize,
+    /// Planned attachment files not written: not extracted by design, or failed, or inside an
+    /// embedded message (which is not extracted until M4f-2).
     pub(crate) attachments_not_extracted: usize,
     pub(crate) embedded_messages_not_extracted: usize,
 }
@@ -679,8 +734,10 @@ fn body_record(forms: &BodyForms, outcome: &BodyOutcome) -> BodyRecord {
 }
 
 /// `metadata.json`. The status is always `partial` for now: properties the model does not yet
-/// carry are not preserved (`other_properties_not_preserved`, always listed), and attachments
-/// are not extracted yet; each gap that applies to this message is listed.
+/// carry are not preserved (`other_properties_not_preserved`, always listed), and some
+/// attachments may not be extracted; each gap that applies to this message is listed.
+/// `attachments_not_extracted` is listed when any attachment's status is other than `extracted`
+/// (the per-attachment records say which and why).
 /// `formatted_bodies_not_converted` is listed only when an HTML or RTF form existed and the body
 /// used ended up plain text or none (a failed conversion, an unusable RTF, or an RTF that could
 /// not be decompressed); a converted body no longer carries it (body ADR, decision 4).
@@ -689,7 +746,7 @@ pub(crate) fn message_metadata(
     content: &MessageContent,
     outcome: &BodyOutcome,
     directory: NameRecord,
-    attachments: usize,
+    attachments: Vec<AttachmentRecord>,
 ) -> MessageMetadata {
     let forms = &content.bodies;
     let formatted_form_existed =
@@ -698,8 +755,12 @@ pub(crate) fn message_metadata(
         outcome.rendered.source,
         BodySource::PlainText | BodySource::None
     );
+    let attachments_not_extracted = attachments
+        .iter()
+        .filter(|a| a.status != ATTACHMENT_EXTRACTED)
+        .count();
     let mut status_reasons = vec!["other_properties_not_preserved"];
-    if attachments > 0 {
+    if attachments_not_extracted > 0 {
         status_reasons.push("attachments_not_extracted");
     }
     if formatted_form_existed && fell_back {
@@ -715,7 +776,8 @@ pub(crate) fn message_metadata(
         directory,
         body: body_record(forms, outcome),
         envelope: envelope_record(&content.envelope),
-        attachments_not_extracted: attachments,
+        attachments_not_extracted,
+        attachments,
         status: "partial",
         status_reasons,
     }
@@ -748,11 +810,32 @@ mod tests {
                 ..BodyForms::default()
             },
             envelope: Envelope::default(),
+            attachments: Vec::new(),
         }
     }
 
     fn md(c: &MessageContent) -> String {
         render_message_md(c, &body_outcome(&c.bodies))
+    }
+
+    /// `n` attachment records that were not extracted.
+    fn unextracted(n: usize) -> Vec<AttachmentRecord> {
+        (0..n)
+            .map(|_| AttachmentRecord {
+                name: NameRecord {
+                    original: String::new(),
+                    adjustments: vec![],
+                },
+                method: "ole",
+                method_code: Some(6),
+                content_id: None,
+                status: ATTACHMENT_NOT_EXTRACTED,
+                reason: Some("ole_object"),
+                file: None,
+                bytes: None,
+                sha256: None,
+            })
+            .collect()
     }
 
     fn meta_for(c: &MessageContent, original: &str, attachments: usize) -> MessageMetadata {
@@ -764,7 +847,7 @@ mod tests {
                 original: original.to_string(),
                 adjustments: vec![],
             },
-            attachments,
+            unextracted(attachments),
         )
     }
 
@@ -925,7 +1008,7 @@ mod tests {
                 original: "S".to_string(),
                 adjustments: vec![],
             },
-            0,
+            Vec::new(),
         );
         assert_eq!(meta.body.source, "plain_text");
         assert!(meta.body.converter.is_none());
@@ -949,7 +1032,7 @@ mod tests {
                 original: "S".to_string(),
                 adjustments: vec![],
             },
-            0,
+            Vec::new(),
         );
         assert_eq!(meta.body.source, "native_html");
         let converter = meta.body.converter.as_ref().unwrap();
@@ -1064,10 +1147,53 @@ mod tests {
                 "formatted_bodies_not_converted"
             ]
         );
+        assert_eq!(meta.attachments_not_extracted, 2);
         assert_eq!(meta.body.source, "none");
         assert_eq!(meta.body.loss[0].reason, "rtf_not_converted");
         assert_eq!(meta.body.originals.len(), 1);
         assert_eq!(meta.body.originals[0].file, "body.rtf");
+    }
+
+    #[test]
+    fn extracted_attachments_add_no_status_reason_and_are_recorded() {
+        let c = content(Some("S"), Some("x"));
+        let mut records = unextracted(1);
+        records[0].status = ATTACHMENT_EXTRACTED;
+        records[0].reason = None;
+        records[0].file = Some("a.pdf".to_string());
+        records[0].bytes = Some(3);
+        records[0].sha256 = Some(sha256_hex(b"abc"));
+        let meta = message_metadata(
+            "m.msg",
+            &c,
+            &body_outcome(&c.bodies),
+            NameRecord {
+                original: "S".to_string(),
+                adjustments: vec![],
+            },
+            records,
+        );
+        assert_eq!(meta.attachments_not_extracted, 0);
+        assert_eq!(meta.status_reasons, vec!["other_properties_not_preserved"]);
+        let value: serde_json::Value = serde_json::from_str(&to_json(&meta).unwrap()).unwrap();
+        assert_eq!(value["attachments"][0]["status"], "extracted");
+        assert_eq!(value["attachments"][0]["file"], "a.pdf");
+        assert_eq!(value["attachments"][0]["bytes"], 3);
+        assert_eq!(
+            value["attachments"][0]["sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn attachment_methods_have_stable_labels() {
+        assert_eq!(method_label(None), "unreadable");
+        assert_eq!(method_label(Some(0)), "none");
+        assert_eq!(method_label(Some(1)), "by_value");
+        assert_eq!(method_label(Some(3)), "by_reference_resolve");
+        assert_eq!(method_label(Some(5)), "embedded_message");
+        assert_eq!(method_label(Some(6)), "ole");
+        assert_eq!(method_label(Some(99)), "unrecognized");
     }
 
     #[test]
@@ -1129,6 +1255,7 @@ mod tests {
                 counts: RootCounts {
                     folders: 0,
                     messages: 1,
+                    attachments_extracted: 0,
                     attachments_not_extracted: 0,
                     embedded_messages_not_extracted: 0,
                 },

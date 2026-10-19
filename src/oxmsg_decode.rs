@@ -602,6 +602,30 @@ pub(crate) fn read_stream_bytes(comp: &mut CompoundFile, path: &Path) -> Option<
     Some(buf)
 }
 
+/// A stream's length in bytes from its directory entry, without reading it. `None` when the path
+/// does not exist or is not a stream.
+pub(crate) fn stream_len(comp: &CompoundFile, path: &Path) -> Option<u64> {
+    let entry = comp.entry(path).ok()?;
+    entry.is_stream().then(|| entry.len())
+}
+
+/// Reads a stream through in fixed-size chunks and returns how many bytes it holds. `None` when
+/// it cannot be opened or a read fails, exactly where [`read_stream_bytes`] returns `None`, but
+/// with one chunk of memory instead of the whole stream.
+pub(crate) fn drain_stream_len(comp: &mut CompoundFile, path: &Path) -> Option<u64> {
+    let mut stream = comp.open_stream(path).ok()?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => return Some(total),
+            Ok(n) => total += n as u64,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Reads and parses the named property mapping storage, if present. Per
 /// MS-OXMSG 2.2.3, this always lives at the top level, even for named
 /// properties on an embedded message (Embedded Message objects MUST NOT

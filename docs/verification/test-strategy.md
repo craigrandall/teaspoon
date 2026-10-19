@@ -109,6 +109,7 @@ Design choices behind this, for the next fixture-gated check:
 - **`verify-split.ps1`** compares the default, `--verify`, and PST outputs of an earlier tag with those of the new build, byte for byte. It has been run for v0.1.20, v0.1.22, v0.1.23.1, and v0.1.25.1 (always IDENTICAL: 850, 2705, and 1092 bytes). It proves a change did not alter existing diagnostics; it says nothing about new output.
 - **Golden files** (`tests/golden/`, synthetic messages, no personal data) pin the exact bytes of `message.md`, `metadata.json`, and an envelope-rich `message.md`. They run in CI.
 - **Tree hash** (`export_tree_sha256`) lets two exports be compared at a glance; it changes whenever the output format changes, so each format change needs a new baseline from a real-corpus export.
+- **Memory gate** (M4h-0, M4f-1): an ignored test generates a synthetic corpus (`TSP_BIG_CORPUS_DIR`, `TSP_BIG_COUNT`, `TSP_BIG_MB`, `TSP_BIG_ATTACH_MB`), and `measure-peak.ps1` polls the export's peak working set; the pass criterion is that the peak does not grow with the message count or with the attachment size. It is a manual T3 check and does not run in CI. Results: `m4-results.md`.
 - **Differential checks** compare against `msg_parser` only where it exposes the field; fields without an oracle are reported as presence counts and rest on the specification and unit tests. The tallies say which of two properties matched, but an absent property is compared as empty, so they cannot always separate "absent" from "present and different".
 
 ## M1 evidence target

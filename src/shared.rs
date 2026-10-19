@@ -85,6 +85,7 @@ pub(crate) const PROP_RECIPIENT_TYPE: u16 = 0x0C15; // PidTagRecipientType
 pub(crate) const PROP_ATTACH_SIZE: u16 = 0x0E20; // PidTagAttachSize
 pub(crate) const PROP_ATTACH_METHOD: u16 = 0x3705; // PidTagAttachMethod
 pub(crate) const PROP_ATTACH_CONTENT_ID: u16 = 0x3712; // PidTagAttachContentId
+pub(crate) const PROP_ATTACH_DATA_BINARY: u16 = 0x3701; // PidTagAttachDataBinary
 
 /// PidTagRecipientType values (MS-OXOMSG).
 pub(crate) const RECIPIENT_TYPE_ORIG: i32 = 0;

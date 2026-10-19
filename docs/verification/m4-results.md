@@ -686,3 +686,51 @@ Reading: the streamed writer's peak is flat (15 times more messages, about 0.4% 
 Limits: time per message rose from about 1.9 s (20 and 50 messages) to about 3.0 s (300) with flat memory (cause not measured; disk and antivirus load are the likely reason); only 1,201 files were staged in the flat staging directory and no manifest at millions of files was tried; the messages are synthetic and uniform; a whole message is still held while it is rendered.
 
 Addendum, the tagged `v0.1.33` (2026-10-17): `Cargo.toml` was bumped to 0.1.33 in the tagged commit. Two exports of the 34-message corpus from the tagged build are identical: `export_tree_sha256=4ab06cc0de4dc2ec55a583d1ae5bc04926b0941ad0b18ac5b9c664ab860ede56`. The difference from `1daa76fc...` is expected, because the root `folder.json` records the tool version; it was not confirmed by comparing the two trees. The baseline for `Cargo.toml` 0.1.33 is `4ab06cc0...`.
+
+## M4f-1: by-value attachments, copied to staging in chunks (v0.1.34, 2026-10-18)
+
+What was built: the export writes each top-level message's by-value attachments to `attachments/<planned name>`. `Stager::add_stream` (`src/stage.rs`) copies a source stream to the staging directory in 256 KiB chunks, hashing as it writes, so memory does not depend on the attachment's size; a read error or a length other than the container declares removes the partial file, adds nothing to the manifest, and uses no staged number. The model carries `AttachmentInfo` descriptors (method, content ID, declared data length), never bytes; `open_message` (`src/source_msg.rs`) returns the content together with `MsgAttachments`, a handle that opens one attachment's data stream at a time. Within a message the attachments are staged first, then `metadata.json` (which needs each size and SHA-256), then `message.md` and the kept body files. `metadata.json` gains an `attachments` array (one record per attachment, in storage order: name and naming adjustments, method, content ID, status `extracted`, `not_extracted`, or `failed`, a reason, and for an extracted one the file name, size, and SHA-256); the root `folder.json` counts gain `attachments_extracted`; the report gains `export_attachments_extracted`, `export_attachment_bytes_extracted`, and `export_attachments_failed`. Reasons recorded: `embedded_message` (until M4f-2), `ole_object`, `by_reference`, `method_none`, `method_unrecognized`, `method_unreadable`, `embedded_message_unreadable` (not extracted); `data_stream_missing`, `data_read_failed`, `data_length_mismatch` (failed). A refinement of the plan's recommendation: the zero-byte check in the diagnostics held every by-value stream whole just to test for emptiness; it now reads the stream through in chunks (`drain_stream_len`), which gives the same answers, including for an unreadable stream, where the directory entry's length alone would not.
+
+### Build and tests
+
+The owner reports that everything built and **332 tests pass**, 0 failed, 1 ignored (`generate_a_large_synthetic_corpus`, which generates the large corpus by hand): 321 at `v0.1.33` plus 11 new (4 for the stager's chunked copy, 2 in `source_msg.rs`, 2 in `archive.rs`, 3 in `export.rs`). `cargo fmt --check`, `clippy -D warnings`, CI, `verify-split.ps1`, and an export of the real corpus were **not reported** for this tag. `Cargo.toml` was still 0.1.33 when these runs were made; it is bumped to 0.1.34 in the tagged commit.
+
+What the new tests cover (synthetic `.msg` files built at test time, no personal data): the stager's chunked copy gives the same file, size, hash, and tree hash as a whole-file add for a payload that crosses chunk boundaries; short reads, an interrupted read, an empty source, a source that fails part-way, and a wrong declared length (a failing source leaves no staged file and uses no number); a stream's length from its directory entry and by draining it (a stream, an empty stream, a storage, a missing path); attachment descriptors and data streams read in storage order, with out-of-range and dataless attachments returning nothing; the archive record for extracted attachments (no status reason, size and SHA-256 recorded) and the method labels; and, through a real export, three by-value attachments of more than two chunks, a few bytes, and zero bytes written with the recorded size and SHA-256, duplicate and missing names each landing under their own planned name (and a second export writing nothing), and a message mixing OLE, by-reference, a by-value attachment with no data stream, and one that extracts. The existing test of an attachment with no data stream now records it as `failed` with `data_stream_missing`.
+
+### Memory gate (2026-10-18)
+
+The ignored generator with `TSP_BIG_ATTACH_MB` = 1, 50, and 200, three messages each (the body size was not reported), exported with `measure-peak.ps1`:
+
+| Attachment per message | Peak working set | Peak paged memory | Elapsed | Files written | Read-back mismatches | `export_tree_sha256` |
+|---|---|---|---|---|---|---|
+| 1 MB | 28 MB | 25 MB | 0.4 s | 16 | 0 | `15ef05b872181010b41364b299056f4da122e14f7e38e47bd2c901c5c9ea88a3` |
+| 50 MB | 28 MB | 25 MB | 1.1 s | 16 | 0 | `a05e901eedfa6301e97099418f394ee7d8009b50a211030cf943fdee0bd83436` |
+| 200 MB | 28 MB | 25 MB | 2.8 s | 16 | 0 | `b61b1d8f75e3920e428c12cf45f1667e2e8faf50f6279c903c33db9e970678af` |
+
+Each run: exit code 0, `plan_messages=3`, `export_result=completed`, `export_files_unchanged=0`.
+
+Reading:
+- **Memory does not grow with the attachment.** The peak is the same at 28 MB and 25 MB across a 200-fold range of attachment size (3 MB, 150 MB, and 600 MB of attachment data in all). The comparison that would show the alternative, an export that holds the attachment whole, was not run; the plan's estimate (an attachment's size times 1.5 to 2 for a whole-stream read with doubling growth) is an estimate.
+- **The file count reconciles:** 16 is the root `folder.json` plus, for each of the 3 messages, `message.md`, `metadata.json`, `body.html`, `body.txt`, and the attachment.
+- **The three tree hashes differ, as expected:** the attachment content differs.
+- **The 28 MB is not comparable with M4h-0's 520 MB.** That figure was the cost of converting one 25 MB body; the body size of this corpus was not reported.
+- **Elapsed time grows with the attachment size** (0.4, 1.1, and 2.8 s for 3, 150, and 600 MB of attachments); no phase was timed.
+
+### Manual check (2026-10-18)
+
+The SHA-256 recorded in `metadata.json` for the 200 MB attachment equals `Get-FileHash` of the exported file. That ties the chunked copy's hash to an independent computation on one large file.
+
+### What this shows, and what it does not
+
+Shows: the chunked copy writes a large attachment byte for byte (one file, one hash comparison), and the writer's peak memory does not depend on the attachment's size at 1, 50, and 200 MB.
+
+Does not show:
+- No export of the real corpus with attachments has been run: there is no count of corpus attachments extracted or failed, no tree hash for `v0.1.34` (a new baseline: the metadata, the attachment files, and the tool version all change it), and no check that the 34 planned attachment files and 3 embedded messages of the corpus reconcile with the archive.
+- `verify-split.ps1` has not been run. The diagnostics' answers should be unchanged (the zero-byte check was rewritten), and the script would confirm it.
+- The M4f gate's byte-level differential (the SHA-256 of each extracted by-value attachment against `msg_parser`'s payload hash) is not built. It is M4f-2, together with the adversarial fixtures that remain (reserved names, 255-character names, case-only differences, control characters).
+- The largest attachment streamed was 200 MB, with 3 messages; an attachment of gigabyte size and thousands of attachments in one archive (the flat staging directory and the manifest) are untried. A repeat export still copies every attachment into staging before finding it identical, which matters more now that attachments dominate the archive's bytes.
+- The length check against the container's declared length has been exercised only by a stand-in reader; with `cfb` a stream reads to its declared length or fails, so it should never fire.
+
+### Status
+
+**M4f-1 is built and its synthetic gates are met; M4f is not complete.** Open: the real-corpus export with attachments and its tree hash; `verify-split.ps1`; `cargo fmt --check`, `clippy`, and CI for the tag; M4f-2 (embedded messages as nested folders at the depth cap, `cid:` rewriting in `message.md`, the `msg_parser` payload comparison, the remaining adversarial fixtures); the owner review of exported messages carried over from M4e-2.

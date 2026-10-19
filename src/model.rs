@@ -2,11 +2,12 @@
 //!
 //! Pure data with no adapter types, so the `.msg` reader (and later the PST reader) can fill it
 //! and the archive renderer can read it without either knowing about the other. It holds what
-//! the stages so far extract: the body forms as the source stores them (M4e-2b) and the
+//! the stages so far extract: the body forms as the source stores them (M4e-2b), the
 //! *envelope* (sender, recipients, times, importance, sensitivity, transport headers,
-//! conversation fields). Attachments, embedded messages, the raw property bag, and named
-//! properties join it when the stages that fill them (M4f, M4g) exist: a field nothing fills
-//! would be dead code and a promise nothing keeps.
+//! conversation fields), and, since M4f, a descriptor for each attachment (never its bytes).
+//! Embedded messages, the raw property bag, and named properties join it when the stages that
+//! fill them (M4f-2, M4g) exist: a field nothing fills would be dead code and a promise nothing
+//! keeps.
 
 /// The body forms a message carries, as the source stores them. The reader fills this; the body
 /// pipeline (`body.rs`) selects and converts from it, and the export keeps each form that exists
@@ -91,6 +92,20 @@ pub(crate) struct Envelope {
     pub(crate) transport_headers: Option<String>,
 }
 
+/// What the source stores about one attachment, without its bytes (M4f): the data is read from
+/// the source, one attachment at a time, when the export stages it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachmentInfo {
+    /// `PidTagAttachMethod` as stored (1 by value, 2-4 by reference, 5 embedded message, 6 OLE),
+    /// or `None` when it could not be read.
+    pub(crate) method: Option<i32>,
+    /// `PidTagAttachContentId`; `None` when absent or blank.
+    pub(crate) content_id: Option<String>,
+    /// Length in bytes of the data stream (`PidTagAttachDataBinary`) as the source's directory
+    /// declares it; `None` when there is no such stream (not by value, or the data is missing).
+    pub(crate) data_len: Option<u64>,
+}
+
 /// What the export reads from one message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MessageContent {
@@ -101,4 +116,7 @@ pub(crate) struct MessageContent {
     pub(crate) time_filetime: Option<i64>,
     pub(crate) bodies: BodyForms,
     pub(crate) envelope: Envelope,
+    /// The top-level attachments in storage order: the same order as the planner's source
+    /// attachments.
+    pub(crate) attachments: Vec<AttachmentInfo>,
 }

@@ -216,6 +216,34 @@ PidTagRtfCompressed (bytes)
 - `rtf_deencap` imports only the `PT_STRING8` decoders from `oxmsg_decode`; it reads no file and knows no adapter type. Nothing in the export calls it yet; M4e-2 (the body pipeline) will.
 - The recovered text is UTF-8, so a `charset=` declaration inside it is stale; the diagnostics flag one.
 
+## M4f-1 boundary: by-value attachments, streamed in chunks (built in v0.1.34)
+
+M4f-1 adds attachment bytes to the export without letting memory depend on their size.
+
+```text
+.msg file
+ |
+ +-- source_msg.rs   `open_message`: the content (model.rs `MessageContent`, with one
+ |                   `AttachmentInfo` per attachment: method, content ID, declared data
+ |                   length; never bytes) plus `MsgAttachments`, a handle that opens one
+ |                   attachment's data stream at a time
+ |
+ +-- export.rs       per message: stage each by-value attachment, then render
+ |                   metadata.json (it records every attachment), then message.md
+ |
+ +-- stage.rs        `add_stream`: copy the source in 256 KiB chunks to the staging
+                     directory, hashing as it writes; the size and SHA-256 recorded are
+                     those of what was written
+```
+
+- The model holds descriptors, not bytes. The bytes are read from the source at staging time, one attachment at a time, so memory is one chunk plus the message's bodies, whatever the attachment's size.
+- `add_stream` takes any `Read`, so nothing in the stager or the model names the container format; a PST reader (M4i) can supply a stream the same way.
+- A failure of the source (a read error, or a length other than the one the container declares) removes the partial staged file, adds nothing to the manifest, and is returned to the export, which records the attachment as `failed` and goes on. A failure to write to staging is an error and stops the run.
+- The attachments are staged before `metadata.json` because it records each one's size and SHA-256, which are known only after the copy.
+- `stream_len` reads a stream's length from its directory entry without reading the stream (the export's declared length); `drain_stream_len` reads a stream through in chunks and counts the bytes (the diagnostics' zero-byte check), so an unreadable stream is still noticed.
+- Embedded messages, OLE objects, and by-reference attachments are recorded as not extracted, with a reason (embedded messages until M4f-2). `cid:` references in `message.md` still stay as written until M4f-2.
+- Verified so far: synthetic tests, and a synthetic memory gate (peak working set flat at 28 MB for attachments of 1, 50, and 200 MB); not yet run on the real corpus.
+
 ## Verification structure
 
 `tsp --verify` runs the custom MSG path and `msg_parser` over the same files
@@ -260,10 +288,11 @@ The code lives in `src/`, one module per seam:
 - `verify` — the `--verify` comparison and structural gates; `verify_envelope` — the `--verify-envelope` comparison (M4d); `verify_deencap` — the `--verify-deencap` comparison (M4e-1).
 - `rtf_deencap` — the pure MS-OXRTFEX de-encapsulation (M4e-1).
 - `naming`, `plan` — the pure naming rules and export planner (M4b).
-- `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also re-reads message content, including the envelope, for export.
+- `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also opens message content for export (the body forms, the envelope, and a descriptor for each attachment) together with a handle that streams one attachment's data at a time.
 - `model`, `archive`, `export` — the model so far (message content and envelope), the pure renderers, and the writer with its preflight and consent rules (M4c, extended by M4d).
+- `stage` - the staging area of the streamed export (M4h-0): files are written to `.tsp-tmp` as they are rendered, only a manifest is kept, and `add_stream` copies attachment data in chunks (M4f-1).
 - `tests` — most of the older unit tests; the newer modules keep theirs beside their code.
 
 The README lists the contents of each module.
 
-Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. The envelope modules follow the same pattern: `oxmsg_envelope` is an adapter module that depends on `oxmsg_classify`, `oxmsg_decode`, `oxmsg_extract`, and `shared` and produces `model` types (it also takes the submit and delivery time property IDs from `dry_run`, where they were first defined, which is a small layering oddity: an adapter importing from the reporting module), and `verify_envelope` depends on `model`, `source_msg`, `dry_run` (for the subject-marker stripping), and `verify` (for the shared comparison tallies). Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. `naming.rs` and `plan.rs` still carry `#![allow(dead_code)]`; the plan was to drop it when the writer landed, and it has not been tried yet. The full normalized model (M4b-4) has not been written: bodies with raw bytes, attachments, the raw property bag, named properties, and diagnostics are not modelled yet.
+Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. The envelope modules follow the same pattern: `oxmsg_envelope` is an adapter module that depends on `oxmsg_classify`, `oxmsg_decode`, `oxmsg_extract`, and `shared` and produces `model` types (it also takes the submit and delivery time property IDs from `dry_run`, where they were first defined, which is a small layering oddity: an adapter importing from the reporting module), and `verify_envelope` depends on `model`, `source_msg`, `dry_run` (for the subject-marker stripping), and `verify` (for the shared comparison tallies). Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. `naming.rs` and `plan.rs` still carry `#![allow(dead_code)]`; the plan was to drop it when the writer landed, and it has not been tried yet. The full normalized model (M4b-4) has not been written: bodies with raw bytes, the raw property bag, named properties, embedded messages, and diagnostics are not modelled yet (attachments are modelled as descriptors since M4f-1).

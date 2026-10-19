@@ -18,8 +18,8 @@ use crate::oxmsg_classify::{
 use crate::oxmsg_decode::{
     DecodedFixedValue, PROP_INTERNET_CODEPAGE, PROP_MESSAGE_CLASS, String8Decoded,
     decode_fixed_value, decode_properties_stream, decode_string8_with_codepage,
-    decode_unicode_value, expected_variable_stream_path, extract_string8_codepage,
-    properties_stream_header_len, read_long_property, read_stream_bytes,
+    decode_unicode_value, drain_stream_len, expected_variable_stream_path,
+    extract_string8_codepage, properties_stream_header_len, read_long_property, read_stream_bytes,
 };
 use crate::shared::{
     CompoundFile, PROP_ATTACH_CONTENT_ID, PROP_ATTACH_METHOD, PROP_BODY, PROP_BODY_HTML,
@@ -394,11 +394,14 @@ pub(crate) fn extract_attachment_method_counts(comp: &mut CompoundFile) -> Attac
 
         let is_by_value = matches!(method, Some(1));
         if is_by_value {
-            match read_stream_bytes(
+            // Drained in chunks, not read whole (M4f): the answers are the same as with
+            // `read_stream_bytes` (empty, non-empty, unreadable), but a huge attachment no
+            // longer has to fit in memory just to learn whether it is empty.
+            match drain_stream_len(
                 comp,
                 &expected_variable_stream_path(&attach_path, 0x3701, 0x0102),
             ) {
-                Some(data) if data.is_empty() => counts.zero_byte_by_value += 1,
+                Some(0) => counts.zero_byte_by_value += 1,
                 Some(_) => {}
                 // Unreadable is not zero: the previous version's
                 // `unwrap_or(true)` silently reported a missing or

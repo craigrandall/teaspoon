@@ -1,5 +1,5 @@
-//! Export writer (M4c walking skeleton, body added in M4e-2b, streamed in M4h-0):
-//! `tsp <input.msg|dir> --out <dir>`.
+//! Export writer (M4c walking skeleton, body added in M4e-2b, streamed in M4h-0, by-value
+//! attachments added in M4f-1): `tsp <input.msg|dir> --out <dir>`.
 //!
 //! Pipeline: read the source tree, plan names and paths (the same pure planner as `--dry-run`),
 //! refuse if the plan breaks a gate, refuse early if the target directory is not ours, then
@@ -10,13 +10,22 @@
 //! Archive content goes only into the directory the user named; stdout and stderr never carry
 //! names, subjects, or paths.
 //!
+//! Attachments (M4f-1): each top-level message's by-value attachments are copied into
+//! `<message>/attachments/<planned name>` in chunks, one at a time, so memory does not grow with
+//! attachment size; their size and SHA-256 are taken from what was written. Within a message the
+//! attachments are staged first, then `metadata.json` (which records every attachment), then
+//! `message.md` and the kept body files.
+//!
 //! Limits, stated plainly: only `.msg` input is exported, with its body (converted to Markdown
-//! in `message.md`, plus each original body form kept as `body.html`, `body.rtf`, or `body.txt`);
-//! attachments and embedded messages are counted and recorded as not extracted (M4f). Memory no
-//! longer grows with the archive (one message at a time, plus the manifest), but `--out` and its
-//! `.tsp-tmp` staging directory are now created before the consent decision and removed again if
-//! the run is refused; each file is replaced atomically, but the archive as a whole is not
-//! all-or-nothing -- an interrupted run leaves the root `folder.json` marked `incomplete`.
+//! in `message.md`, plus each original body form kept as `body.html`, `body.rtf`, or `body.txt`)
+//! and its by-value attachments. Embedded messages, OLE objects, and by-reference attachments
+//! are counted and recorded as not extracted (embedded messages: M4f-2); a by-value attachment
+//! whose data is missing, unreadable, or of another length than declared is recorded as failed
+//! and the export goes on. Memory no longer grows with the archive (one message at a time, plus
+//! the manifest), but `--out` and its `.tsp-tmp` staging directory are now created before the
+//! consent decision and removed again if the run is refused; each file is replaced atomically,
+//! but the archive as a whole is not all-or-nothing -- an interrupted run leaves the root
+//! `folder.json` marked `incomplete`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -26,18 +35,30 @@ use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
 use crate::archive::{
+    ATTACHMENT_EXTRACTED, ATTACHMENT_FAILED, ATTACHMENT_NOT_EXTRACTED, AttachmentRecord,
     BODY_HTML_NAME, BODY_RTF_NAME, BODY_TXT_NAME, BodyOutcome, ChildRecord, FOLDER_JSON_NAME,
     FolderMetadata, KIND_ARCHIVE_ROOT, MESSAGE_MD_NAME, METADATA_JSON_NAME, NameRecord, RootCounts,
     RootRecord, RootSpec, STATUS_COMPLETE, STATUS_INCOMPLETE, SourceRecord, TOOL_NAME,
-    adjustment_names, body_outcome, message_metadata, render_message_md, to_json,
+    adjustment_names, body_outcome, message_metadata, method_label, render_message_md, to_json,
 };
 use crate::body::{BodySource, LossReason};
 use crate::dry_run::{SourceKind, classify_source, input_leaf_name, root_stem, root_units};
+use crate::model::MessageContent;
 use crate::naming::{collision_key, utf16_len};
-use crate::plan::{EntryKind, Plan, Policy, SourceFolder, SourceMessage, plan_export, verify_plan};
-use crate::source_msg::{MsgFileMap, build_msg_export_source, read_message_content};
+use crate::plan::{
+    EntryKind, Plan, PlanEntry, Policy, SourceFolder, SourceMessage, plan_export, verify_plan,
+};
+use crate::shared::{
+    ATTACH_METHOD_BY_REFERENCE, ATTACH_METHOD_BY_REFERENCE_ONLY,
+    ATTACH_METHOD_BY_REFERENCE_RESOLVE, ATTACH_METHOD_BY_VALUE, ATTACH_METHOD_EMBEDDED_MESSAGE,
+    ATTACH_METHOD_NONE, ATTACH_METHOD_OLE,
+};
+use crate::source_msg::{
+    MsgAttachments, MsgFileMap, OpenMessage, build_msg_export_source, open_message,
+};
 use crate::stage::{
-    Disposition, STAGING_TAIL_UNITS, StagedFile, Stager, hash_file, hex, join_path,
+    Disposition, STAGING_TAIL_UNITS, SourceFailure, StagedFile, Stager, StreamOutcome, hash_file,
+    hex, join_path,
 };
 
 const MAX_PATH_UNITS: usize = 259;
@@ -197,7 +218,16 @@ pub(crate) struct ExportReport {
     files_unchanged: usize,
     folder_files: usize,
     message_directories: usize,
+    /// Planned attachment files that were not written (not extracted by design, failed, or
+    /// inside an embedded message). Failed ones are a subset of this.
     attachments_not_extracted: usize,
+    /// By-value attachments written to files.
+    attachments_extracted: usize,
+    /// Bytes of the by-value attachments written.
+    attachment_bytes_extracted: u64,
+    /// By-value attachments whose data was missing, unreadable, or of another length than
+    /// declared.
+    attachments_failed: usize,
     embedded_messages_not_extracted: usize,
     bodies_plain_present: usize,
     bodies_plain_empty: usize,
@@ -276,6 +306,12 @@ fn print_export_report(r: &ExportReport) {
         "export_attachments_not_extracted={}",
         r.attachments_not_extracted
     );
+    println!("export_attachments_extracted={}", r.attachments_extracted);
+    println!(
+        "export_attachment_bytes_extracted={}",
+        r.attachment_bytes_extracted
+    );
+    println!("export_attachments_failed={}", r.attachments_failed);
     println!(
         "export_embedded_messages_not_extracted={}",
         r.embedded_messages_not_extracted
@@ -415,6 +451,123 @@ fn index_tree<'a>(
 }
 
 // -----------------------------------------------------------------------------
+// Attachments (M4f-1)
+// -----------------------------------------------------------------------------
+
+fn name_record(entry: &PlanEntry) -> NameRecord {
+    NameRecord {
+        original: entry.original.clone(),
+        adjustments: adjustment_names(&entry.flags),
+    }
+}
+
+/// Streams one by-value attachment into staging and fills in its record. A missing, unreadable,
+/// or wrong-length data stream is a recorded failure; only a failure to write to staging is an
+/// error.
+fn stage_by_value(
+    stager: &mut Stager,
+    entry: &PlanEntry,
+    index: usize,
+    reader: &mut MsgAttachments,
+    report: &mut ExportReport,
+    record: &mut AttachmentRecord,
+) -> Result<()> {
+    let Some((mut data, declared)) = reader.open_data(index) else {
+        record.status = ATTACHMENT_FAILED;
+        record.reason = Some("data_stream_missing");
+        report.attachments_failed += 1;
+        return Ok(());
+    };
+    match stager.add_stream(entry.components.clone(), &mut data, Some(declared))? {
+        StreamOutcome::Staged { size, digest } => {
+            record.status = ATTACHMENT_EXTRACTED;
+            record.file = entry.components.last().cloned();
+            record.bytes = Some(size);
+            record.sha256 = Some(hex(digest));
+            report.attachments_extracted += 1;
+            report.attachment_bytes_extracted += size;
+        }
+        StreamOutcome::SourceFailed(failure) => {
+            record.status = ATTACHMENT_FAILED;
+            record.reason = Some(match failure {
+                SourceFailure::ReadError => "data_read_failed",
+                SourceFailure::LengthMismatch => "data_length_mismatch",
+            });
+            report.attachments_failed += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Stages every by-value attachment of one message, one at a time, and returns a record for
+/// every attachment (extracted or not), in storage order. Attachment bytes are never held whole.
+fn stage_attachments(
+    stager: &mut Stager,
+    planned: &BTreeMap<u64, &PlanEntry>,
+    message: &SourceMessage,
+    content: &MessageContent,
+    reader: &mut MsgAttachments,
+    report: &mut ExportReport,
+) -> Result<Vec<AttachmentRecord>> {
+    if content.attachments.len() != message.attachments.len() {
+        bail!("a message changed while it was being exported; run the export again");
+    }
+    let mut records = Vec::with_capacity(message.attachments.len());
+    for (index, (source, info)) in message
+        .attachments
+        .iter()
+        .zip(&content.attachments)
+        .enumerate()
+    {
+        let mut record = AttachmentRecord {
+            name: NameRecord {
+                original: String::new(),
+                adjustments: Vec::new(),
+            },
+            method: method_label(info.method),
+            method_code: info.method,
+            content_id: info.content_id.clone(),
+            status: ATTACHMENT_NOT_EXTRACTED,
+            reason: None,
+            file: None,
+            bytes: None,
+            sha256: None,
+        };
+        if let Some(embedded) = &source.embedded {
+            let entry = planned
+                .get(&embedded.id)
+                .ok_or_else(|| anyhow!("internal error: an embedded message is not planned"))?;
+            record.name = name_record(entry);
+            record.reason = Some("embedded_message");
+        } else {
+            let entry = planned
+                .get(&source.id)
+                .ok_or_else(|| anyhow!("internal error: an attachment is not planned"))?;
+            record.name = name_record(entry);
+            match info.method {
+                Some(ATTACH_METHOD_BY_VALUE) => {
+                    stage_by_value(stager, entry, index, reader, report, &mut record)?;
+                }
+                Some(ATTACH_METHOD_NONE) => record.reason = Some("method_none"),
+                Some(
+                    ATTACH_METHOD_BY_REFERENCE
+                    | ATTACH_METHOD_BY_REFERENCE_RESOLVE
+                    | ATTACH_METHOD_BY_REFERENCE_ONLY,
+                ) => record.reason = Some("by_reference"),
+                Some(ATTACH_METHOD_OLE) => record.reason = Some("ole_object"),
+                Some(ATTACH_METHOD_EMBEDDED_MESSAGE) => {
+                    record.reason = Some("embedded_message_unreadable");
+                }
+                Some(_) => record.reason = Some("method_unrecognized"),
+                None => record.reason = Some("method_unreadable"),
+            }
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+// -----------------------------------------------------------------------------
 // Rendering the archive into the staging directory, one message at a time
 // -----------------------------------------------------------------------------
 
@@ -428,8 +581,9 @@ struct ArchiveInput<'a> {
 }
 
 /// Renders every file of the archive and hands it to the stager the moment it exists, so only
-/// one message's content is in memory at a time. Returns the root description, which the commit
-/// uses for the `incomplete` marker (the complete root is staged like any other file, last).
+/// one message's content is in memory at a time (an attachment is copied through in chunks).
+/// Returns the root description, which the commit uses for the `incomplete` marker (the
+/// complete root is staged like any other file, last).
 fn stage_archive(
     archive: &ArchiveInput<'_>,
     source: SourceRecord,
@@ -446,6 +600,18 @@ fn stage_archive(
     let mut folders = BTreeMap::new();
     let mut messages = BTreeMap::new();
     index_tree(tree, &mut folders, &mut messages);
+
+    // The plan's attachment and embedded-message entries by source ID. Attachment IDs and
+    // message IDs come from one counter, so they never collide.
+    let mut planned: BTreeMap<u64, &PlanEntry> = BTreeMap::new();
+    for entry in &plan.entries {
+        if matches!(
+            entry.kind,
+            EntryKind::AttachmentFile | EntryKind::EmbeddedMessage
+        ) {
+            planned.insert(entry.source_id, entry);
+        }
+    }
 
     let mut children: BTreeMap<Vec<String>, Vec<ChildRecord>> = BTreeMap::new();
     for entry in &plan.entries {
@@ -465,7 +631,7 @@ fn stage_archive(
         }
     }
 
-    let root = RootSpec {
+    let mut root = RootSpec {
         record: RootRecord {
             tool: TOOL_NAME,
             tool_version: env!("CARGO_PKG_VERSION"),
@@ -479,6 +645,7 @@ fn stage_archive(
             counts: RootCounts {
                 folders: plan.counters.folders,
                 messages: plan.counters.messages,
+                attachments_extracted: 0,
                 attachments_not_extracted: plan.counters.attachment_files,
                 embedded_messages_not_extracted: plan.counters.embedded_messages,
             },
@@ -512,8 +679,15 @@ fn stage_archive(
                 let path = sources
                     .get(&entry.source_id)
                     .ok_or_else(|| anyhow!("internal error: a planned message has no file"))?;
-                let content = read_message_content(path)?;
+                let OpenMessage {
+                    content,
+                    attachments: mut reader,
+                } = open_message(path)?;
                 let outcome = body_outcome(&content.bodies);
+                // Attachments first: `metadata.json` records each one's size and hash, which
+                // are known only once its data has been copied.
+                let records =
+                    stage_attachments(stager, &planned, message, &content, &mut reader, report)?;
                 let meta = message_metadata(
                     &relative_source_name(input, path),
                     &content,
@@ -522,7 +696,7 @@ fn stage_archive(
                         original: entry.original.clone(),
                         adjustments: adjustment_names(&entry.flags),
                     },
-                    message.attachments.len(),
+                    records,
                 );
                 stager.add(
                     rel_with(&entry.components, MESSAGE_MD_NAME),
@@ -543,10 +717,19 @@ fn stage_archive(
                     stager.add(rel_with(&entry.components, original.name), &original.bytes)?;
                 }
             }
-            EntryKind::AttachmentFile => report.attachments_not_extracted += 1,
+            // Counted from the plan after the loop; by-value attachments were staged with their
+            // message above.
+            EntryKind::AttachmentFile => {}
             EntryKind::EmbeddedMessage => report.embedded_messages_not_extracted += 1,
         }
     }
+
+    report.attachments_not_extracted = plan
+        .counters
+        .attachment_files
+        .saturating_sub(report.attachments_extracted);
+    root.record.counts.attachments_extracted = report.attachments_extracted;
+    root.record.counts.attachments_not_extracted = report.attachments_not_extracted;
 
     stager.add(
         vec![FOLDER_JSON_NAME.to_string()],
@@ -909,7 +1092,7 @@ mod tests {
     }
 
     /// A plain-text message: subject, optional body, delivery time, and optionally one by-value
-    /// attachment.
+    /// attachment (with no data stream).
     fn write_msg(path: &Path, subject: &str, body: Option<&str>, with_attachment: bool) {
         let mut comp = cfb::create(path).expect("create CFB");
         let ticks: u64 = 133_000_000_000_000_000;
@@ -967,6 +1150,69 @@ mod tests {
         }
         if let Some(bytes) = rtf_stream {
             put(&mut comp, "/__substg1.0_10090102", bytes);
+        }
+    }
+
+    /// One attachment of a synthetic message.
+    struct TestAttachment<'a> {
+        method: i32,
+        name: Option<&'a str>,
+        /// `None` writes no data stream.
+        data: Option<&'a [u8]>,
+        content_id: Option<&'a str>,
+    }
+
+    fn by_value<'a>(name: &'a str, data: &'a [u8]) -> TestAttachment<'a> {
+        TestAttachment {
+            method: 1,
+            name: Some(name),
+            data: Some(data),
+            content_id: None,
+        }
+    }
+
+    fn add_test_attachment(
+        comp: &mut cfb::CompoundFile<std::fs::File>,
+        index: usize,
+        a: &TestAttachment<'_>,
+    ) {
+        let storage = format!("/__attach_version1.0_#{index:08X}");
+        comp.create_storage(&storage)
+            .expect("create attachment storage");
+        let mut props = vec![0u8; 8];
+        let mut method = [0u8; 8];
+        method[..4].copy_from_slice(&a.method.to_le_bytes());
+        props.extend(entry(0x0003, 0x3705, method));
+        put(comp, &format!("{storage}/__properties_version1.0"), &props);
+        if let Some(name) = a.name {
+            put(
+                comp,
+                &format!("{storage}/__substg1.0_3707001F"),
+                &utf16(name),
+            );
+        }
+        if let Some(data) = a.data {
+            put(comp, &format!("{storage}/__substg1.0_37010102"), data);
+        }
+        if let Some(cid) = a.content_id {
+            put(
+                comp,
+                &format!("{storage}/__substg1.0_3712001F"),
+                &utf16(cid),
+            );
+        }
+    }
+
+    /// A plain message (subject and delivery time) with the given attachments.
+    fn write_msg_attachments(path: &Path, subject: &str, attachments: &[TestAttachment<'_>]) {
+        let mut comp = cfb::create(path).expect("create CFB");
+        let ticks: u64 = 133_000_000_000_000_000;
+        let mut props = vec![0u8; 32];
+        props.extend(entry(0x0040, 0x0E06, ticks.to_le_bytes()));
+        put(&mut comp, "/__properties_version1.0", &props);
+        put(&mut comp, "/__substg1.0_0037001F", &utf16(subject));
+        for (index, a) in attachments.iter().enumerate() {
+            add_test_attachment(&mut comp, index, a);
         }
     }
 
@@ -1247,9 +1493,10 @@ mod tests {
         );
 
         let files = tree_files(&out);
+        // The attachment is by value but its data stream is missing: nothing is written for it.
         assert!(
             !files.keys().any(|k| k.contains("attachments")),
-            "M4c writes no attachments"
+            "no data, so no attachment file"
         );
         let meta: serde_json::Value =
             serde_json::from_slice(&files["a/With file/metadata.json"]).unwrap();
@@ -1262,6 +1509,9 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert!(reasons.contains(&"attachments_not_extracted"));
+        assert_eq!(meta["attachments"][0]["status"], "failed");
+        assert_eq!(meta["attachments"][0]["reason"], "data_stream_missing");
+        assert_eq!(meta["attachments"][0]["name"]["original"], "report.pdf");
         let root: serde_json::Value = serde_json::from_slice(&files["a/folder.json"]).unwrap();
         assert_eq!(root["root"]["counts"]["attachments_not_extracted"], 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1287,6 +1537,173 @@ mod tests {
         assert_eq!(meta["body"]["source"], "none");
         assert_eq!(meta["body"]["originals"], serde_json::json!([]));
         assert!(!files.keys().any(|k| k.contains("/body.")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- attachments (M4f-1) -------------------------------------------------
+
+    #[test]
+    fn by_value_attachments_are_written_with_size_and_hash_and_recorded() {
+        let dir = temp_dir("attachfiles");
+        let file = dir.join("a.msg");
+        let big: Vec<u8> = (0..(2 * 256 * 1024 + 123) as u32)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        write_msg_attachments(
+            &file,
+            "With files",
+            &[
+                by_value("report.pdf", &big),
+                TestAttachment {
+                    content_id: Some("logo@x"),
+                    ..by_value("logo.png", b"\x89PNG")
+                },
+                by_value("empty.txt", b""),
+            ],
+        );
+        let out = dir.join("out");
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+
+        let files = tree_files(&out);
+        assert_eq!(files["a/With files/attachments/report.pdf"], big);
+        assert_eq!(files["a/With files/attachments/logo.png"], b"\x89PNG");
+        assert_eq!(files["a/With files/attachments/empty.txt"], b"");
+        assert!(!out.join(STAGING_DIR).exists());
+
+        let meta = meta_of(&files, "a/With files/metadata.json");
+        let records = meta["attachments"].as_array().unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["status"], "extracted");
+        assert_eq!(records[0]["file"], "report.pdf");
+        assert_eq!(records[0]["bytes"], big.len());
+        assert_eq!(records[0]["sha256"], hex(Sha256::digest(&big)));
+        assert_eq!(records[0]["method"], "by_value");
+        assert_eq!(records[1]["content_id"], "logo@x");
+        assert_eq!(records[2]["bytes"], 0);
+        assert_eq!(records[2]["sha256"], hex(Sha256::digest(b"")));
+        assert_eq!(meta["attachments_not_extracted"], 0);
+        assert_eq!(
+            meta["status_reasons"],
+            serde_json::json!(["other_properties_not_preserved"])
+        );
+        let root: serde_json::Value = serde_json::from_slice(&files["a/folder.json"]).unwrap();
+        assert_eq!(root["root"]["counts"]["attachments_extracted"], 3);
+        assert_eq!(root["root"]["counts"]["attachments_not_extracted"], 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn each_attachment_lands_under_its_own_planned_name() {
+        let dir = temp_dir("attachdupes");
+        let file = dir.join("d.msg");
+        write_msg_attachments(
+            &file,
+            "Dupes",
+            &[
+                by_value("image001.png", b"first"),
+                by_value("image001.png", b"second"),
+                TestAttachment {
+                    name: None,
+                    ..by_value("", b"third")
+                },
+            ],
+        );
+        let out = dir.join("out");
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+        let files = tree_files(&out);
+        let meta = meta_of(&files, "d/Dupes/metadata.json");
+        let mut names = BTreeSet::new();
+        for (i, expected) in [&b"first"[..], b"second", b"third"].iter().enumerate() {
+            let name = meta["attachments"][i]["file"].as_str().expect("extracted");
+            assert!(names.insert(name.to_string()), "names must be distinct");
+            assert_eq!(files[&format!("d/Dupes/attachments/{name}")], *expected);
+        }
+
+        // A second run changes nothing and needs no consent.
+        let before = tree_files(&out);
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+        assert_eq!(tree_files(&out), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn attachments_that_cannot_be_extracted_are_recorded_with_a_reason() {
+        let dir = temp_dir("attachmixed");
+        let file = dir.join("x.msg");
+        write_msg_attachments(
+            &file,
+            "Mixed",
+            &[
+                TestAttachment {
+                    method: 6,
+                    data: None,
+                    ..by_value("obj.bin", b"")
+                },
+                TestAttachment {
+                    method: 2,
+                    data: None,
+                    ..by_value("link.lnk", b"")
+                },
+                TestAttachment {
+                    data: None,
+                    ..by_value("gone.bin", b"")
+                },
+                by_value("ok.bin", b"fine"),
+            ],
+        );
+        let out = dir.join("out");
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+        let files = tree_files(&out);
+        let written: Vec<&str> = files
+            .keys()
+            .filter(|k| k.contains("/attachments/"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(written, vec!["x/Mixed/attachments/ok.bin"]);
+
+        let meta = meta_of(&files, "x/Mixed/metadata.json");
+        let status: Vec<(&str, &str)> = meta["attachments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["status"].as_str().unwrap(),
+                    r["reason"].as_str().unwrap_or(""),
+                )
+            })
+            .collect();
+        assert_eq!(
+            status,
+            vec![
+                ("not_extracted", "ole_object"),
+                ("not_extracted", "by_reference"),
+                ("failed", "data_stream_missing"),
+                ("extracted", ""),
+            ]
+        );
+        assert_eq!(meta["attachments_not_extracted"], 3);
+        assert!(
+            meta["status_reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("attachments_not_extracted"))
+        );
+        let root: serde_json::Value = serde_json::from_slice(&files["x/folder.json"]).unwrap();
+        assert_eq!(root["root"]["counts"]["attachments_extracted"], 1);
+        assert_eq!(root["root"]["counts"]["attachments_not_extracted"], 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1762,22 +2179,29 @@ mod tests {
     /// Generates a large synthetic corpus for the M4h-0 memory gate; it asserts nothing.
     /// `TSP_BIG_CORPUS_DIR` names a new directory; `TSP_BIG_COUNT` (default 200) is the number of
     /// messages and `TSP_BIG_MB` (default 2) the size of each message's HTML and plain-text
-    /// body. Run by hand: `cargo test --release generate_a_large_synthetic_corpus -- --ignored`.
+    /// body. `TSP_BIG_ATTACH_MB` (default 0, none) adds one by-value attachment of that many
+    /// megabytes to every message (M4f: use it with a small `TSP_BIG_COUNT`, since each message
+    /// carries its own copy). Run by hand:
+    /// `cargo test --release generate_a_large_synthetic_corpus -- --ignored`.
     #[test]
-    #[ignore = "generates a large synthetic corpus by hand (M4h-0 memory gate)"]
+    #[ignore = "generates a large synthetic corpus by hand (memory gate)"]
     fn generate_a_large_synthetic_corpus() {
         let dir = PathBuf::from(
             std::env::var("TSP_BIG_CORPUS_DIR").expect("set TSP_BIG_CORPUS_DIR to a new directory"),
         );
-        let count: usize = std::env::var("TSP_BIG_COUNT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(200);
-        let megabytes: usize = std::env::var("TSP_BIG_MB")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(2);
+        let env_usize = |key: &str, default: usize| -> usize {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let count = env_usize("TSP_BIG_COUNT", 200);
+        let megabytes = env_usize("TSP_BIG_MB", 2);
+        let attachment_mb = env_usize("TSP_BIG_ATTACH_MB", 0);
         std::fs::create_dir_all(&dir).expect("create the corpus directory");
+        let attachment: Vec<u8> = (0..attachment_mb * 1024 * 1024)
+            .map(|i| (i % 251) as u8)
+            .collect();
         for n in 0..count {
             let mut html = String::from("<html><body>");
             let mut plain = String::new();
@@ -1792,14 +2216,19 @@ mod tests {
                 i += 1;
             }
             html.push_str("</body></html>");
+            let path = dir.join(format!("big-{n:05}.msg"));
             write_msg_forms(
-                &dir.join(format!("big-{n:05}.msg")),
+                &path,
                 &format!("Big message {n:05}"),
                 Some(&plain),
                 Some(html.as_bytes()),
                 None,
                 Some(65001),
             );
+            if attachment_mb > 0 {
+                let mut comp = cfb::open_rw(&path).expect("reopen the message");
+                add_test_attachment(&mut comp, 0, &by_value("big.bin", &attachment));
+            }
         }
     }
 

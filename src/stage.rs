@@ -9,12 +9,16 @@
 //! answered: the preflight compares sizes and hashes with the target, the tree hash is computed
 //! from the paths and hashes, and the read-back streams each written file through the hasher.
 //!
+//! Rendered text goes in whole through [`Stager::add`]. Attachment data goes in through
+//! [`Stager::add_stream`] (M4f), which copies a source stream in fixed-size chunks and hashes as
+//! it writes, so memory is one chunk however large the attachment is.
+//!
 //! After consent, [`Stager::commit`] renames the staged files into place (same volume, so
 //! nothing is copied) and deletes the ones identical to what is already there. A refused or
 //! failed run calls [`Stager::discard`] (or leaves numeric files that the next run removes).
 //! Nothing here prints; nothing here names a file in an error message.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -27,6 +31,28 @@ use crate::archive::FOLDER_JSON_NAME;
 pub(crate) const STAGING_DIR: &str = ".tsp-tmp";
 /// `<out>\.tsp-tmp\<up to 10 digits>`: the longest staged path is `out + 1 + 8 + 1 + 10`.
 pub(crate) const STAGING_TAIL_UNITS: usize = 1 + 8 + 1 + 10;
+
+/// Chunk size for copying a source stream into staging.
+pub(crate) const COPY_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Why a source stream could not be staged. The source is at fault, not the staging area, so the
+/// export goes on and records the failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceFailure {
+    /// A read from the source failed part-way.
+    ReadError,
+    /// The bytes read were not the length the source declared.
+    LengthMismatch,
+}
+
+/// What [`Stager::add_stream`] did with a source stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamOutcome {
+    /// The whole stream was staged; `size` and `digest` are what was actually written.
+    Staged { size: u64, digest: [u8; 32] },
+    /// The source failed; nothing was staged.
+    SourceFailed(SourceFailure),
+}
 
 pub(crate) fn hex(bytes: impl AsRef<[u8]>) -> String {
     bytes
@@ -92,6 +118,8 @@ pub(crate) struct Stager {
     staging: PathBuf,
     counter: u64,
     files: Vec<StagedFile>,
+    /// The copy buffer [`Stager::add_stream`] reuses; empty until the first stream.
+    scratch: Vec<u8>,
 }
 
 /// Empties a staging directory of the numeric files an interrupted run left behind, creating it
@@ -139,6 +167,7 @@ impl Stager {
             staging,
             counter: 0,
             files: Vec::new(),
+            scratch: Vec::new(),
         })
     }
 
@@ -158,6 +187,69 @@ impl Stager {
             staged: id,
         });
         Ok(())
+    }
+
+    /// Copies `source` to the staging directory in chunks and records it in the manifest,
+    /// hashing as it writes: memory is one chunk, whatever the size. `declared_len`, when the
+    /// source knows it, is checked against the bytes actually read.
+    ///
+    /// A failure of the source (a read error, a wrong length) removes the partial staged file,
+    /// adds nothing to the manifest, does not use up a staged number, and returns
+    /// `Ok(SourceFailed(..))`. A failure to write to staging is an `Err`: the export stops.
+    pub(crate) fn add_stream(
+        &mut self,
+        rel: Vec<String>,
+        source: &mut dyn Read,
+        declared_len: Option<u64>,
+    ) -> Result<StreamOutcome> {
+        let id = self.counter + 1;
+        let path = self.staging.join(id.to_string());
+        let mut file = std::fs::File::create(&path).context("failed to create a staged file")?;
+        if self.scratch.len() != COPY_CHUNK_BYTES {
+            self.scratch = vec![0u8; COPY_CHUNK_BYTES];
+        }
+        let mut hasher = Sha256::new();
+        let mut total = 0u64;
+        let mut failure = None;
+        loop {
+            let n = match source.read(&mut self.scratch) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    failure = Some(SourceFailure::ReadError);
+                    break;
+                }
+            };
+            if let Err(e) = file.write_all(&self.scratch[..n]) {
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                return Err(anyhow::Error::new(e).context("failed to write a staged file"));
+            }
+            hasher.update(&self.scratch[..n]);
+            total += n as u64;
+        }
+        if failure.is_none() && declared_len.is_some_and(|declared| declared != total) {
+            failure = Some(SourceFailure::LengthMismatch);
+        }
+        drop(file);
+        if let Some(failure) = failure {
+            let _ = std::fs::remove_file(&path);
+            return Ok(StreamOutcome::SourceFailed(failure));
+        }
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&hasher.finalize());
+        self.counter = id;
+        self.files.push(StagedFile {
+            rel,
+            size: total,
+            digest,
+            staged: id,
+        });
+        Ok(StreamOutcome::Staged {
+            size: total,
+            digest,
+        })
     }
 
     /// Sorts the manifest by relative path. Call once, after the last `add` and before anything
@@ -467,6 +559,194 @@ mod tests {
         assert_eq!(digest, whole);
         assert_eq!(size, 200_000);
         assert!(hash_file(&dir.join("missing")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- add_stream (M4f) ---------------------------------------------------------------
+
+    /// Returns at most `step` bytes per call, like a source that reads one sector at a time.
+    struct Trickle<'a> {
+        data: &'a [u8],
+        step: usize,
+    }
+
+    impl Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.step.min(self.data.len()).min(buf.len());
+            buf[..n].copy_from_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Ok(n)
+        }
+    }
+
+    /// Yields `good` bytes, then fails.
+    struct Breaks {
+        good: usize,
+    }
+
+    impl Read for Breaks {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.good == 0 {
+                return Err(std::io::Error::other("broken"));
+            }
+            let n = self.good.min(buf.len());
+            buf[..n].fill(7);
+            self.good -= n;
+            Ok(n)
+        }
+    }
+
+    /// Fails once with `Interrupted`, then reads normally.
+    struct InterruptsOnce<'a> {
+        data: &'a [u8],
+        tripped: bool,
+    }
+
+    impl Read for InterruptsOnce<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.tripped {
+                self.tripped = true;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            let n = self.data.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Ok(n)
+        }
+    }
+
+    fn patterned(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    fn sha(bytes: &[u8]) -> [u8; 32] {
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&Sha256::digest(bytes));
+        digest
+    }
+
+    #[test]
+    fn streaming_stages_the_same_file_and_manifest_entry_as_add() {
+        let dir = temp_dir("stream-equal");
+        let payload = patterned(3 * COPY_CHUNK_BYTES + 17);
+
+        let out_a = dir.join("a");
+        let mut by_add = Stager::begin(&out_a).unwrap();
+        by_add.add(rel(&["x", "f.bin"]), &payload).unwrap();
+        by_add.finish();
+
+        let out_b = dir.join("b");
+        let mut by_stream = Stager::begin(&out_b).unwrap();
+        let outcome = by_stream
+            .add_stream(
+                rel(&["x", "f.bin"]),
+                &mut std::io::Cursor::new(&payload),
+                Some(payload.len() as u64),
+            )
+            .unwrap();
+        by_stream.finish();
+
+        assert_eq!(
+            outcome,
+            StreamOutcome::Staged {
+                size: payload.len() as u64,
+                digest: sha(&payload)
+            }
+        );
+        assert_eq!(by_add.files()[0].size, by_stream.files()[0].size);
+        assert_eq!(by_add.files()[0].digest, by_stream.files()[0].digest);
+        assert_eq!(by_add.tree_hash(), by_stream.tree_hash());
+        assert_eq!(
+            std::fs::read(out_a.join(STAGING_DIR).join("1")).unwrap(),
+            std::fs::read(out_b.join(STAGING_DIR).join("1")).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn short_reads_and_an_interrupt_do_not_change_the_result() {
+        let dir = temp_dir("stream-short");
+        let out = dir.join("out");
+        let payload = patterned(5000);
+        let mut stager = Stager::begin(&out).unwrap();
+        let trickled = stager
+            .add_stream(
+                rel(&["a"]),
+                &mut Trickle {
+                    data: &payload,
+                    step: 7,
+                },
+                None,
+            )
+            .unwrap();
+        let interrupted = stager
+            .add_stream(
+                rel(&["b"]),
+                &mut InterruptsOnce {
+                    data: &payload,
+                    tripped: false,
+                },
+                None,
+            )
+            .unwrap();
+        let expected = StreamOutcome::Staged {
+            size: 5000,
+            digest: sha(&payload),
+        };
+        assert_eq!(trickled, expected);
+        assert_eq!(interrupted, expected);
+        assert_eq!(staging_names(&out), vec!["1", "2"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_source_stages_an_empty_file() {
+        let dir = temp_dir("stream-empty");
+        let out = dir.join("out");
+        let mut stager = Stager::begin(&out).unwrap();
+        let outcome = stager
+            .add_stream(rel(&["e"]), &mut std::io::empty(), Some(0))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            StreamOutcome::Staged {
+                size: 0,
+                digest: sha(b"")
+            }
+        );
+        assert_eq!(std::fs::read(out.join(STAGING_DIR).join("1")).unwrap(), b"");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_source_that_fails_leaves_nothing_behind_and_uses_no_number() {
+        let dir = temp_dir("stream-fail");
+        let out = dir.join("out");
+        let mut stager = Stager::begin(&out).unwrap();
+
+        let broken = stager
+            .add_stream(rel(&["x"]), &mut Breaks { good: 1000 }, Some(5000))
+            .unwrap();
+        assert_eq!(
+            broken,
+            StreamOutcome::SourceFailed(SourceFailure::ReadError)
+        );
+
+        let payload = patterned(11);
+        let wrong = stager
+            .add_stream(rel(&["y"]), &mut std::io::Cursor::new(&payload), Some(10))
+            .unwrap();
+        assert_eq!(
+            wrong,
+            StreamOutcome::SourceFailed(SourceFailure::LengthMismatch)
+        );
+
+        assert!(stager.files().is_empty());
+        assert!(staging_names(&out).is_empty());
+
+        // The number was not used up: the next file is number 1.
+        stager.add(rel(&["z"]), b"z").unwrap();
+        assert_eq!(staging_names(&out), vec!["1"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
