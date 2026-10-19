@@ -81,3 +81,5 @@ They complete this ADR and do not supersede it. The body and
 formatting-loss policy is still to be decided (after the HTML-to-Markdown
 comparison). A worked example is in
 [`docs/examples/m4c-example-archive.md`](../docs/examples/m4c-example-archive.md).
+
+*Added 2026-10-18 (links only; this ADR's status and decision are unchanged).* Extraction of attachments into the `attachments/` subfolder is decided by [attachment extraction: chunked copy, per-attachment records, and failure handling](attachment-extraction-streaming-copy-and-records.md).

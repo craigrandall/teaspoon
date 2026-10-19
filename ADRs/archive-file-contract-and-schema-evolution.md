@@ -8,7 +8,7 @@ informed: n/a — single-developer project
 
 # Archive file contract and schema evolution
 
-*Status history: proposed 2026-10-04; accepted 2026-10-04 by the owner. This ADR decides the rules every archive file must follow and how the formats may change; it does **not** freeze the field-level schemas, which stay drafts (`0.1-draft`) until the metadata stage (M4g) has settled what they must carry.*
+*Status history: proposed 2026-10-04; accepted 2026-10-04 by the owner. Amended 2026-10-18 (M4f-1; proposed, counts as accepted when the owner commits it): files that are byte copies of source content (the kept body files and the extracted attachments) are exempt from file rules 1 and 2, as the [body ADR](body-selection-original-bodies-and-formatting-loss.md) already decided for the body files (see the exemption after rule 8), and rule 6 is now partly met for attachments (see Confirmation). This ADR decides the rules every archive file must follow and how the formats may change; it does **not** freeze the field-level schemas, which stay drafts (`0.1-draft`) until the metadata stage (M4g) has settled what they must carry.*
 
 ## Context and Problem Statement
 
@@ -44,6 +44,8 @@ Chosen option: "A", because the stable part (determinism rules, versioning, loss
 7. **Names are not data.** Directory names derive from the naming ADR and carry no meaning a reader may rely on; everything a tool needs is in the JSON files (see the [identity ADR](message-and-folder-identity-and-provenance.md)).
 8. **Provenance is recorded, privacy is the user's.** Archives contain message content by design; what a tool prints about them stays content-free ([output posture ADR](export-output-posture-consent-and-ownership.md)).
 
+**Exemption (added 2026-10-18, M4f-1; first decided for the body files in the [body ADR](body-selection-original-bodies-and-formatting-loss.md)):** rules 1 and 2 govern the files the tool generates. A file that is a byte copy of source content, namely the kept `body.html`, `body.rtf`, and `body.txt` and the extracted attachments under `attachments/`, is not generated and is exempt from them: it may be binary, may contain a byte-order mark or CR/LF line endings, and has no trailing-newline requirement. Rules 3 to 5 concern values the tool writes into its own files and do not constrain the content of a copy. The `metadata.json` of the message records each such file's size and SHA-256 (rule 6; see the [attachment ADR](attachment-extraction-streaming-copy-and-records.md)).
+
 **Evolution policy once a schema is frozen (numbered `schema_version`):**
 
 * **Additive changes** (new optional fields, new reasons in an open list, new files) keep the version number's major part; readers must ignore fields they do not know.
@@ -63,7 +65,7 @@ Chosen option: "A", because the stable part (determinism rules, versioning, loss
 
 * Golden files (`tests/golden/hello/`) compare `message.md` and `metadata.json` byte for byte, both from the pure renderers and from a real export; CI runs them on Linux and Windows.
 * Determinism is tested (two exports to different directories, byte-identical), and was observed on the real `.msg` corpus: the same `export_tree_sha256` across three runs and two output directories. Read-back compares every written file with what was planned.
-* Rules 1, 2, 3, 4, and 5 hold for the M4c output by construction (the renderers are pure, use ordered structs, and are fed no paths or times other than the source's) and are checked by the golden and determinism tests. Rule 6 is partly implemented: M4c always writes `partial` with reasons, because most fields are not extracted yet.
+* Rules 1, 2, 3, 4, and 5 hold for the M4c output by construction (the renderers are pure, use ordered structs, and are fed no paths or times other than the source's) and are checked by the golden and determinism tests. Rule 6 is partly implemented: M4c always writes `partial` with reasons, because most fields are not extracted yet. Since M4f-1 (2026-10-18) every attachment has a record with a status and a reason from a draft vocabulary (the [attachment ADR](attachment-extraction-streaming-copy-and-records.md)), so the attachment part of rule 6 is implemented as a draft; the closed vocabulary is still M4g.
 * Planned: JSON schema tests on synthetic archives, a check that no absolute path or export-time value appears in any metadata file, and archive read-back verification (M4g, M4j).
 * Not yet confirmed: that a numeric `schema_version` scheme and the additive/breaking split are enough; the closed reason vocabulary is not yet defined.
 

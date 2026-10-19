@@ -81,3 +81,4 @@ Chosen option: "A", because no single available identifier is both always presen
 * Rules and the identity discussion: [`docs/plans/m4a-export-rules.md`](../docs/plans/m4a-export-rules.md) section 9.
 * The schemas that carry these fields: [Archive file contract and schema evolution](archive-file-contract-and-schema-evolution.md).
 * Revisit when: the PST export (M4i) shows an item without an obtainable identifier, or Q11 is decided.
+* Added 2026-10-18 (M4f-1; the decision is unchanged): each extracted attachment's record in `metadata.json` carries the size and SHA-256 of the file written. That is a per-file integrity hash, not the content identity of point 5; whether Q11's definition includes attachment hashes is decided at M4g. See the [attachment ADR](attachment-extraction-streaming-copy-and-records.md).
