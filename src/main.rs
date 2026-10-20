@@ -24,6 +24,7 @@ mod stage;
 #[cfg(test)]
 mod tests;
 mod verify;
+mod verify_attachments;
 mod verify_bodies;
 mod verify_deencap;
 mod verify_envelope;
@@ -40,6 +41,7 @@ use crate::export::{ExportOptions, ExportStatus, prompt_for_consent, run_export}
 use crate::oxmsg_extract::run_msg_extract;
 use crate::pst::run_pst_diagnostic;
 use crate::verify::run_msg_verify;
+use crate::verify_attachments::run_attachments_verify;
 use crate::verify_bodies::run_bodies_verify;
 use crate::verify_deencap::run_deencap_verify;
 use crate::verify_envelope::run_envelope_verify;
@@ -47,9 +49,14 @@ use crate::verify_envelope::run_envelope_verify;
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    if args.recursive && !(args.verify_envelope || args.verify_deencap || args.verify_bodies) {
+    if args.recursive
+        && !(args.verify_envelope
+            || args.verify_deencap
+            || args.verify_bodies
+            || args.verify_attachments)
+    {
         anyhow::bail!(
-            "--recursive applies only to --verify-envelope, --verify-deencap, and --verify-bodies"
+            "--recursive applies only to --verify-envelope, --verify-deencap, --verify-bodies, and --verify-attachments"
         );
     }
 
@@ -80,6 +87,9 @@ fn main() -> Result<()> {
             if args.verify_bodies {
                 anyhow::bail!("--verify-bodies applies only to .msg input");
             }
+            if args.verify_attachments {
+                anyhow::bail!("--verify-attachments applies only to .msg input");
+            }
             run_pst_diagnostic(&args.input)
         }
         InputKind::Msg {
@@ -105,6 +115,8 @@ fn main() -> Result<()> {
                 run_deencap_verify(&files, subdirectories_skipped, args.dump_deencap.as_deref())
             } else if args.verify_bodies {
                 run_bodies_verify(&files, subdirectories_skipped, args.dump_bodies.as_deref())
+            } else if args.verify_attachments {
+                run_attachments_verify(&files, subdirectories_skipped)
             } else {
                 run_msg_extract(&files, subdirectories_skipped)
             }

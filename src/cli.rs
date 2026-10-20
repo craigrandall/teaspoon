@@ -71,6 +71,18 @@ pub(crate) struct Args {
     #[arg(long, value_name = "DIR", requires = "verify_bodies")]
     pub(crate) dump_bodies: Option<PathBuf>,
 
+    /// Attachment payload differential (M4f-2c): for each top-level by-value attachment, compare
+    /// the SHA-256 of the bytes the export would write (read through the export's own reader)
+    /// with the SHA-256 of `msg_parser`'s payload for the same attachment, pairing attachments
+    /// by position in storage order. Reads real content internally and prints only counts
+    /// (matches, mismatches, missing or unreadable streams, a count of positions where the two
+    /// disagree on the method, and a gate total that must be 0) -- never names or bytes.
+    #[arg(
+        long,
+        conflicts_with_all = ["verify", "verify_envelope", "verify_deencap", "dump_deencap", "verify_bodies", "dump_bodies", "bakeoff_md", "bakeoff_dump", "out", "dry_run"]
+    )]
+    pub(crate) verify_attachments: bool,
+
     /// Run the HTML-to-Markdown bake-off (M4e-0) over the `NNN.custom.html` files in the input
     /// directory (the directory `--dump-deencap` wrote) and a built-in set of synthetic and
     /// adversarial cases, and print only content-free scores. Needs a build with
@@ -86,9 +98,9 @@ pub(crate) struct Args {
     #[arg(long, value_name = "DIR", requires = "bakeoff_md")]
     pub(crate) bakeoff_dump: Option<PathBuf>,
 
-    /// With `--verify-envelope`, `--verify-deencap`, or `--verify-bodies`, descend into
-    /// subdirectories of a directory input (the default scan is non-recursive, as for
-    /// `--verify`).
+    /// With `--verify-envelope`, `--verify-deencap`, `--verify-bodies`, or
+    /// `--verify-attachments`, descend into subdirectories of a directory input (the default
+    /// scan is non-recursive, as for `--verify`).
     #[arg(long)]
     pub(crate) recursive: bool,
 
