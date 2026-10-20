@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use crate::dry_run::{PROP_DELIVERY_TIME, PROP_SUBMIT_TIME};
 use crate::model::{Address, Envelope, Recipient, RecipientKind};
-use crate::oxmsg_classify::{OxmsgEntryKind, OxmsgEntryScope, top_level_storage_paths};
+use crate::oxmsg_classify::{
+    OxmsgEntryKind, OxmsgEntryScope, cfb_entry_name, classify_oxmsg_entry, top_level_storage_paths,
+};
 use crate::oxmsg_decode::{
     DecodedFixedValue, decode_fixed_value, decode_properties_stream, extract_string8_codepage,
     properties_stream_header_len, read_stream_bytes,
@@ -191,10 +193,14 @@ fn read_recipient_type(comp: &mut CompoundFile, recipient_path: &Path) -> Option
 /// To, Cc, and Bcc recipients in storage order, plus the number of storages that are none of
 /// those (the originator row, an unknown type, or an unreadable type). The optional MAPI_P1 and
 /// MAPI_SUBMITTED flags are ignored when classifying.
-fn read_recipients(comp: &mut CompoundFile, codepage: u32) -> (Vec<Recipient>, usize) {
-    let mut paths: Vec<PathBuf> = top_level_storage_paths(&*comp, OxmsgEntryKind::RecipientStorage)
-        .into_iter()
-        .collect();
+fn read_recipients(comp: &mut CompoundFile, base: &Path, codepage: u32) -> (Vec<Recipient>, usize) {
+    let mut paths: Vec<PathBuf> = if base == Path::new("/") {
+        top_level_storage_paths(&*comp, OxmsgEntryKind::RecipientStorage)
+            .into_iter()
+            .collect()
+    } else {
+        recipient_storage_paths_under(&*comp, base)
+    };
     paths.sort();
 
     let mut recipients = Vec::new();
@@ -215,14 +221,39 @@ fn read_recipients(comp: &mut CompoundFile, codepage: u32) -> (Vec<Recipient>, u
     (recipients, unlisted)
 }
 
+/// The recipient storages directly under `base`: those of a nested message (M4f-2a).
+fn recipient_storage_paths_under(comp: &CompoundFile, base: &Path) -> Vec<PathBuf> {
+    comp.walk()
+        .filter(|e| {
+            e.path().parent() == Some(base)
+                && matches!(
+                    classify_oxmsg_entry(&cfb_entry_name(e.path()), e.is_root()),
+                    OxmsgEntryKind::RecipientStorage
+                )
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect()
+}
+
 /// Reads the envelope of the message whose own streams live at the root of `comp`.
+#[allow(dead_code)]
 pub(crate) fn extract_envelope(comp: &mut CompoundFile) -> Envelope {
-    let base = Path::new("/");
     let header_len = properties_stream_header_len(OxmsgEntryScope::Message).unwrap_or(32);
+    extract_envelope_at(comp, Path::new("/"), header_len)
+}
+
+/// [`extract_envelope`] for the message whose own streams live directly under `base` (an
+/// embedded-object storage for a nested message, M4f-2a). `header_len` is the header length of
+/// that message's properties stream: 32 for the file's message, 24 for an embedded one.
+pub(crate) fn extract_envelope_at(
+    comp: &mut CompoundFile,
+    base: &Path,
+    header_len: usize,
+) -> Envelope {
     let codepage = extract_string8_codepage(comp, base, header_len).codepage;
 
     let fixed = read_fixed_values(comp, base, header_len);
-    let (recipients, recipients_unlisted) = read_recipients(comp, codepage);
+    let (recipients, recipients_unlisted) = read_recipients(comp, base, codepage);
     let conversation_index = read_stream_bytes(
         comp,
         &base.join(format!(

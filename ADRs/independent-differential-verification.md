@@ -102,6 +102,8 @@ Two structural limits on this evidence should be stated plainly:
   reproduced. It is not a continuously enforced property, because nothing
   runs it automatically.
 
+Later differential modes (MSG side, performed; all counts only, all against `msg_parser`, and so subject to the same two limits): `--verify-envelope` compares the subject, sender, and recipients (34 files, 0 mismatches on every comparable field; the fields `msg_parser` does not expose have no oracle); `--verify-deencap` compares the HTML the in-house RTF de-encapsulation recovers with `msg_parser`'s `html_from_rtf()` (recognition and presence agree on all 29 files; the recovered HTML differed in all 27 pairs, and every difference was traced to `msg_parser`, with one in-house limitation, a single Windows-1255 byte); and `--verify-attachments` (M4f-2c, 2026-10-20) compares the SHA-256 and length of every top-level by-value attachment, read through the export's own reader, with `msg_parser`'s payload (34 files: 30 of 30 match, 0 mismatches, gate 0). The last does not cover the attachments inside embedded messages, which `msg_parser` does not open, so those have no independent check. `--verify-bodies` is a content-preservation check of the converter, not a comparison with another implementation.
+
 PST side (outstanding): no comparison against `libpff` or `libpst` has been
 run. See [docs/verification/test-strategy.md](../docs/verification/test-strategy.md)
 for where it sits in the overall evidence ladder.

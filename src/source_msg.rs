@@ -27,8 +27,8 @@ use crate::oxmsg_decode::{
     DecodedFixedValue, decode_fixed_value, decode_properties_stream, expected_variable_stream_path,
     extract_string8_codepage, properties_stream_header_len, read_stream_bytes, stream_len,
 };
-use crate::oxmsg_envelope::extract_envelope;
-use crate::oxmsg_extract::{read_body_forms, read_string_property};
+use crate::oxmsg_envelope::extract_envelope_at;
+use crate::oxmsg_extract::{read_body_forms_at, read_string_property};
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
 use crate::shared::{
     CompoundFile, PROP_ATTACH_CONTENT_ID, PROP_ATTACH_DATA_BINARY, PROP_ATTACH_METHOD,
@@ -244,26 +244,113 @@ impl Builder {
 /// attachment at a time. Holds the open container and the storage paths, never attachment bytes.
 pub(crate) struct OpenMessage {
     pub(crate) content: MessageContent,
-    pub(crate) attachments: MsgAttachments,
+    pub(crate) attachments: MsgAttachments<'static>,
+}
+
+/// The container a handle reads from: the file's own, or the one borrowed from the handle of the
+/// message this one is embedded in (M4f-2a), so a nested message is read through the same open
+/// file.
+enum Container<'a> {
+    Owned(CompoundFile),
+    Borrowed(&'a mut CompoundFile),
+}
+
+impl Container<'_> {
+    fn get(&self) -> &CompoundFile {
+        match self {
+            Container::Owned(comp) => comp,
+            Container::Borrowed(comp) => comp,
+        }
+    }
+
+    fn get_mut(&mut self) -> &mut CompoundFile {
+        match self {
+            Container::Owned(comp) => comp,
+            Container::Borrowed(comp) => comp,
+        }
+    }
 }
 
 /// Streams the data of one message's top-level attachments, by position in storage order (the
-/// order of [`MessageContent::attachments`] and of the planner's source attachments).
-pub(crate) struct MsgAttachments {
-    comp: CompoundFile,
+/// order of [`MessageContent::attachments`] and of the planner's source attachments), and opens
+/// the ones that are embedded messages.
+pub(crate) struct MsgAttachments<'a> {
+    comp: Container<'a>,
     paths: Vec<PathBuf>,
 }
 
-impl MsgAttachments {
+/// An embedded message opened through its parent's handle: its content (with a descriptor for
+/// each of its attachments) and a handle on its own attachments.
+pub(crate) struct EmbeddedOpen<'a> {
+    pub(crate) content: MessageContent,
+    pub(crate) attachments: MsgAttachments<'a>,
+}
+
+impl MsgAttachments<'_> {
     /// The data of attachment `index` as a stream, with the length its directory entry declares.
     /// `None` when the index is out of range or there is no data stream that can be opened.
     pub(crate) fn open_data(&mut self, index: usize) -> Option<(impl Read, u64)> {
         let path =
             expected_variable_stream_path(self.paths.get(index)?, PROP_ATTACH_DATA_BINARY, 0x0102);
-        let len = stream_len(&self.comp, &path)?;
-        let stream = self.comp.open_stream(&path).ok()?;
+        let len = stream_len(self.comp.get(), &path)?;
+        let stream = self.comp.get_mut().open_stream(&path).ok()?;
         Some((stream, len))
     }
+
+    /// Opens attachment `index` as an embedded message: its content as stored (read from its own
+    /// storage, with its own header lengths and recipients), and a handle on its attachments.
+    /// `None` when the index is out of range or the attachment has no message storage with a
+    /// properties stream. The handle borrows this one, so only one level is read at a time.
+    pub(crate) fn open_embedded(&mut self, index: usize) -> Option<EmbeddedOpen<'_>> {
+        let attach_path = self.paths.get(index)?.clone();
+        let base = attach_path.join(EMBEDDED_OBJECT_STORAGE_NAME);
+        let comp = self.comp.get_mut();
+        read_stream_bytes(comp, &base.join("__properties_version1.0"))?;
+        let (content, paths) = read_message_at(comp, &base, OxmsgEntryScope::EmbeddedObject);
+        Some(EmbeddedOpen {
+            content,
+            attachments: MsgAttachments {
+                comp: Container::Borrowed(comp),
+                paths,
+            },
+        })
+    }
+}
+
+/// The content of the message whose own streams live directly under `base`, and the storage paths
+/// of its attachments (in the order of the content's descriptors). `scope` says which kind of
+/// properties stream header to expect.
+fn read_message_at(
+    comp: &mut CompoundFile,
+    base: &Path,
+    scope: OxmsgEntryScope,
+) -> (MessageContent, Vec<PathBuf>) {
+    let header_len = properties_stream_header_len(scope).unwrap_or(32);
+    let codepage = extract_string8_codepage(comp, base, header_len).codepage;
+
+    let subject = read_string_property(comp, base, PROP_SUBJECT, codepage)
+        .map(|raw| strip_subject_marker(&raw).0.to_string());
+    let internet_message_id = read_string_property(comp, base, PROP_INTERNET_MESSAGE_ID, codepage)
+        .filter(|id| !id.trim().is_empty());
+    let time_filetime = message_time(comp, base, header_len);
+    let bodies = read_body_forms_at(comp, base, header_len, codepage);
+    let envelope = extract_envelope_at(comp, base, header_len);
+    let paths = attachment_storage_paths(comp, base);
+    let attachments: Vec<AttachmentInfo> = paths
+        .iter()
+        .map(|p| read_attachment_info(comp, p, codepage))
+        .collect();
+    (
+        MessageContent {
+            subject,
+            internet_message_id,
+            time_filetime,
+            bodies,
+            envelope,
+            attachments,
+        },
+        paths,
+    )
 }
 
 fn read_attachment_info(
@@ -288,34 +375,13 @@ fn read_attachment_info(
 /// goes only into the archive directory the user named; attachment data is not read here.
 pub(crate) fn open_message(path: &Path) -> Result<OpenMessage> {
     let mut comp = cfb::open(path).context("failed to open a .msg file for export")?;
-    let base = Path::new("/");
-    let header_len = properties_stream_header_len(OxmsgEntryScope::Message).unwrap_or(32);
-    let codepage = extract_string8_codepage(&mut comp, base, header_len).codepage;
-
-    let subject = read_string_property(&mut comp, base, PROP_SUBJECT, codepage)
-        .map(|raw| strip_subject_marker(&raw).0.to_string());
-    let internet_message_id =
-        read_string_property(&mut comp, base, PROP_INTERNET_MESSAGE_ID, codepage)
-            .filter(|id| !id.trim().is_empty());
-    let time_filetime = message_time(&mut comp, base, header_len);
-    let bodies = read_body_forms(&mut comp, codepage);
-    let envelope = extract_envelope(&mut comp);
-    let paths = attachment_storage_paths(&comp, base);
-    let infos: Vec<AttachmentInfo> = paths
-        .iter()
-        .map(|p| read_attachment_info(&mut comp, p, codepage))
-        .collect();
-
+    let (content, paths) = read_message_at(&mut comp, Path::new("/"), OxmsgEntryScope::Message);
     Ok(OpenMessage {
-        content: MessageContent {
-            subject,
-            internet_message_id,
-            time_filetime,
-            bodies,
-            envelope,
-            attachments: infos,
+        content,
+        attachments: MsgAttachments {
+            comp: Container::Owned(comp),
+            paths,
         },
-        attachments: MsgAttachments { comp, paths },
     })
 }
 

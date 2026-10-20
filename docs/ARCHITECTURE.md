@@ -241,8 +241,42 @@ M4f-1 adds attachment bytes to the export without letting memory depend on their
 - A failure of the source (a read error, or a length other than the one the container declares) removes the partial staged file, adds nothing to the manifest, and is returned to the export, which records the attachment as `failed` and goes on. A failure to write to staging is an error and stops the run.
 - The attachments are staged before `metadata.json` because it records each one's size and SHA-256, which are known only after the copy.
 - `stream_len` reads a stream's length from its directory entry without reading the stream (the export's declared length); `drain_stream_len` reads a stream through in chunks and counts the bytes (the diagnostics' zero-byte check), so an unreadable stream is still noticed.
-- Embedded messages, OLE objects, and by-reference attachments are recorded as not extracted, with a reason (embedded messages until M4f-2). `cid:` references in `message.md` still stay as written until M4f-2.
+- Embedded messages, OLE objects, and by-reference attachments are recorded as not extracted, with a reason (embedded messages until M4f-2a, which writes them as nested message directories; see the next section). `cid:` references in `message.md` still stay as written until M4f-2b.
 - Verified so far: synthetic tests, and a synthetic memory gate (peak working set flat at 28 MB for attachments of 1, 50, and 200 MB); not yet run on the real corpus.
+
+## M4f-2 boundary: embedded messages as nested folders, and the payload differential (built in v0.1.35)
+
+M4f-2a writes an embedded message the way the export writes a top-level one, one level below; M4f-2c checks the attachment bytes against an independent reader.
+
+```text
+.msg file
+ |
+ +-- source_msg.rs        `open_message` -> content + `MsgAttachments` (owns the open file);
+ |                        `open_embedded(i)` -> `EmbeddedOpen`: the embedded message's content
+ |                        (body forms, envelope with its own recipients, attachment
+ |                        descriptors) and a `MsgAttachments` that borrows the parent's file,
+ |                        so only one level is read at a time
+ |
+ +-- oxmsg_extract.rs     `read_body_forms_at`, `extract_envelope_at`: the same readers,
+ +-- oxmsg_envelope.rs    given the storage the message lives in and its properties header
+ |                        length (32 for the file's message, 24 for an embedded one)
+ |
+ +-- export/nested.rs     `stage_message`: attachments, then message.md, metadata.json, and the
+ |                        kept body files, for a top-level or an embedded message;
+ |                        `stage_embedded`: recurse for an embedded attachment, or write only
+ |                        a metadata.json for one at the planner's depth cap
+ |
+ +-- verify_attachments.rs  --verify-attachments: SHA-256 and length of each top-level
+                            by-value attachment through the export's own reader, against
+                            msg_parser's payload
+```
+
+- The planner is unchanged: it already planned embedded messages as directories under `attachments/`, their attachments below them, a depth cap (three levels in full), and room for a `metadata.json` at the cap. The export now follows the plan.
+- The recursion is bounded by the plan, not by the source: the source reader reads embedded messages up to eight levels deep, and the planner stops at three.
+- An embedded message is a message in the archive's terms: it gets `message.md` and `metadata.json` from the same renderers, and only `kind` (`embedded_message`) differs. A failure to open one is recorded on its parent's attachment record and does not stop the export.
+- The counters of top-level messages keep their meaning; embedded messages have their own (`export_embedded_messages_*`), and `export_attachments_*` include attachments inside embedded messages.
+- `--verify-attachments` is outside the export path and reads through the same `open_data`. It does not open embedded messages, because `msg_parser` does not.
+- Verified so far: synthetic tests (one level, duplicate subjects, the depth cap, an unreadable storage, the reader directly) and the corpus (3 of 3 embedded messages written, 217 files, 0 read-back mismatches, 30 of 30 attachment payloads equal to `msg_parser`'s). The depth cap and the unreadable case have not run on real data.
 
 ## Verification structure
 
@@ -266,6 +300,13 @@ presence counts, so they have no independent check; they rest on the
 specification and the unit tests. Like `--verify`, it scans a directory
 non-recursively.
 
+`tsp --verify-attachments` (M4f-2c) compares the bytes of every top-level
+by-value attachment, read through the export's own reader, with
+`msg_parser`'s payload: SHA-256 and length, by position in storage order,
+with an order-free comparison beside it, counts only. On the corpus all 30
+by-value attachments match. It does not cover the attachments inside
+embedded messages, which `msg_parser` does not open.
+
 The PST side has no independent-oracle comparison yet.
 
 The planner is verified differently: `verify_plan` is a gate over every plan
@@ -288,10 +329,12 @@ The code lives in `src/`, one module per seam:
 - `verify` — the `--verify` comparison and structural gates; `verify_envelope` — the `--verify-envelope` comparison (M4d); `verify_deencap` — the `--verify-deencap` comparison (M4e-1).
 - `rtf_deencap` — the pure MS-OXRTFEX de-encapsulation (M4e-1).
 - `naming`, `plan` — the pure naming rules and export planner (M4b).
-- `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also opens message content for export (the body forms, the envelope, and a descriptor for each attachment) together with a handle that streams one attachment's data at a time.
+- `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also opens message content for export (the body forms, the envelope, and a descriptor for each attachment) together with a handle that streams one attachment's data at a time and opens an embedded attachment as a nested message through that handle (M4f-2a).
 - `model`, `archive`, `export` — the model so far (message content and envelope), the pure renderers, and the writer with its preflight and consent rules (M4c, extended by M4d).
 - `stage` - the staging area of the streamed export (M4h-0): files are written to `.tsp-tmp` as they are rendered, only a manifest is kept, and `add_stream` copies attachment data in chunks (M4f-1).
 - `tests` — most of the older unit tests; the newer modules keep theirs beside their code.
+- `export/nested` - a child module of `export` (M4f-2a): stages one message's files for both top-level and embedded messages and writes embedded messages as nested message directories, to the planner's depth cap.
+- `verify_attachments` - `--verify-attachments` (M4f-2c): the byte-level comparison of extracted attachments with `msg_parser`.
 
 The README lists the contents of each module.
 

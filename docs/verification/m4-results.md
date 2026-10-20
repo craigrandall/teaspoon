@@ -734,3 +734,86 @@ Does not show:
 ### Status
 
 **M4f-1 is built and its synthetic gates are met; M4f is not complete.** Open: the real-corpus export with attachments and its tree hash; `verify-split.ps1`; `cargo fmt --check`, `clippy`, and CI for the tag; M4f-2 (embedded messages as nested folders at the depth cap, `cid:` rewriting in `message.md`, the `msg_parser` payload comparison, the remaining adversarial fixtures); the owner review of exported messages carried over from M4e-2.
+
+## M4f-2c: `--verify-attachments`, the byte-level differential (release v0.1.35, 2026-10-20)
+
+What was built: `tsp --verify-attachments [--recursive] <msg input>` (new `src/verify_attachments.rs`; `cli.rs` and `main.rs`; the export and `Cargo.toml` are unchanged by it). For each top-level by-value attachment it hashes, in chunks, the stream the export would write (through `MsgAttachments::open_data`, the export's own reader) and compares the SHA-256 and the length with `msg_parser`'s `payload_bytes` for the attachment at the same position in storage order; counts only. A comparison with the order ignored is printed beside it (`attachment_payload_multiset_*`). It is a separate flag so that the `--verify` output, and with it the `verify-split.ps1` baseline, does not change. `msg_parser` reports an empty payload both for a zero-byte attachment and for a missing data stream, so a missing stream is compared as empty: `missing_agreed` when `msg_parser`'s payload is empty too, `missing_custom_only` when it is not. Gate: `attachment_payload_gate_violations`, the sum of open errors on either side, attachment lists of different length, hash mismatches, a missing stream where `msg_parser` found bytes, failed reads, and positions where only one side says by value; it must be 0. Premise resolved: `msg_parser` 0.3.x has `Attachment::payload_bytes` (the raw bytes) beside the hex string `payload` (docs.rs); the version in `Cargo.lock` was not checked, and the module built, so the field exists in it.
+
+### Build and regression
+
+The owner reports that everything built and all tests passed (the count was not reported; the module has about 20 tests). `verify-split.ps1 -Pst tsp-tester.pst` (baseline v0.1.19.1 against the new build): default 850 bytes, 33 lines; `--verify` 2705, 82; PST diagnostic 1092, 44; all IDENTICAL with empty stderr; `files_scanned=29`, `rtf_decompressed_bytes_mismatch=1`, `embedded_message_class_readable_total=1`, `structural_gate_violations=0`.
+
+### Corpus run
+
+`tsp.exe <fixtures>\msgs --verify-attachments --recursive` (release build, 34 files):
+
+```text
+attachment_payload_open_errors_msg_parser=0
+attachment_payload_open_errors_custom=0
+attachment_payload_messages=34
+attachment_payload_attachments_custom=35
+attachment_payload_attachments_msg_parser=35
+attachment_payload_count_mismatch_messages=0
+attachment_payload_sha256_match=30
+attachment_payload_sha256_mismatch=0
+attachment_payload_missing_agreed=0
+attachment_payload_missing_custom_only=0
+attachment_payload_custom_failed=0
+attachment_payload_method_disagreement=0
+attachment_payload_bytes_matched=6282892
+attachment_payload_largest_matched=2605476
+attachment_payload_multiset_match=34
+attachment_payload_multiset_mismatch=0
+attachment_payload_gate_violations=0
+```
+
+What this shows:
+- **The export's reader returns the bytes `msg_parser` returns.** All 30 by-value attachments of the 34 top-level messages match on SHA-256 and length (6,282,892 bytes, the largest 2,605,476), with no mismatch, no missing or failed stream, and no disagreement on the method; the order-free comparison agrees on all 34 messages, so the positional pairing is sound on this corpus.
+- **The other 5 of the 35 attachments are not by value**, and both sides agree on that (`method_disagreement=0`). Their methods are not printed by this mode.
+- **The corpus's zero-byte attachment** is either among the 30 matches as a zero-length read or is not by value; `missing_agreed=0` shows it was not a missing stream. The output cannot tell which.
+
+What it does not show: only top-level messages are compared (`msg_parser` does not open embedded messages); one corpus and one oracle; the comparison is of what the reader returns, so the files written are covered by the export's own read-back against its manifest and by the `Get-FileHash` check recorded for M4f-1; names, content IDs, and the status records are not compared.
+
+## M4f-2a: embedded messages as nested message folders (release v0.1.35, 2026-10-20)
+
+What was built: an attachment that is an embedded message is written as a message directory at the planner's path, `<message>/attachments/<name>/`, with `message.md`, `metadata.json`, the kept body files, and its own `attachments/` (which may hold further embedded messages), by the same function as a top-level message, one level in memory at a time. The planner's depth cap holds (three levels in full); a message at the next level gets a directory and a `metadata.json` only (kind `embedded_message`, its subject and name record, its direct attachment count, status `partial`, reason `embedded_depth_capped`), and its parent's record says `not_extracted` with that reason. An embedded message's `metadata.json` has the message schema with kind `embedded_message` and `source_file` the outer `.msg`; the parent's record for a written one has method `embedded_message`, status `extracted`, and `file` the directory name, with no size or hash. An embedded-method attachment with no readable message storage stays a file attachment recorded `embedded_message_unreadable`. New or changed code: `src/export/nested.rs`, `src/source_msg.rs`, `src/oxmsg_extract.rs`, `src/oxmsg_envelope.rs`, `src/export.rs` (the list is in the plan, "What changed from v4.23", item 1). `Cargo.toml` was 0.1.34 for every measurement below.
+
+### Build and tests
+
+The first build stopped with `file not found for module nested` (the new file had not been copied in); the next, with clippy's `explicit_auto_deref` on one line of `export.rs` (`entry: *entry`, where `entry` suffices), fixed in one word. The owner then reports that everything built and all tests passed; the count was not reported. `cargo fmt --check` and CI were not reported. The module's synthetic tests (built at test time, no personal data) cover: one level (an embedded message with a by-value attachment larger than two chunks, a plain body, and a recipient, with the outer message's recipients unaffected, the exact `message.md`, the parent's record, the root counts, and a repeat export that changes nothing); two embedded messages with the same subject getting their own directories; the depth cap (levels 1 to 3 written in full, level 4 a `metadata.json` only with its fields, level 5 not written, and the parent's record and root counts); an embedded-method attachment with no message storage; and the reader directly (a by-value attachment is not a message, an out-of-range index, the embedded delivery time read through the 24-byte header, the nested attachment's data, and the outer handle still reading afterwards).
+
+### Corpus export (34 messages, output to a short `--out`; then the same command again)
+
+| Key | First run | Repeat run |
+|---|---|---|
+| `plan_entries_total` / `plan_messages` / `plan_folders` | 74 / 34 / 3 | same |
+| `plan_attachment_files` / `plan_embedded_messages` | 34 / 3 | same |
+| `plan_budget_exceeded` / `plan_gate_violations` / `plan_max_relative_path_units` | 0 / 0 / 181 | same |
+| `export_target_state` | absent | owned |
+| `export_preflight_to_create` / `_identical` | 217 / 0 | 0 / 217 |
+| `export_files_written` / `export_files_unchanged` | 217 / 0 | 0 / 217 |
+| `export_message_directories` / `export_folder_files` | 34 / 4 | same |
+| `export_attachments_extracted` / `_not_extracted` / `_failed` | 32 / 2 / 0 | same |
+| `export_attachment_bytes_extracted` | 6282892 | same |
+| `export_embedded_messages_extracted` / `_not_extracted` | 3 / 0 | same |
+| `export_embedded_body_loss_total` | 1 | same |
+| `export_body_source_rtf_html` / `_plain_text` | 31 / 3 | same |
+| `export_body_files_kept_html` / `_rtf` / `_txt` | 31 / 34 / 34 | same |
+| `export_body_loss_tables_flattened` / `_rtf_not_converted` / `_undecodable_bytes_replaced` / `_invisible_padding_removed` | 237 / 3 / 1 / 1 | same |
+| `export_body_cid_references_total` | 26 | same |
+| `export_readback_mismatches` | 0 | 0 |
+| `export_tree_sha256` | `845b21aeaec075099c7064d5f4da1372ed7084e452774f2b0214d86c742831e4` | identical |
+
+What this shows:
+- **Every planned embedded message was written:** 3 planned, 3 extracted, 0 not extracted (the invariant planned = extracted + not extracted holds); the planned attachment files reconcile (34 = 32 extracted + 2 not extracted).
+- **The top-level counters did not move:** the body source, kept-file, loss, and `cid:` counts equal their values at `v0.1.33` (31 HTML from the RTF, 3 plain text; 237, 3, 1, 1; 26), and `export_message_directories` is still 34, as designed.
+- **The archive is deterministic with the new directories:** the repeat run found 217 identical files and wrote none; 0 read-back mismatches.
+- **The file count rose from 171 to 217:** 46 more files, of which 32 are extracted attachments; the other 14 are consistent with the `message.md`, `metadata.json`, and kept body files of the 3 embedded messages, but the split was not itemized.
+- **The extracted-attachment bytes (6,282,892) equal the total `--verify-attachments` matched for the top-level attachments.** The export extracted 32 files where that run compared 30, so the 2 further files are consistent with by-value attachments inside embedded messages that are empty; this was not itemized.
+- **The tree hash is the baseline for `Cargo.toml` 0.1.34 plus this change.** The root `folder.json` records the tool version, so at the tag (0.1.35) the hash differs; the corpus export tree hash at the tag is `e27f0d87bf1619a31d091916f4dd2a17bcb778c9c14d780e09bac2a1246e38cd`.
+
+What it does not show: the depth cap and the unreadable-storage case have run only on synthetic input (all 3 embedded messages of the corpus are written in full); no nested directory has been reviewed by eye; the attachments inside embedded messages have no byte-level oracle; a regression check against `v0.1.34` on a corpus subset without embedded messages (the tree hash should be unchanged for it, with the version unchanged) and a re-run of `--verify-attachments` with this build were part of the gate, and their output was not supplied; the memory behavior of nested messages is by design (one level held at a time), not measured.
+
+### Status
+
+**M4f-2c and M4f-2a are built, and their corpus gates are met as far as the output shows; M4f is not complete.** Open: `cid:` rewriting and inline marking (M4f-2b); the remaining adversarial fixtures (reserved names, 255-character names, case-only differences, control characters); the owner review of exported messages, including a nested one; the tree hash at the tag; `cargo fmt --check` and CI for the tag; a counts-only reconciliation of the attachments inside embedded messages.

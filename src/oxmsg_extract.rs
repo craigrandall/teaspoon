@@ -173,10 +173,10 @@ enum RtfRead {
 /// Reads and decompresses `PidTagRtfCompressed` (MS-OXRTFCP, via `compressed-rtf`). A zero-length
 /// stream is absent, as in [`extract_body_flags`]. (`verify_deencap.rs` keeps an identical private
 /// copy; deduplicate in a later housekeeping change.)
-fn read_decompressed_rtf(comp: &mut CompoundFile) -> RtfRead {
+fn read_decompressed_rtf(comp: &mut CompoundFile, base: &Path) -> RtfRead {
     let Some(compressed) = read_stream_bytes(
         comp,
-        &expected_variable_stream_path(Path::new("/"), PROP_RTF_COMPRESSED, 0x0102),
+        &expected_variable_stream_path(base, PROP_RTF_COMPRESSED, 0x0102),
     )
     .filter(|bytes| !bytes.is_empty()) else {
         return RtfRead::Absent;
@@ -196,21 +196,35 @@ fn read_decompressed_rtf(comp: &mut CompoundFile) -> RtfRead {
 /// `PT_BINARY` only; a string-typed variant is not read), the Internet code page (a positive
 /// value only), and the decompressed RTF. A zero-length binary stream is `None`; a zero-length
 /// plain body stays `Some("")`. The content stays in memory and is never printed here.
+#[allow(dead_code)]
 pub(crate) fn read_body_forms(comp: &mut CompoundFile, string8_codepage: u32) -> BodyForms {
-    let root = Path::new("/");
+    let header_len = properties_stream_header_len(OxmsgEntryScope::Message).unwrap_or(32);
+    read_body_forms_at(comp, Path::new("/"), header_len, string8_codepage)
+}
+
+/// [`read_body_forms`] for the message whose own streams live directly under `base` (`/` for the
+/// file's message, an embedded-object storage for a nested one, M4f-2a). `header_len` is the
+/// header length of that message's properties stream: 32 for the file's message, 24 for an
+/// embedded one.
+pub(crate) fn read_body_forms_at(
+    comp: &mut CompoundFile,
+    base: &Path,
+    header_len: usize,
+    string8_codepage: u32,
+) -> BodyForms {
+    let root = base;
     let plain_text = read_string_property(comp, root, PROP_BODY, string8_codepage);
     let native_html = read_stream_bytes(
         comp,
         &expected_variable_stream_path(root, PROP_BODY_HTML, 0x0102),
     )
     .filter(|bytes| !bytes.is_empty());
-    let header_len = properties_stream_header_len(OxmsgEntryScope::Message).unwrap_or(32);
     let native_html_code_page = read_stream_bytes(comp, &root.join("__properties_version1.0"))
         .and_then(|bytes| decode_properties_stream(&bytes, header_len))
         .and_then(|decoded| read_long_property(&decoded, PROP_INTERNET_CODEPAGE))
         .and_then(|value| u32::try_from(value).ok())
         .filter(|&value| value > 0);
-    let (rtf, rtf_decompression_failed) = match read_decompressed_rtf(comp) {
+    let (rtf, rtf_decompression_failed) = match read_decompressed_rtf(comp, root) {
         RtfRead::Absent => (None, false),
         RtfRead::DecompressionFailed => (None, true),
         RtfRead::Bytes(bytes) if bytes.is_empty() => (None, false),

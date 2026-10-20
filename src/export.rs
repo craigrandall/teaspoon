@@ -18,8 +18,10 @@
 //!
 //! Limits, stated plainly: only `.msg` input is exported, with its body (converted to Markdown
 //! in `message.md`, plus each original body form kept as `body.html`, `body.rtf`, or `body.txt`)
-//! and its by-value attachments. Embedded messages, OLE objects, and by-reference attachments
-//! are counted and recorded as not extracted (embedded messages: M4f-2); a by-value attachment
+//! and its by-value attachments. Embedded messages become nested message directories under
+//! `<message>/attachments/` (M4f-2a, `export/nested.rs`; one the planner will not nest deeper gets
+//! a `metadata.json` that says so). OLE objects and by-reference attachments
+//! are counted and recorded as not extracted; a by-value attachment
 //! whose data is missing, unreadable, or of another length than declared is recorded as failed
 //! and the export goes on. Memory no longer grows with the archive (one message at a time, plus
 //! the manifest), but `--out` and its `.tsp-tmp` staging directory are now created before the
@@ -37,9 +39,9 @@ use sha2::{Digest, Sha256};
 use crate::archive::{
     ATTACHMENT_EXTRACTED, ATTACHMENT_FAILED, ATTACHMENT_NOT_EXTRACTED, AttachmentRecord,
     BODY_HTML_NAME, BODY_RTF_NAME, BODY_TXT_NAME, BodyOutcome, ChildRecord, FOLDER_JSON_NAME,
-    FolderMetadata, KIND_ARCHIVE_ROOT, MESSAGE_MD_NAME, METADATA_JSON_NAME, NameRecord, RootCounts,
-    RootRecord, RootSpec, STATUS_COMPLETE, STATUS_INCOMPLETE, SourceRecord, TOOL_NAME,
-    adjustment_names, body_outcome, message_metadata, method_label, render_message_md, to_json,
+    FolderMetadata, KIND_ARCHIVE_ROOT, NameRecord, RootCounts, RootRecord, RootSpec,
+    STATUS_COMPLETE, STATUS_INCOMPLETE, SourceRecord, TOOL_NAME, adjustment_names, method_label,
+    to_json,
 };
 use crate::body::{BodySource, LossReason};
 use crate::dry_run::{SourceKind, classify_source, input_leaf_name, root_stem, root_units};
@@ -62,6 +64,8 @@ use crate::stage::{
 };
 
 const MAX_PATH_UNITS: usize = 259;
+
+mod nested;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExportOptions {
@@ -228,7 +232,14 @@ pub(crate) struct ExportReport {
     /// By-value attachments whose data was missing, unreadable, or of another length than
     /// declared.
     attachments_failed: usize,
+    /// Embedded messages written as nested message directories (M4f-2a).
+    embedded_messages_extracted: usize,
+    /// Planned embedded messages not written as nested directories: past the planner's depth cap
+    /// (a `metadata.json` only), unreadable, or inside one of those. Computed from the plan.
     embedded_messages_not_extracted: usize,
+    /// Sum of the formatting-loss counts over the bodies of the embedded messages written (the
+    /// per-reason body counters cover top-level messages only).
+    embedded_messages_loss_total: u64,
     bodies_plain_present: usize,
     bodies_plain_empty: usize,
     bodies_plain_absent: usize,
@@ -313,8 +324,16 @@ fn print_export_report(r: &ExportReport) {
     );
     println!("export_attachments_failed={}", r.attachments_failed);
     println!(
+        "export_embedded_messages_extracted={}",
+        r.embedded_messages_extracted
+    );
+    println!(
         "export_embedded_messages_not_extracted={}",
         r.embedded_messages_not_extracted
+    );
+    println!(
+        "export_embedded_body_loss_total={}",
+        r.embedded_messages_loss_total
     );
     println!("export_bodies_plain_present={}", r.bodies_plain_present);
     println!("export_bodies_plain_empty={}", r.bodies_plain_empty);
@@ -503,7 +522,7 @@ fn stage_by_value(
 /// every attachment (extracted or not), in storage order. Attachment bytes are never held whole.
 fn stage_attachments(
     stager: &mut Stager,
-    planned: &BTreeMap<u64, &PlanEntry>,
+    ctx: &nested::StageCtx<'_>,
     message: &SourceMessage,
     content: &MessageContent,
     reader: &mut MsgAttachments,
@@ -534,13 +553,20 @@ fn stage_attachments(
             sha256: None,
         };
         if let Some(embedded) = &source.embedded {
-            let entry = planned
+            let entry = ctx
+                .planned
                 .get(&embedded.id)
                 .ok_or_else(|| anyhow!("internal error: an embedded message is not planned"))?;
             record.name = name_record(entry);
-            record.reason = Some("embedded_message");
+            let at = nested::EmbeddedAt {
+                message: embedded,
+                entry,
+                index,
+            };
+            nested::stage_embedded(stager, ctx, &at, reader, report, &mut record)?;
         } else {
-            let entry = planned
+            let entry = ctx
+                .planned
                 .get(&source.id)
                 .ok_or_else(|| anyhow!("internal error: an attachment is not planned"))?;
             record.name = name_record(entry);
@@ -683,44 +709,25 @@ fn stage_archive(
                     content,
                     attachments: mut reader,
                 } = open_message(path)?;
-                let outcome = body_outcome(&content.bodies);
-                // Attachments first: `metadata.json` records each one's size and hash, which
-                // are known only once its data has been copied.
-                let records =
-                    stage_attachments(stager, &planned, message, &content, &mut reader, report)?;
-                let meta = message_metadata(
-                    &relative_source_name(input, path),
-                    &content,
-                    &outcome,
-                    NameRecord {
-                        original: entry.original.clone(),
-                        adjustments: adjustment_names(&entry.flags),
-                    },
-                    records,
-                );
-                stager.add(
-                    rel_with(&entry.components, MESSAGE_MD_NAME),
-                    render_message_md(&content, &outcome).as_bytes(),
-                )?;
-                stager.add(
-                    rel_with(&entry.components, METADATA_JSON_NAME),
-                    to_json(&meta)?.as_bytes(),
-                )?;
-                report.message_directories += 1;
-                match content.bodies.plain_text.as_deref() {
-                    None => report.bodies_plain_absent += 1,
-                    Some(text) if text.trim().is_empty() => report.bodies_plain_empty += 1,
-                    Some(_) => report.bodies_plain_present += 1,
-                }
-                report.note_body(&outcome);
-                for original in &outcome.originals {
-                    stager.add(rel_with(&entry.components, original.name), &original.bytes)?;
-                }
+                // The attachments, `message.md`, `metadata.json`, and the kept body files, in
+                // that order; embedded messages are staged by the same function, one level
+                // below (`export/nested.rs`).
+                let source_file = relative_source_name(input, path);
+                let ctx = nested::StageCtx {
+                    planned: &planned,
+                    source_file: &source_file,
+                };
+                let job = nested::MessageJob {
+                    components: &entry.components,
+                    directory: name_record(entry),
+                    embedded: false,
+                };
+                nested::stage_message(stager, &ctx, &job, message, &content, &mut reader, report)?;
             }
             // Counted from the plan after the loop; by-value attachments were staged with their
             // message above.
             EntryKind::AttachmentFile => {}
-            EntryKind::EmbeddedMessage => report.embedded_messages_not_extracted += 1,
+            EntryKind::EmbeddedMessage => {}
         }
     }
 
@@ -728,8 +735,13 @@ fn stage_archive(
         .counters
         .attachment_files
         .saturating_sub(report.attachments_extracted);
+    report.embedded_messages_not_extracted = plan
+        .counters
+        .embedded_messages
+        .saturating_sub(report.embedded_messages_extracted);
     root.record.counts.attachments_extracted = report.attachments_extracted;
     root.record.counts.attachments_not_extracted = report.attachments_not_extracted;
+    root.record.counts.embedded_messages_not_extracted = report.embedded_messages_not_extracted;
 
     stager.add(
         vec![FOLDER_JSON_NAME.to_string()],
