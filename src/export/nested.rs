@@ -19,7 +19,8 @@ use serde::Serialize;
 use super::{ExportReport, name_record, rel_with, stage_attachments};
 use crate::archive::{
     ATTACHMENT_EXTRACTED, AttachmentRecord, MESSAGE_MD_NAME, METADATA_JSON_NAME, NameRecord,
-    SCHEMA_VERSION, body_outcome, message_metadata, render_message_md, to_json,
+    SCHEMA_VERSION, body_outcome, link_cid_references, message_metadata, render_message_md_linked,
+    to_json,
 };
 use crate::model::MessageContent;
 use crate::naming::NameFlag;
@@ -73,8 +74,12 @@ pub(super) fn stage_message(
     reader: &mut MsgAttachments<'_>,
     report: &mut ExportReport,
 ) -> Result<()> {
-    let outcome = body_outcome(&content.bodies);
-    let records = stage_attachments(stager, ctx, message, content, reader, report)?;
+    let mut outcome = body_outcome(&content.bodies);
+    let mut records = stage_attachments(stager, ctx, message, content, reader, report)?;
+    // The `cid:` links are resolved once the attachments are staged, because only then is it
+    // known which ones were extracted and under what name. Only `message.md` is rewritten.
+    let linked = link_cid_references(outcome.rendered.markdown.as_deref(), &mut records);
+    outcome.cid_links = linked.links;
     let mut meta = message_metadata(
         ctx.source_file,
         content,
@@ -87,7 +92,7 @@ pub(super) fn stage_message(
     }
     stager.add(
         rel_with(job.components, MESSAGE_MD_NAME),
-        render_message_md(content, &outcome).as_bytes(),
+        render_message_md_linked(content, &outcome, linked.markdown.as_deref()).as_bytes(),
     )?;
     stager.add(
         rel_with(job.components, METADATA_JSON_NAME),
@@ -95,6 +100,9 @@ pub(super) fn stage_message(
     )?;
     if job.embedded {
         report.embedded_messages_extracted += 1;
+        report.embedded_cid_rewritten += outcome.cid_links.rewritten;
+        report.embedded_cid_unresolved += outcome.cid_links.unresolved();
+        report.embedded_attachments_inline += outcome.cid_links.inline_attachments;
         report.embedded_messages_loss_total += outcome
             .rendered
             .loss

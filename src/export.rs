@@ -253,6 +253,19 @@ pub(crate) struct ExportReport {
     /// Sum of the loss counts per reason, in `LossReason::ALL` order.
     body_loss: [u64; LossReason::ALL.len()],
     body_cid_references_total: u64,
+    /// `cid:` links rewritten to the extracted attachment in top-level messages (M4f-2b); with
+    /// the three unresolved counts below it sums to `body_cid_references_total`.
+    cid_rewritten: u64,
+    cid_unresolved_no_attachment: u64,
+    cid_unresolved_not_extracted: u64,
+    cid_unresolved_ambiguous: u64,
+    /// Top-level attachments marked `inline`.
+    attachments_inline: u64,
+    /// The same three figures for the bodies of the embedded messages written (the unresolved
+    /// links are summed over the three reasons).
+    embedded_cid_rewritten: u64,
+    embedded_cid_unresolved: u64,
+    embedded_attachments_inline: u64,
     readback_mismatches: usize,
     tree_sha256: String,
 }
@@ -280,6 +293,11 @@ impl ExportReport {
             }
         }
         self.body_cid_references_total += outcome.cid_total;
+        self.cid_rewritten += outcome.cid_links.rewritten;
+        self.cid_unresolved_no_attachment += outcome.cid_links.unresolved_no_attachment;
+        self.cid_unresolved_not_extracted += outcome.cid_links.unresolved_not_extracted;
+        self.cid_unresolved_ambiguous += outcome.cid_links.unresolved_ambiguous;
+        self.attachments_inline += outcome.cid_links.inline_attachments;
     }
 }
 
@@ -354,6 +372,29 @@ fn print_export_report(r: &ExportReport) {
     println!(
         "export_body_cid_references_total={}",
         r.body_cid_references_total
+    );
+    println!("export_cid_rewritten={}", r.cid_rewritten);
+    println!(
+        "export_cid_unresolved_no_attachment={}",
+        r.cid_unresolved_no_attachment
+    );
+    println!(
+        "export_cid_unresolved_not_extracted={}",
+        r.cid_unresolved_not_extracted
+    );
+    println!(
+        "export_cid_unresolved_ambiguous={}",
+        r.cid_unresolved_ambiguous
+    );
+    println!("export_attachments_inline={}", r.attachments_inline);
+    println!("export_embedded_cid_rewritten={}", r.embedded_cid_rewritten);
+    println!(
+        "export_embedded_cid_unresolved={}",
+        r.embedded_cid_unresolved
+    );
+    println!(
+        "export_embedded_attachments_inline={}",
+        r.embedded_attachments_inline
     );
     println!("export_readback_mismatches={}", r.readback_mismatches);
     println!("export_tree_sha256={}", r.tree_sha256);
@@ -546,6 +587,7 @@ fn stage_attachments(
             method: method_label(info.method),
             method_code: info.method,
             content_id: info.content_id.clone(),
+            inline: false,
             status: ATTACHMENT_NOT_EXTRACTED,
             reason: None,
             file: None,
@@ -1897,6 +1939,88 @@ mod tests {
         );
         assert_eq!(report.body_cid_references_total, 2);
         assert_eq!(report.body_loss.iter().sum::<u64>(), 0);
+    }
+
+    // ---- cid links (M4f-2b) --------------------------------------------------
+
+    /// A message with a native HTML body and the given attachments.
+    fn write_msg_html_attachments(
+        path: &Path,
+        subject: &str,
+        html: &[u8],
+        attachments: &[TestAttachment<'_>],
+    ) {
+        let mut comp = cfb::create(path).expect("create CFB");
+        let ticks: u64 = 133_000_000_000_000_000;
+        let mut props = vec![0u8; 32];
+        props.extend(entry(0x0040, 0x0E06, ticks.to_le_bytes()));
+        put(&mut comp, "/__properties_version1.0", &props);
+        put(&mut comp, "/__substg1.0_0037001F", &utf16(subject));
+        put(&mut comp, "/__substg1.0_10130102", html);
+        for (index, a) in attachments.iter().enumerate() {
+            add_test_attachment(&mut comp, index, a);
+        }
+    }
+
+    #[test]
+    fn cid_links_are_rewritten_to_the_extracted_attachment_and_it_is_marked_inline() {
+        let dir = temp_dir("cidlinks");
+        let file = dir.join("c.msg");
+        let html: &[u8] = b"<p>Hi</p><p><img src=\"cid:logo@x\" alt=\"logo\"></p><p><img src=\"cid:gone@x\" alt=\"gone\"></p>";
+        write_msg_html_attachments(
+            &file,
+            "Cid",
+            html,
+            &[
+                TestAttachment {
+                    content_id: Some("<logo@x>"),
+                    ..by_value("my logo.png", b"\x89PNG")
+                },
+                by_value("plain.txt", b"text"),
+                TestAttachment {
+                    content_id: Some("gone@x"),
+                    data: None,
+                    ..by_value("gone.png", b"")
+                },
+            ],
+        );
+        let out = dir.join("out");
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+
+        let files = tree_files(&out);
+        let meta = meta_of(&files, "c/Cid/metadata.json");
+        let logo_file = meta["attachments"][0]["file"].as_str().expect("extracted");
+        let link = crate::body::attachment_link(logo_file);
+        let md = String::from_utf8(files["c/Cid/message.md"].clone()).unwrap();
+        assert!(md.contains(&format!("({link})")), "{md}");
+        assert!(!md.contains("(cid:logo@x)"));
+        assert!(md.contains("(cid:gone@x)"));
+        // The kept original is untouched.
+        assert_eq!(files["c/Cid/body.html"].as_slice(), html);
+
+        let cid = &meta["body"]["cid_references"];
+        assert_eq!(cid["total"], 2);
+        assert_eq!(cid["distinct"], 2);
+        assert_eq!(cid["rewritten"], 1);
+        assert_eq!(cid["unresolved_no_attachment"], 0);
+        assert_eq!(cid["unresolved_not_extracted"], 1);
+        assert_eq!(cid["unresolved_ambiguous"], 0);
+        assert_eq!(meta["attachments"][0]["inline"], true);
+        assert_eq!(meta["attachments"][1]["inline"], false);
+        assert_eq!(meta["attachments"][2]["inline"], true);
+        assert_eq!(meta["attachments"][2]["status"], "failed");
+
+        // Deterministic, and a second run changes nothing.
+        let before = tree_files(&out);
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+        assert_eq!(tree_files(&out), before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- the overwrite matrix ----------------------------------------------

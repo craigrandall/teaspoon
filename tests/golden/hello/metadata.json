@@ -24,7 +24,11 @@
     ],
     "cid_references": {
       "total": 0,
-      "distinct": 0
+      "distinct": 0,
+      "rewritten": 0,
+      "unresolved_no_attachment": 0,
+      "unresolved_not_extracted": 0,
+      "unresolved_ambiguous": 0
     },
     "loss": [],
     "kept_files_exempt_from_file_rules": true

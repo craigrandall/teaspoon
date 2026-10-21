@@ -505,25 +505,128 @@ fn count_markdown_table_rows(markdown: &str) -> u64 {
 /// content ID compared without regard to case). Only a destination (`](cid:...)` or
 /// `](<cid:...>)`) counts, so ordinary text such as "acid:" does not.
 pub(crate) fn count_cid_references(markdown: &str) -> (u64, u64) {
-    let mut total = 0u64;
-    let mut distinct: BTreeSet<String> = BTreeSet::new();
+    let references = find_cid_references(markdown);
+    let distinct: BTreeSet<String> = references
+        .iter()
+        .map(|reference| reference.id.to_ascii_lowercase())
+        .collect();
+    (references.len() as u64, distinct.len() as u64)
+}
+
+/// One `cid:` link destination in converted Markdown, located exactly (M4f-2b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CidReference {
+    /// Byte offset where the destination starts: at the `<` of an angle-bracket destination,
+    /// otherwise at the `c` of `cid:`.
+    pub(crate) start: usize,
+    /// Byte offset just past the destination: past the content ID, or past the closing `>` of an
+    /// angle-bracket destination. A title after the destination is not part of it.
+    pub(crate) end: usize,
+    /// The content ID as written (without `cid:` and without the angle brackets).
+    pub(crate) id: String,
+}
+
+/// Every `cid:` link destination in `markdown`, in order, by the rule
+/// [`count_cid_references`] has always used (it now counts these): the text after `](`, with an
+/// optional `<`, starting with `cid:` in any case; the content ID ends at `)`, `>`, or white
+/// space. An empty ID is still a reference.
+pub(crate) fn find_cid_references(markdown: &str) -> Vec<CidReference> {
+    let mut found = Vec::new();
+    let mut offset = 0usize;
     let mut rest = markdown;
     while let Some(at) = rest.find("](") {
+        let after_start = offset + at + 2;
         let after = &rest[at + 2..];
+        let angle = after.starts_with('<');
         let destination = after.strip_prefix('<').unwrap_or(after);
         if let Some(prefix) = destination.get(..4)
             && prefix.eq_ignore_ascii_case("cid:")
         {
-            let id: String = destination[4..]
+            let id_len: usize = destination[4..]
                 .chars()
                 .take_while(|c| !matches!(c, ')' | '>') && !c.is_whitespace())
-                .collect();
-            total += 1;
-            distinct.insert(id.to_ascii_lowercase());
+                .map(char::len_utf8)
+                .sum();
+            let id_start = after_start + usize::from(angle) + 4;
+            let mut end = id_start + id_len;
+            if angle && markdown[end..].starts_with('>') {
+                end += 1;
+            }
+            found.push(CidReference {
+                start: after_start,
+                end,
+                id: markdown[id_start..id_start + id_len].to_string(),
+            });
         }
+        offset = after_start;
         rest = after;
     }
-    (total, distinct.len() as u64)
+    found
+}
+
+/// Decodes `%XX` escapes; text that is not valid UTF-8 afterwards is returned unchanged, and a
+/// `%` not followed by two hex digits stays a `%`.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let (Some(high), Some(low)) = (
+                bytes.get(i + 1).and_then(|b| char::from(*b).to_digit(16)),
+                bytes.get(i + 2).and_then(|b| char::from(*b).to_digit(16)),
+            )
+        {
+            out.push((high * 16 + low) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_string())
+}
+
+/// What a content ID is compared by: white space and one pair of angle brackets removed, `%XX`
+/// escapes decoded, ASCII letters in lower case. The same function is applied to the ID in a
+/// `cid:` link and to `PidTagAttachContentId`, so `<Logo@x>` and `logo%40x` are one ID.
+pub(crate) fn content_id_key(id: &str) -> String {
+    let trimmed = id.trim();
+    let unwrapped = trimmed
+        .strip_prefix('<')
+        .and_then(|text| text.strip_suffix('>'))
+        .unwrap_or(trimmed);
+    percent_decode(unwrapped).to_ascii_lowercase()
+}
+
+/// The link from a `message.md` to an extracted attachment of its own message: relative, with
+/// every byte outside `A-Z a-z 0-9 - . _ ~` percent-encoded (so a space, a parenthesis, or a
+/// non-ASCII letter cannot end or break the Markdown destination). A nested message's
+/// `message.md` sits beside its own `attachments/`, so the same form serves every level.
+pub(crate) fn attachment_link(file_name: &str) -> String {
+    let mut link = String::from("attachments/");
+    for byte in file_name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            link.push(char::from(byte));
+        } else {
+            link.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    link
+}
+
+/// `text` with each `(start, end, replacement)` range replaced. The ranges must be in order and
+/// must not overlap.
+pub(crate) fn replace_ranges(text: &str, replacements: &[(usize, usize, String)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0usize;
+    for (start, end, replacement) in replacements {
+        out.push_str(&text[at..*start]);
+        out.push_str(replacement);
+        at = *end;
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 // =============================================================================
@@ -1012,6 +1115,63 @@ mod tests {
         assert_eq!(count_cid_references(md), (4, 3));
         assert_eq!(count_cid_references("no links"), (0, 0));
         assert_eq!(count_cid_references("](cid:a) ](cid:a)"), (2, 1));
+    }
+
+    // ----- cid links (M4f-2b) -----
+
+    #[test]
+    fn cid_references_are_located_with_their_exact_extent() {
+        let md = "![a](cid:one@x) [b](<CID:Two@x> \"t\") [c](http://x) acid:z ![d](cid:three@x \"title\")";
+        let found = find_cid_references(md);
+        let ids: Vec<&str> = found.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["one@x", "Two@x", "three@x"]);
+        assert_eq!(&md[found[0].start..found[0].end], "cid:one@x");
+        assert_eq!(&md[found[1].start..found[1].end], "<CID:Two@x>");
+        assert_eq!(&md[found[2].start..found[2].end], "cid:three@x");
+        // Counting and locating agree.
+        assert_eq!(count_cid_references(md), (3, 3));
+    }
+
+    #[test]
+    fn content_ids_compare_without_brackets_case_or_percent_escapes() {
+        assert_eq!(
+            content_id_key("<Image001.PNG@01D2.A1>"),
+            "image001.png@01d2.a1"
+        );
+        assert_eq!(
+            content_id_key(" image001.png%4001d2.a1 "),
+            "image001.png@01d2.a1"
+        );
+        assert_eq!(content_id_key("100%"), "100%");
+        assert_eq!(content_id_key("%FF"), "%ff");
+        assert_eq!(content_id_key("<>"), "");
+        assert_eq!(content_id_key(""), "");
+    }
+
+    #[test]
+    fn attachment_links_are_relative_and_percent_encoded() {
+        assert_eq!(attachment_link("logo.png"), "attachments/logo.png");
+        assert_eq!(
+            attachment_link("my file (1).png"),
+            "attachments/my%20file%20%281%29.png"
+        );
+        assert_eq!(
+            attachment_link("caf\u{e9}.png"),
+            "attachments/caf%C3%A9.png"
+        );
+        assert_eq!(attachment_link("a_b-c~d.e"), "attachments/a_b-c~d.e");
+    }
+
+    #[test]
+    fn ranges_are_replaced_in_order() {
+        assert_eq!(
+            replace_ranges(
+                "0123456789",
+                &[(1, 3, "A".to_string()), (5, 9, "BB".to_string())]
+            ),
+            "0A34BB9"
+        );
+        assert_eq!(replace_ranges("abc", &[]), "abc");
     }
 
     // ----- rendering -----

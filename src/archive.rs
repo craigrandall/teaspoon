@@ -15,8 +15,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::body::{
-    BodySource, ConversionFailed, Rendered, Selection, convert_html_isolated, count_cid_references,
-    render_with, select_body,
+    BodySource, ConversionFailed, Rendered, Selection, attachment_link, content_id_key,
+    convert_html_isolated, count_cid_references, find_cid_references, render_with, replace_ranges,
+    select_body,
 };
 use crate::model::{Address, BodyForms, Envelope, MessageContent, RecipientKind};
 use crate::naming::NameFlag;
@@ -86,6 +87,15 @@ pub(crate) struct OriginalRecord {
 pub(crate) struct CidRecord {
     pub(crate) total: u64,
     pub(crate) distinct: u64,
+    /// References rewritten in `message.md` to the extracted attachment (M4f-2b).
+    pub(crate) rewritten: u64,
+    /// References left as written because no attachment of the message has that content ID.
+    pub(crate) unresolved_no_attachment: u64,
+    /// References left as written because the attachment(s) with that content ID were not
+    /// extracted.
+    pub(crate) unresolved_not_extracted: u64,
+    /// References left as written because more than one extracted attachment has that ID.
+    pub(crate) unresolved_ambiguous: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,7 +118,8 @@ pub(crate) struct BodyRecord {
     pub(crate) internet_codepage: Option<u32>,
     /// Kept original files, in the order `body.html`, `body.rtf`, `body.txt`.
     pub(crate) originals: Vec<OriginalRecord>,
-    /// `cid:` link destinations in `message.md` (they stay as written until M4f-2).
+    /// `cid:` link destinations in the converted Markdown: how many, how many distinct, and what
+    /// became of them (M4f-2b). `total` is `rewritten` plus the three `unresolved_*` counts.
     pub(crate) cid_references: CidRecord,
     /// Formatting loss, in the vocabulary's order, only reasons with a count above zero.
     pub(crate) loss: Vec<LossRecord>,
@@ -181,6 +192,9 @@ pub(crate) struct AttachmentRecord {
     /// `PidTagAttachMethod` as stored, when it could be read.
     pub(crate) method_code: Option<i32>,
     pub(crate) content_id: Option<String>,
+    /// The content ID is referenced by a `cid:` link in the converted body (M4f-2b), whether or
+    /// not the link could be rewritten.
+    pub(crate) inline: bool,
     /// `extracted`, `not_extracted`, or `failed`.
     pub(crate) status: &'static str,
     /// Why an attachment was not extracted or failed; null when extracted.
@@ -545,6 +559,9 @@ pub(crate) struct BodyOutcome {
     pub(crate) originals: Vec<OriginalFile>,
     pub(crate) cid_total: u64,
     pub(crate) cid_distinct: u64,
+    /// What became of the `cid:` links once the attachments were staged
+    /// ([`link_cid_references`]); zero until then.
+    pub(crate) cid_links: CidLinks,
 }
 
 /// Selects, converts, and collects the originals, with the production converter.
@@ -569,6 +586,7 @@ pub(crate) fn body_outcome_with(
         originals,
         cid_total,
         cid_distinct,
+        cid_links: CidLinks::default(),
     }
 }
 
@@ -623,7 +641,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// source's Markdown follows as converted (LF line endings, no leading or trailing blank lines,
 /// one final newline); a plain-text source is written verbatim inside a code fence longer than
 /// any backtick run in it. A message with no envelope fields and no body is the heading alone.
+#[cfg(test)]
 pub(crate) fn render_message_md(content: &MessageContent, outcome: &BodyOutcome) -> String {
+    render_message_md_linked(content, outcome, None)
+}
+
+/// [`render_message_md`] with the converted Markdown replaced by `linked` when it is given: the
+/// Markdown after [`link_cid_references`] rewrote its `cid:` links. Nothing else changes.
+pub(crate) fn render_message_md_linked(
+    content: &MessageContent,
+    outcome: &BodyOutcome,
+    linked: Option<&str>,
+) -> String {
     let mut out = format!("# {}\n", title_for(content.subject.as_deref()));
     let lines = envelope_lines(&content.envelope);
     if !lines.is_empty() {
@@ -633,7 +662,7 @@ pub(crate) fn render_message_md(content: &MessageContent, outcome: &BodyOutcome)
             out.push('\n');
         }
     }
-    if let Some(markdown) = &outcome.rendered.markdown {
+    if let Some(markdown) = linked.or(outcome.rendered.markdown.as_deref()) {
         let normalized = normalize_newlines(markdown);
         let body = normalized.trim_start_matches('\n').trim_end();
         if !body.is_empty() {
@@ -654,6 +683,114 @@ pub(crate) fn render_message_md(content: &MessageContent, outcome: &BodyOutcome)
         out.push('\n');
     }
     out
+}
+
+/// What became of the `cid:` links of one message (M4f-2b). Counts only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CidLinks {
+    /// Links rewritten to `attachments/<file>`.
+    pub(crate) rewritten: u64,
+    /// Links whose content ID no attachment of the message has.
+    pub(crate) unresolved_no_attachment: u64,
+    /// Links whose content ID some attachment has, but none of those was extracted.
+    pub(crate) unresolved_not_extracted: u64,
+    /// Links whose content ID more than one extracted attachment has (or that overlap a link
+    /// already rewritten, which only text that is not a real link can do).
+    pub(crate) unresolved_ambiguous: u64,
+    /// Attachments marked `inline`: some link in the body names their content ID.
+    pub(crate) inline_attachments: u64,
+}
+
+impl CidLinks {
+    /// Links left as written, whatever the reason.
+    pub(crate) fn unresolved(&self) -> u64 {
+        self.unresolved_no_attachment + self.unresolved_not_extracted + self.unresolved_ambiguous
+    }
+}
+
+/// The result of [`link_cid_references`].
+pub(crate) struct Linked {
+    /// The Markdown with its links rewritten; `None` when nothing was rewritten (use the
+    /// original).
+    pub(crate) markdown: Option<String>,
+    pub(crate) links: CidLinks,
+}
+
+/// Resolves the `cid:` links of one message's converted Markdown against its attachment records
+/// (body ADR decision 9 and the attachment ADR's M4f-2 decisions): a link is rewritten to
+/// `attachments/<file>` only when exactly one *extracted* attachment has that content ID
+/// (compared by [`content_id_key`]); otherwise it stays as written and is counted by reason.
+/// Every attachment whose content ID is named by some link is marked `inline`, rewritten or not.
+/// `body.html` and the other kept originals are never touched; only the Markdown is rewritten.
+pub(crate) fn link_cid_references(
+    markdown: Option<&str>,
+    attachments: &mut [AttachmentRecord],
+) -> Linked {
+    let keys: Vec<String> = attachments
+        .iter()
+        .map(|record| {
+            record
+                .content_id
+                .as_deref()
+                .map(content_id_key)
+                .unwrap_or_default()
+        })
+        .collect();
+    let mut inline = vec![false; attachments.len()];
+    let mut links = CidLinks::default();
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let mut last_end = 0usize;
+
+    for reference in markdown.map(find_cid_references).unwrap_or_default() {
+        let key = content_id_key(&reference.id);
+        let matching: Vec<usize> = if key.is_empty() {
+            Vec::new()
+        } else {
+            keys.iter()
+                .enumerate()
+                .filter(|(_, candidate)| **candidate == key)
+                .map(|(index, _)| index)
+                .collect()
+        };
+        for &index in &matching {
+            inline[index] = true;
+        }
+        let extracted: Vec<&str> = matching
+            .iter()
+            .filter_map(|&index| {
+                let record = &attachments[index];
+                if record.status == ATTACHMENT_EXTRACTED {
+                    record.file.as_deref()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        match (matching.len(), extracted.len()) {
+            (0, _) => links.unresolved_no_attachment += 1,
+            (_, 0) => links.unresolved_not_extracted += 1,
+            (_, 1) if reference.start >= last_end => {
+                replacements.push((
+                    reference.start,
+                    reference.end,
+                    attachment_link(extracted[0]),
+                ));
+                last_end = reference.end;
+                links.rewritten += 1;
+            }
+            _ => links.unresolved_ambiguous += 1,
+        }
+    }
+
+    for (record, flagged) in attachments.iter_mut().zip(&inline) {
+        record.inline = *flagged;
+    }
+    links.inline_attachments = inline.iter().filter(|flagged| **flagged).count() as u64;
+    let markdown = match (markdown, replacements.is_empty()) {
+        (Some(text), false) => Some(replace_ranges(text, &replacements)),
+        _ => None,
+    };
+    Linked { markdown, links }
 }
 
 fn address_record(address: &Address) -> AddressRecord {
@@ -719,6 +856,10 @@ fn body_record(forms: &BodyForms, outcome: &BodyOutcome) -> BodyRecord {
         cid_references: CidRecord {
             total: outcome.cid_total,
             distinct: outcome.cid_distinct,
+            rewritten: outcome.cid_links.rewritten,
+            unresolved_no_attachment: outcome.cid_links.unresolved_no_attachment,
+            unresolved_not_extracted: outcome.cid_links.unresolved_not_extracted,
+            unresolved_ambiguous: outcome.cid_links.unresolved_ambiguous,
         },
         loss: outcome
             .rendered
@@ -829,6 +970,7 @@ mod tests {
                 method: "ole",
                 method_code: Some(6),
                 content_id: None,
+                inline: false,
                 status: ATTACHMENT_NOT_EXTRACTED,
                 reason: Some("ole_object"),
                 file: None,
@@ -1183,6 +1325,129 @@ mod tests {
             value["attachments"][0]["sha256"],
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    // ---- cid links (M4f-2b) ----
+
+    fn linkable(file: Option<&str>, cid: Option<&str>, status: &'static str) -> AttachmentRecord {
+        AttachmentRecord {
+            name: NameRecord {
+                original: String::new(),
+                adjustments: vec![],
+            },
+            method: "by_value",
+            method_code: Some(1),
+            content_id: cid.map(str::to_string),
+            inline: false,
+            status,
+            reason: None,
+            file: file.map(str::to_string),
+            bytes: None,
+            sha256: None,
+        }
+    }
+
+    #[test]
+    fn a_link_is_rewritten_only_for_exactly_one_extracted_attachment() {
+        let mut records = vec![
+            linkable(Some("logo.png"), Some("<Logo@x>"), ATTACHMENT_EXTRACTED),
+            linkable(Some("a b.png"), Some("pic@x"), ATTACHMENT_EXTRACTED),
+            linkable(Some("dup1.png"), Some("dup@x"), ATTACHMENT_EXTRACTED),
+            linkable(Some("dup2.png"), Some("DUP@x"), ATTACHMENT_EXTRACTED),
+            linkable(None, Some("gone@x"), ATTACHMENT_FAILED),
+            linkable(Some("plain.pdf"), None, ATTACHMENT_EXTRACTED),
+        ];
+        let md = "![l](cid:logo@x) ![p](<cid:PIC@x>) ![d](cid:dup@x) ![g](cid:gone@x) ![n](cid:nothing@x) [t](http://x)";
+        let linked = link_cid_references(Some(md), &mut records);
+        assert_eq!(
+            linked.markdown.as_deref(),
+            Some(
+                "![l](attachments/logo.png) ![p](attachments/a%20b.png) ![d](cid:dup@x) ![g](cid:gone@x) ![n](cid:nothing@x) [t](http://x)"
+            )
+        );
+        assert_eq!(
+            linked.links,
+            CidLinks {
+                rewritten: 2,
+                unresolved_no_attachment: 1,
+                unresolved_not_extracted: 1,
+                unresolved_ambiguous: 1,
+                inline_attachments: 5,
+            }
+        );
+        assert_eq!(linked.links.unresolved(), 3);
+        // `total` of the body object is always the rewritten plus the unresolved.
+        assert_eq!(count_cid_references(md).0, 5);
+        let inline: Vec<bool> = records.iter().map(|r| r.inline).collect();
+        assert_eq!(inline, vec![true, true, true, true, true, false]);
+    }
+
+    #[test]
+    fn a_body_without_cid_references_is_left_alone() {
+        let mut records = vec![linkable(Some("a.png"), Some("a@x"), ATTACHMENT_EXTRACTED)];
+        let linked = link_cid_references(Some("plain ![x](http://e/a.png)"), &mut records);
+        assert!(linked.markdown.is_none());
+        assert_eq!(linked.links, CidLinks::default());
+        assert!(!records[0].inline);
+        let none = link_cid_references(None, &mut records);
+        assert!(none.markdown.is_none());
+        assert_eq!(none.links, CidLinks::default());
+    }
+
+    #[test]
+    fn every_occurrence_is_rewritten_and_a_title_after_the_destination_is_kept() {
+        let mut records = vec![linkable(Some("a.png"), Some("A@x"), ATTACHMENT_EXTRACTED)];
+        let md = "![1](cid:a@x) ![2](<cid:a@X> \"title\") [3](cid:A%40x)";
+        let linked = link_cid_references(Some(md), &mut records);
+        assert_eq!(
+            linked.markdown.as_deref(),
+            Some(
+                "![1](attachments/a.png) ![2](attachments/a.png \"title\") [3](attachments/a.png)"
+            )
+        );
+        assert_eq!(linked.links.rewritten, 3);
+        assert_eq!(linked.links.inline_attachments, 1);
+        assert!(records[0].inline);
+    }
+
+    #[test]
+    fn an_empty_content_id_matches_nothing() {
+        let mut records = vec![linkable(Some("a.png"), Some("<>"), ATTACHMENT_EXTRACTED)];
+        let linked = link_cid_references(Some("![x](cid:)"), &mut records);
+        assert!(linked.markdown.is_none());
+        assert_eq!(linked.links.unresolved_no_attachment, 1);
+        assert!(!records[0].inline);
+    }
+
+    #[test]
+    fn linked_markdown_replaces_the_converted_body_in_message_md() {
+        let c = html_content(b"<p>x</p>");
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok("![a](cid:one@x)".to_string()));
+        assert!(render_message_md(&c, &outcome).contains("(cid:one@x)"));
+        let linked = render_message_md_linked(&c, &outcome, Some("![a](attachments/a.png)\n"));
+        assert!(linked.contains("![a](attachments/a.png)\n"));
+        assert!(!linked.contains("cid:"));
+    }
+
+    #[test]
+    fn the_link_counts_are_recorded_beside_the_reference_counts() {
+        let c = html_content(b"<p>x</p>");
+        let mut outcome = body_outcome_with(&c.bodies, &|_| {
+            Ok("![a](cid:one@x) ![b](cid:two@x)".to_string())
+        });
+        outcome.cid_links = CidLinks {
+            rewritten: 1,
+            unresolved_no_attachment: 1,
+            ..CidLinks::default()
+        };
+        let value = serde_json::to_value(body_record(&c.bodies, &outcome)).unwrap();
+        let cid = &value["cid_references"];
+        assert_eq!(cid["total"], 2);
+        assert_eq!(cid["distinct"], 2);
+        assert_eq!(cid["rewritten"], 1);
+        assert_eq!(cid["unresolved_no_attachment"], 1);
+        assert_eq!(cid["unresolved_not_extracted"], 0);
+        assert_eq!(cid["unresolved_ambiguous"], 0);
     }
 
     #[test]
