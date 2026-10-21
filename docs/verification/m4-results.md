@@ -817,3 +817,74 @@ What it does not show: the depth cap and the unreadable-storage case have run on
 ### Status
 
 **M4f-2c and M4f-2a are built, and their corpus gates are met as far as the output shows; M4f is not complete.** Open: `cid:` rewriting and inline marking (M4f-2b); the remaining adversarial fixtures (reserved names, 255-character names, case-only differences, control characters); the owner review of exported messages, including a nested one; the tree hash at the tag; `cargo fmt --check` and CI for the tag; a counts-only reconciliation of the attachments inside embedded messages.
+
+## M4f-2b: `cid:` rewriting and the `inline` marker (release v0.1.36, 2026-10-21)
+
+What was built: a `cid:` link in the converted Markdown of `message.md` is rewritten to a relative link to the extracted attachment, `attachments/<name>` with the name percent-encoded, when exactly one extracted attachment of the same message has that content ID; every other `cid:` link stays as written and is counted under one reason (no attachment has the ID; the attachments that have it were not extracted; more than one extracted attachment has it). Content IDs are compared without white space and one pair of angle brackets, with `%XX` escapes decoded and ASCII letters lower-cased, on both sides. Every attachment record gains `inline`, true when a `cid:` link in the body names its content ID, whether or not the link could be rewritten. `body.cid_references` keeps `total` and `distinct` and gains `rewritten` and `unresolved_no_attachment`, `unresolved_not_extracted`, and `unresolved_ambiguous`. Only `message.md` changes; `body.html`, `body.rtf`, and `body.txt` are kept as received. The same function runs for embedded messages, against their own attachments. New or changed code: `src/body.rs`, `src/archive.rs`, `src/export/nested.rs`, `src/export.rs`, and `tests/golden/hello/metadata.json` (the list is in the plan, "What changed from v4.24", item 1). The change was applied to the `v0.1.35` sources by a patch script that checks every edit and writes nothing unless all match; it is commit `4dc3161`, with `Cargo.toml` bumped to 0.1.36 in that commit. The counts below were measured with `Cargo.toml` at 0.1.35, before the bump.
+
+### Build and tests
+
+The owner reports that everything built and **365 tests pass**. No build failure was reported for this drop. `cargo fmt --check`, `clippy -D warnings`, and CI were **not reported**, nor were `verify-split.ps1`, `--verify-bodies`, and `--verify-attachments` with this build (none of the three should change: the diagnostics were not touched, and `--verify-bodies` starts from the converted Markdown before any link is rewritten). The new tests (synthetic, no personal data) cover: the scanner (angle brackets, case of `cid:`, a title after the destination, an empty ID, and that locating and counting agree); the content-ID comparison (brackets, case, `%XX` escapes, an invalid escape, a trailing `%`, bytes that are not UTF-8 after decoding, empty); the percent-encoding of attachment names (a space, parentheses, a non-ASCII letter, the unreserved characters); the replacement of ranges; the linking rule against two attachments with one ID, a failed attachment, an unknown ID, a plain attachment, a body with no references, no body, a repeated reference in three spellings, and an empty content ID; that the linked Markdown replaces the converted body in `message.md` and the rewrite counts reach the `body` object; and, through a real export, a message with HTML and three attachments (one with a space in its name and a content ID, one plain, one failed with a content ID), checking the rewritten link, the link left as written, the unchanged `body.html`, the counts, the `inline` flags, and an identical repeat export. The `hello` metadata golden file was edited by hand for the four new fields.
+
+### Corpus export (34 messages, short `--out`; then the same command again)
+
+| Key | First run | Repeat run |
+|---|---|---|
+| `plan_entries_total` / `plan_messages` / `plan_folders` | 74 / 34 / 3 | same |
+| `plan_attachment_files` / `plan_embedded_messages` | 34 / 3 | same |
+| `plan_budget_exceeded` / `plan_gate_violations` / `plan_max_relative_path_units` | 0 / 0 / 181 | same |
+| `export_target_state` | absent | owned |
+| `export_preflight_to_create` / `_identical` | 217 / 0 | 0 / 217 |
+| `export_files_written` / `export_files_unchanged` | 217 / 0 | 0 / 217 |
+| `export_attachments_extracted` / `_not_extracted` / `_failed` | 32 / 2 / 0 | same |
+| `export_attachment_bytes_extracted` | 6282892 | same |
+| `export_embedded_messages_extracted` / `_not_extracted` | 3 / 0 | same |
+| `export_body_source_rtf_html` / `_plain_text` | 31 / 3 | same |
+| `export_body_loss_tables_flattened` / `_rtf_not_converted` / `_undecodable_bytes_replaced` / `_invisible_padding_removed` | 237 / 3 / 1 / 1 | same |
+| `export_embedded_body_loss_total` | 1 | same |
+| `export_body_cid_references_total` | 26 | same |
+| `export_cid_rewritten` | 26 | same |
+| `export_cid_unresolved_no_attachment` / `_not_extracted` / `_ambiguous` | 0 / 0 / 0 | same |
+| `export_attachments_inline` | 26 | same |
+| `export_embedded_cid_rewritten` / `_unresolved` / `export_embedded_attachments_inline` | 0 / 0 / 0 | same |
+| `export_readback_mismatches` | 0 | 0 |
+| `export_tree_sha256` | `89184411b1f380fe1d12070dee5363d40730e241b975a14cb918446f3ddd97fe` | identical |
+
+### The link check (`verify-cid-links.ps1`, counts only, over the exported tree)
+
+```text
+cid_check_message_md_files=37
+cid_check_metadata_missing=0
+cid_check_metadata_unreadable=0
+cid_check_links_to_attachments=26
+cid_check_links_resolving=26
+cid_check_links_missing_file=0
+cid_check_links_target_not_recorded_extracted=0
+cid_check_cid_links_remaining=0
+cid_check_metadata_rewritten_total=26
+cid_check_links_equal_metadata_rewritten=yes
+cid_check_attachments_inline=26
+cid_check_inline_without_content_id=0
+cid_check_gate_violations=0
+```
+
+The script walks every `message.md` under the archive at any depth (so it includes the 3 embedded messages: 34 and 3 make 37), finds the links to `attachments/`, decodes the file name, and checks that the file exists beside that `message.md` and that the `metadata.json` beside it lists that file as an extracted attachment. It prints counts only and no names. It is kept outside the crate.
+
+What this shows:
+- **Every `cid:` reference on the corpus resolved.** 26 references, 26 rewritten, 0 unresolved for any of the three reasons, so `export_body_cid_references_total` equals the rewritten plus the unresolved. The ID in each link matched an attachment's content ID after the comparison rule, and each such attachment had been extracted (a failed or unextracted one would have shown under `unresolved_not_extracted`).
+- **No attachment is named by two links:** 26 attachments are inline for 26 rewritten links.
+- **The links point at files the archive holds.** All 26 rewritten links resolve to a file on disk and to an extracted attachment recorded by the same message, no `cid:` link is left in any `message.md`, and the number of such links equals the sum of `rewritten` in the metadata, so the Markdown and the records agree.
+- **Nothing else moved.** The body, attachment, and embedded-message counters equal their values at `v0.1.35`; the file count is still 217; a repeat export wrote nothing; read-back mismatches are 0. The kept body files are unchanged, which the read-back (every file against its manifest hash) and the unchanged file counts support; a test shows `body.html` is not rewritten.
+- **The tree hash changed, as expected,** because every attachment record has a new field and the body object has four. It was measured before the version bump. The tree hash at the tag, with `Cargo.toml` at 0.1.36, is not recorded here.
+
+What it does not show:
+- **Embedded messages:** none of the 3 has a `cid:` link or an inline attachment, so the code path for them has run on the corpus only as far as writing records with the new fields; its linking behavior is covered by the same function and by no test of its own.
+- **Real-data variety:** all 26 IDs matched on the first rule tried. A percent-escaped, non-ASCII, very long, or shared content ID, a link whose attachment failed, and the reference-style or autolink forms of `cid:` have not been seen on real data; the first four are covered by synthetic tests, the last is not recognized by design.
+- **Right file, not only an existing one:** the check shows a link points at a recorded extracted attachment, not that it is the one the sender meant; the match is by content ID, and the corpus gives no second oracle.
+- **Display:** no rewritten `message.md` has been opened in a Markdown viewer to see the image appear, and no exported message has been reviewed by eye for this change.
+- **References that the preprocessing removed** from the Markdown (inside an element it drops) are not counted, so they are neither rewritten nor unresolved.
+- **Quality gate:** `cargo fmt --check`, `clippy`, CI, `verify-split.ps1`, `--verify-bodies`, and `--verify-attachments` with this build, as above.
+
+### Status
+
+**M4f-2b is built and its corpus gate is met as far as the output shows; M4f is not complete.** Open: the remaining adversarial fixtures (reserved names, 255-character names, case-only differences, control characters, and for this change a percent-escaped, non-ASCII, or shared content ID); the owner review of exported messages, including one with a rewritten image and a nested one; a `cid:` link inside an embedded message on real data; a counts-only reconciliation of the attachments inside embedded messages; the quality-gate output for the tag.

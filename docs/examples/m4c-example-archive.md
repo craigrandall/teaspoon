@@ -1,8 +1,8 @@
-# Example archive (M4c draft format, with the M4d envelope, the M4e-2b body, and the M4f-1 attachment records)
+# Example archive (M4c draft format, with the M4d envelope, the M4e-2b body, the M4f-1 attachment records, and the M4f-2b `cid:` records)
 
 This is a small, hand-built illustration of what `tsp <dir> --out <out>` writes, following the accepted ADRs ([naming](../../ADRs/export-naming-collisions-and-path-budgets.md), [identity](../../ADRs/message-and-folder-identity-and-provenance.md), [output posture](../../ADRs/export-output-posture-consent-and-ownership.md), [file contract](../../ADRs/archive-file-contract-and-schema-evolution.md), [body selection and loss](../../ADRs/body-selection-original-bodies-and-formatting-loss.md)). It is synthetic: no real message content appears.
 
-- `Hello World/message.md` and `Hello World/metadata.json` are exactly the committed golden files in `tests/golden/hello/` as of `v0.1.34` (the byte-for-byte output of the code for a synthetic message). `metadata.json` changed in M4e-2b: the `body` object now records the source, the converter, the preprocessing, the kept original files, and the loss, and `message.md` is unchanged for a plain-text message. In M4f-1 `metadata.json` gained an `attachments` array (empty here, because this message has no attachments).
+- `Hello World/message.md` and `Hello World/metadata.json` are exactly the committed golden files in `tests/golden/hello/` as of `v0.1.36` (the byte-for-byte output of the code for a synthetic message). `metadata.json` changed in M4e-2b: the `body` object now records the source, the converter, the preprocessing, the kept original files, and the loss, and `message.md` is unchanged for a plain-text message. In M4f-1 `metadata.json` gained an `attachments` array (empty here, because this message has no attachments). In M4f-2b the `body` object's `cid_references` gained the rewrite counts (all zero here, because this message has no `cid:` links), and every attachment record gained `inline`.
 - `Hello World/body.txt` is the plain-text body as the message stored it (`Line one`, CRLF, `Line two`, CRLF: 20 bytes). The kept body files are byte copies of source content and are exempt from the file contract's UTF-8-without-BOM and LF rules, which is why `body.txt` keeps its CRLF line endings while every generated file uses LF.
 - The two `folder.json` files below were assembled by hand from the draft schema in `src/archive.rs`. Numbers, the tool version, and the hash are **illustrative placeholders**, not output of a run.
 - Everything is the `0.1-draft` format: it may change without notice until the metadata stage freezes it.
@@ -79,7 +79,11 @@ Line two
     ],
     "cid_references": {
       "total": 0,
-      "distinct": 0
+      "distinct": 0,
+      "rewritten": 0,
+      "unresolved_no_attachment": 0,
+      "unresolved_not_extracted": 0,
+      "unresolved_ambiguous": 0
     },
     "loss": [],
     "kept_files_exempt_from_file_rules": true
@@ -121,7 +125,7 @@ For an HTML message the `body` object differs like this (illustrative, not a com
       { "file": "body.html", "bytes": 98, "sha256": "<64 hex digits>", "note": "as_stored" },
       { "file": "body.txt", "bytes": 11, "sha256": "<64 hex digits>", "note": null }
     ],
-    "cid_references": { "total": 0, "distinct": 0 },
+    "cid_references": { "total": 0, "distinct": 0, "rewritten": 0, "unresolved_no_attachment": 0, "unresolved_not_extracted": 0, "unresolved_ambiguous": 0 },
     "loss": [],
     "kept_files_exempt_from_file_rules": true
   },
@@ -145,13 +149,13 @@ and, in `metadata.json` after the `envelope` object (shown compactly; the real f
 ```json
   "attachments_not_extracted": 1,
   "attachments": [
-    { "name": { "original": "report.pdf", "adjustments": [] }, "method": "by_value", "method_code": 1, "content_id": null, "status": "extracted", "reason": null, "file": "report.pdf", "bytes": 48213, "sha256": "<64 hex digits>" },
-    { "name": { "original": "logo.png", "adjustments": [] }, "method": "by_value", "method_code": 1, "content_id": "logo@x", "status": "extracted", "reason": null, "file": "logo.png", "bytes": 2210, "sha256": "<64 hex digits>" },
-    { "name": { "original": "chart.bin", "adjustments": [] }, "method": "ole", "method_code": 6, "content_id": null, "status": "not_extracted", "reason": "ole_object", "file": null, "bytes": null, "sha256": null }
+    { "name": { "original": "report.pdf", "adjustments": [] }, "method": "by_value", "method_code": 1, "content_id": null, "inline": false, "status": "extracted", "reason": null, "file": "report.pdf", "bytes": 48213, "sha256": "<64 hex digits>" },
+    { "name": { "original": "logo.png", "adjustments": [] }, "method": "by_value", "method_code": 1, "content_id": "logo@x", "inline": true, "status": "extracted", "reason": null, "file": "logo.png", "bytes": 2210, "sha256": "<64 hex digits>" },
+    { "name": { "original": "chart.bin", "adjustments": [] }, "method": "ole", "method_code": 6, "content_id": null, "inline": false, "status": "not_extracted", "reason": "ole_object", "file": null, "bytes": null, "sha256": null }
   ],
 ```
 
-The `status_reasons` of that message would also list `attachments_not_extracted`, because one attachment is not extracted. The records are in the order the attachments are stored in the `.msg`; `file`, `bytes`, and `sha256` describe what was written, and are null when nothing was.
+The `status_reasons` of that message would also list `attachments_not_extracted`, because one attachment is not extracted. The records are in the order the attachments are stored in the `.msg`; `file`, `bytes`, and `sha256` describe what was written, and are null when nothing was. Suppose the message's HTML body has an image `<img src="cid:logo@x">`. Then `logo.png` is `inline` (a link in the body names its content ID), and because exactly one extracted attachment of the message has that content ID, the converted Markdown in `message.md` links to it as `![logo](attachments/logo.png)`, while `body.html` keeps `cid:logo@x` as received. The `body` object records that one reference was found and rewritten: `"cid_references": { "total": 1, "distinct": 1, "rewritten": 1, "unresolved_no_attachment": 0, "unresolved_not_extracted": 0, "unresolved_ambiguous": 0 }`. A reference whose content ID no attachment has, or whose attachment was not extracted, would stay as `cid:...` in `message.md` and be counted under `unresolved_no_attachment` or `unresolved_not_extracted`; the `inline` flag is set for an attachment whose ID a link names even if the link could not be rewritten.
 
 ## `mail/Projects/folder.json`
 

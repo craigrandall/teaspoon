@@ -241,7 +241,7 @@ M4f-1 adds attachment bytes to the export without letting memory depend on their
 - A failure of the source (a read error, or a length other than the one the container declares) removes the partial staged file, adds nothing to the manifest, and is returned to the export, which records the attachment as `failed` and goes on. A failure to write to staging is an error and stops the run.
 - The attachments are staged before `metadata.json` because it records each one's size and SHA-256, which are known only after the copy.
 - `stream_len` reads a stream's length from its directory entry without reading the stream (the export's declared length); `drain_stream_len` reads a stream through in chunks and counts the bytes (the diagnostics' zero-byte check), so an unreadable stream is still noticed.
-- Embedded messages, OLE objects, and by-reference attachments are recorded as not extracted, with a reason (embedded messages until M4f-2a, which writes them as nested message directories; see the next section). `cid:` references in `message.md` still stay as written until M4f-2b.
+- Embedded messages, OLE objects, and by-reference attachments are recorded as not extracted, with a reason (embedded messages until M4f-2a, which writes them as nested message directories; see the next section). `cid:` references in `message.md` stayed as written until M4f-2b (see the last of these sections).
 - Verified so far: synthetic tests, and a synthetic memory gate (peak working set flat at 28 MB for attachments of 1, 50, and 200 MB); not yet run on the real corpus.
 
 ## M4f-2 boundary: embedded messages as nested folders, and the payload differential (built in v0.1.35)
@@ -278,6 +278,35 @@ M4f-2a writes an embedded message the way the export writes a top-level one, one
 - `--verify-attachments` is outside the export path and reads through the same `open_data`. It does not open embedded messages, because `msg_parser` does not.
 - Verified so far: synthetic tests (one level, duplicate subjects, the depth cap, an unreadable storage, the reader directly) and the corpus (3 of 3 embedded messages written, 217 files, 0 read-back mismatches, 30 of 30 attachment payloads equal to `msg_parser`'s). The depth cap and the unreadable case have not run on real data.
 
+## M4f-2b boundary: `cid:` links resolved once the attachments are staged (built in v0.1.36)
+
+M4f-2b makes the Markdown of `message.md` point at the files the archive holds. The order matters: a link can be resolved only when it is known which attachments were extracted and under what name, which is known only after they are staged.
+
+```text
+one message (top-level or embedded)
+ |
+ +-- archive.rs `body_outcome`        select, preprocess, convert: the Markdown, and how many
+ |                                    `cid:` references it holds (body.rs `find_cid_references`)
+ |
+ +-- export/nested.rs                 stage the attachments: one record each (content ID,
+ |   `stage_message`                  status, the file name actually written)
+ |
+ +-- archive.rs                       the Markdown and the records -> the rewritten Markdown (or
+ |   `link_cid_references`            none, when nothing was rewritten), the counts, and
+ |                                    `inline` set on the records
+ |
+ +-- archive.rs                       the records and counts into metadata.json; the rewritten
+     `message_metadata`,              Markdown, in place of the converted one, into message.md
+     `render_message_md_linked`
+```
+
+- The resolving is pure: it takes text and records and returns text, records, and counts, with no I/O, so it is tested without a file. The scanner, the comparison of content IDs, and the encoding of a name into a link are in `body.rs`, beside the existing count of references, which now uses the same scanner.
+- Only `message.md` is rewritten. The kept `body.html`, `body.rtf`, and `body.txt` are written from the original bytes and are never given the rewritten text, so a better rule later can be applied again from the kept files.
+- A link is rewritten only when exactly one extracted attachment of the same message has the content ID. A link that matches none, only attachments that were not extracted, or more than one extracted attachment is left as written and counted under that reason; nothing is guessed from a name or a position.
+- An embedded message goes through the same function, against its own attachments, because it is staged by the same `stage_message`. Its counters are kept apart from the top-level ones (`export_embedded_cid_*`), so the identities among the top-level counters hold.
+- `render_message_md` remains, as a test-only wrapper of `render_message_md_linked` without a rewrite.
+- Verified so far: synthetic tests of each rule and of a real export, and the corpus (26 of 26 references rewritten, each resolving to a file the same message records as extracted, checked by a counts-only script outside the crate). A `cid:` link inside an embedded message has not been seen on real data.
+
 ## Verification structure
 
 `tsp --verify` runs the custom MSG path and `msg_parser` over the same files
@@ -307,6 +336,8 @@ with an order-free comparison beside it, counts only. On the corpus all 30
 by-value attachments match. It does not cover the attachments inside
 embedded messages, which `msg_parser` does not open.
 
+After M4f-2b a counts-only PowerShell check (`verify-cid-links.ps1`, kept outside the crate) walks an exported tree and, for every `message.md` at any depth, checks that each link to `attachments/` resolves to a file on disk that the `metadata.json` beside it records as an extracted attachment, that no `cid:` link is left, that the links equal the sum of the `rewritten` counts, and that no attachment is marked `inline` without a content ID. On the corpus: 26 links, all resolving, 0 violations. It shows that a link points at a recorded extracted file, not that the match by content ID was the right one.
+
 The PST side has no independent-oracle comparison yet.
 
 The planner is verified differently: `verify_plan` is a gate over every plan
@@ -332,6 +363,7 @@ The code lives in `src/`, one module per seam:
 - `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also opens message content for export (the body forms, the envelope, and a descriptor for each attachment) together with a handle that streams one attachment's data at a time and opens an embedded attachment as a nested message through that handle (M4f-2a).
 - `model`, `archive`, `export` — the model so far (message content and envelope), the pure renderers, and the writer with its preflight and consent rules (M4c, extended by M4d).
 - `stage` - the staging area of the streamed export (M4h-0): files are written to `.tsp-tmp` as they are rendered, only a manifest is kept, and `add_stream` copies attachment data in chunks (M4f-1).
+- `body` — the pure body pipeline (M4e-2a); since M4f-2b it also holds the scanner for `cid:` references, the comparison of content IDs, and the link from a message to one of its extracted attachments.
 - `tests` — most of the older unit tests; the newer modules keep theirs beside their code.
 - `export/nested` - a child module of `export` (M4f-2a): stages one message's files for both top-level and embedded messages and writes embedded messages as nested message directories, to the planner's depth cap.
 - `verify_attachments` - `--verify-attachments` (M4f-2c): the byte-level comparison of extracted attachments with `msg_parser`.
