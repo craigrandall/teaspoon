@@ -5,8 +5,8 @@
 //!
 //! No I/O. Output is deterministic: struct fields serialize in declaration order, there are no
 //! maps, no absolute paths, and no export-time values, so two exports of the same input are
-//! byte-identical. The schemas are **drafts** (`schema_version` is `0.1-draft`); they are
-//! frozen by the M4a-2 ADRs, after this walking skeleton has shown what they must hold.
+//! byte-identical. The schemas are **drafts** (`schema_version` is `0.1-draft`); they stay
+//! drafts until M4g freezes them (see the archive file contract ADR).
 
 use std::collections::BTreeSet;
 
@@ -19,14 +19,20 @@ use crate::body::{
     convert_html_isolated, count_cid_references, find_cid_references, render_with, replace_ranges,
     select_body,
 };
+use crate::layout;
 use crate::model::{Address, BodyForms, Envelope, MessageContent, RecipientKind};
 use crate::naming::NameFlag;
+use crate::shared::{
+    ATTACH_METHOD_BY_REFERENCE, ATTACH_METHOD_BY_REFERENCE_ONLY,
+    ATTACH_METHOD_BY_REFERENCE_RESOLVE, ATTACH_METHOD_BY_VALUE, ATTACH_METHOD_EMBEDDED_MESSAGE,
+    ATTACH_METHOD_NONE, ATTACH_METHOD_OLE,
+};
 
 pub(crate) const SCHEMA_VERSION: &str = "0.1-draft";
 pub(crate) const TOOL_NAME: &str = "teaspoon";
-pub(crate) const FOLDER_JSON_NAME: &str = "folder.json";
-pub(crate) const MESSAGE_MD_NAME: &str = "message.md";
-pub(crate) const METADATA_JSON_NAME: &str = "metadata.json";
+pub(crate) const FOLDER_JSON_NAME: &str = layout::FOLDER_JSON;
+pub(crate) const MESSAGE_MD_NAME: &str = layout::MESSAGE_MD;
+pub(crate) const METADATA_JSON_NAME: &str = layout::METADATA_JSON;
 pub(crate) const KIND_ARCHIVE_ROOT: &str = "archive_root";
 pub(crate) const STATUS_COMPLETE: &str = "complete";
 pub(crate) const STATUS_INCOMPLETE: &str = "incomplete";
@@ -34,9 +40,9 @@ const UNTITLED: &str = "(no subject)";
 
 /// An attachment's status in `metadata.json`: its data was written to a file.
 pub(crate) const ATTACHMENT_EXTRACTED: &str = "extracted";
-/// An attachment's status: not extracted by design (an embedded message until M4f-2, an OLE
-/// object, a by-reference attachment, or a method this tool does not read); the `reason` says
-/// which.
+/// An attachment's status: not extracted by design (an OLE object, a by-reference attachment, an
+/// embedded message below the depth cap or one that cannot be opened, or a method this tool does
+/// not read); the `reason` says which.
 pub(crate) const ATTACHMENT_NOT_EXTRACTED: &str = "not_extracted";
 /// An attachment's status: it is by value but its data was missing, unreadable, or of another
 /// length than the source declared; the `reason` says which.
@@ -170,13 +176,13 @@ pub(crate) struct EnvelopeRecord {
 pub(crate) fn method_label(method: Option<i32>) -> &'static str {
     match method {
         None => "unreadable",
-        Some(0) => "none",
-        Some(1) => "by_value",
-        Some(2) => "by_reference",
-        Some(3) => "by_reference_resolve",
-        Some(4) => "by_reference_only",
-        Some(5) => "embedded_message",
-        Some(6) => "ole",
+        Some(ATTACH_METHOD_NONE) => "none",
+        Some(ATTACH_METHOD_BY_VALUE) => "by_value",
+        Some(ATTACH_METHOD_BY_REFERENCE) => "by_reference",
+        Some(ATTACH_METHOD_BY_REFERENCE_RESOLVE) => "by_reference_resolve",
+        Some(ATTACH_METHOD_BY_REFERENCE_ONLY) => "by_reference_only",
+        Some(ATTACH_METHOD_EMBEDDED_MESSAGE) => "embedded_message",
+        Some(ATTACH_METHOD_OLE) => "ole",
         Some(_) => "unrecognized",
     }
 }
@@ -254,7 +260,7 @@ pub(crate) struct RootCounts {
     /// Attachment files written (by-value attachments extracted).
     pub(crate) attachments_extracted: usize,
     /// Planned attachment files not written: not extracted by design, or failed, or inside an
-    /// embedded message (which is not extracted until M4f-2).
+    /// embedded message that was not written (below the depth cap, or unreadable).
     pub(crate) attachments_not_extracted: usize,
     pub(crate) embedded_messages_not_extracted: usize,
 }
@@ -326,27 +332,9 @@ pub(crate) fn to_json<T: Serialize>(value: &T) -> Result<String> {
     Ok(text)
 }
 
-fn snake_case(name: &str) -> String {
-    let mut out = String::new();
-    for (i, ch) in name.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if i > 0 {
-                out.push('_');
-            }
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-/// The naming flags as stable labels, in the flags' own (deterministic) order.
+/// The naming flags as stable labels (`NameFlag::label`), in the flags' own (deterministic) order.
 pub(crate) fn adjustment_names(flags: &BTreeSet<NameFlag>) -> Vec<String> {
-    flags
-        .iter()
-        .map(|f| snake_case(&format!("{f:?}")))
-        .collect()
+    flags.iter().map(|f| f.label().to_string()).collect()
 }
 
 /// The heading text: the subject with every whitespace run collapsed to one space and control
@@ -371,8 +359,8 @@ fn normalize_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// A backtick fence longer than any backtick run in `text` (at least three).
-fn fence_for(text: &str) -> String {
+/// The length of the longest run of backticks in `text` (0 when there is none).
+fn longest_backtick_run(text: &str) -> usize {
     let mut longest = 0usize;
     let mut run = 0usize;
     for c in text.chars() {
@@ -383,23 +371,18 @@ fn fence_for(text: &str) -> String {
             run = 0;
         }
     }
-    "`".repeat(longest.max(2) + 1)
+    longest
+}
+
+/// A backtick fence longer than any backtick run in `text` (at least three).
+fn fence_for(text: &str) -> String {
+    "`".repeat(longest_backtick_run(text).max(2) + 1)
 }
 
 /// A Markdown code span that holds `text` exactly: the delimiter is one backtick longer than any
 /// backtick run inside, and a value that starts or ends with a backtick is padded with a space.
 fn code_span(text: &str) -> String {
-    let mut longest = 0usize;
-    let mut run = 0usize;
-    for c in text.chars() {
-        if c == '`' {
-            run += 1;
-            longest = longest.max(run);
-        } else {
-            run = 0;
-        }
-    }
-    let ticks = "`".repeat(longest + 1);
+    let ticks = "`".repeat(longest_backtick_run(text) + 1);
     if text.starts_with('`') || text.ends_with('`') {
         format!("{ticks} {text} {ticks}")
     } else {
@@ -1496,9 +1479,25 @@ mod tests {
     }
 
     #[test]
-    fn adjustment_labels_are_snake_case() {
-        assert_eq!(snake_case("ReservedCharReplaced"), "reserved_char_replaced");
-        assert_eq!(snake_case("Truncated"), "truncated");
+    fn adjustment_names_are_the_flags_stable_labels_in_flag_order() {
+        let flags: BTreeSet<NameFlag> = [NameFlag::Suffixed, NameFlag::Truncated].into();
+        assert_eq!(adjustment_names(&flags), vec!["truncated", "suffixed"]);
+    }
+
+    /// `CONVERTER_VERSION` is recorded in every `metadata.json` as provenance, and the exact pin
+    /// in `Cargo.toml` is where the truth lives; this keeps the two from drifting apart.
+    #[test]
+    fn the_recorded_converter_version_is_the_pinned_one() {
+        let manifest = include_str!("../Cargo.toml");
+        let line = manifest
+            .lines()
+            .find(|line| line.trim_start().starts_with("htmd"))
+            .expect("Cargo.toml pins htmd");
+        let pinned = line
+            .split('"')
+            .nth(1)
+            .expect("the htmd line has a quoted version");
+        assert_eq!(pinned.strip_prefix('='), Some(CONVERTER_VERSION));
     }
 
     #[test]

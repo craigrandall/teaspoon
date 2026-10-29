@@ -28,6 +28,27 @@ pub(crate) enum NameFlag {
     SpecialNameProtected,
 }
 
+impl NameFlag {
+    /// The label written to `metadata.json` and `folder.json` (`adjustments`). Explicit rather
+    /// than derived from the variant's name, so renaming a variant cannot silently change the
+    /// archive's vocabulary; the exhaustive match makes a new variant a compile error until it
+    /// has a label.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            NameFlag::ReservedCharReplaced => "reserved_char_replaced",
+            NameFlag::ControlRemoved => "control_removed",
+            NameFlag::InvisibleRemoved => "invisible_removed",
+            NameFlag::Trimmed => "trimmed",
+            NameFlag::DeviceNameMangled => "device_name_mangled",
+            NameFlag::EmptyFallback => "empty_fallback",
+            NameFlag::Truncated => "truncated",
+            NameFlag::Suffixed => "suffixed",
+            NameFlag::DepthCapped => "depth_capped",
+            NameFlag::SpecialNameProtected => "special_name_protected",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Sanitized {
     pub(crate) name: String,
@@ -390,6 +411,40 @@ mod tests {
 
     fn san(raw: &str) -> String {
         sanitize_component(raw, "(no subject)").name
+    }
+
+    #[test]
+    fn every_name_flag_has_a_distinct_stable_label() {
+        let all = [
+            NameFlag::ReservedCharReplaced,
+            NameFlag::ControlRemoved,
+            NameFlag::InvisibleRemoved,
+            NameFlag::Trimmed,
+            NameFlag::DeviceNameMangled,
+            NameFlag::EmptyFallback,
+            NameFlag::Truncated,
+            NameFlag::Suffixed,
+            NameFlag::DepthCapped,
+            NameFlag::SpecialNameProtected,
+        ];
+        let labels: BTreeSet<&str> = all.iter().map(|flag| flag.label()).collect();
+        assert_eq!(labels.len(), all.len());
+        for label in &labels {
+            assert!(
+                label.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
+                "{label}"
+            );
+        }
+        // These spellings are part of the archive's file contract.
+        assert_eq!(
+            NameFlag::ReservedCharReplaced.label(),
+            "reserved_char_replaced"
+        );
+        assert_eq!(NameFlag::DepthCapped.label(), "depth_capped");
+        assert_eq!(
+            NameFlag::SpecialNameProtected.label(),
+            "special_name_protected"
+        );
     }
 
     #[test]

@@ -10,17 +10,22 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::layout::{ATTACHMENTS_DIR, FOLDER_JSON, METADATA_JSON, units_of};
 use crate::naming::{
     COMPONENT_MAX_UNITS, MAX_SUFFIX_RESERVE_UNITS, NameFlag, NsItem, SUFFIX_RESERVE_UNITS,
     Sanitized, assign_namespace, collision_key, is_special_attachment_name, is_valid_component,
     sanitize_component, shorten_to, split_extension, utf16_len,
 };
 
-/// Name reserved in every folder directory for that folder's metadata file.
-pub(crate) const FOLDER_JSON: &str = "folder.json";
-const FOLDER_JSON_TAIL: usize = 1 + 11; // "\folder.json"
-const METADATA_JSON_TAIL: usize = 1 + 13; // "\metadata.json"
-const ATTACHMENTS_DIR_UNITS: usize = 11; // "attachments"
+/// Longest allowed full path: 259 leaves room for the terminating null under `MAX_PATH`. The one
+/// definition; the export checks its staging path against it too.
+pub(crate) const MAX_PATH_UNITS: usize = 259;
+
+// Tails below a directory, in UTF-16 units, derived from the archive layout's own names
+// (`layout.rs`) so that renaming one cannot leave a stale number behind.
+const FOLDER_JSON_TAIL: usize = 1 + units_of(FOLDER_JSON); // "\folder.json"
+const METADATA_JSON_TAIL: usize = 1 + units_of(METADATA_JSON); // "\metadata.json"
+const ATTACHMENTS_DIR_UNITS: usize = units_of(ATTACHMENTS_DIR); // "attachments"
 const ATTACHMENTS_TAIL: usize = 1 + ATTACHMENTS_DIR_UNITS + 1; // "\attachments\"
 
 /// Shortest stems the planner will cut to (including the ellipsis), by item kind.
@@ -47,7 +52,7 @@ impl Policy {
     pub(crate) fn new(root_units: usize) -> Self {
         Policy {
             root_units,
-            max_path_units: 259,
+            max_path_units: MAX_PATH_UNITS,
             dir_max_units: 247,
             attachment_cap_units: 100,
             max_embedded_depth: 3,
@@ -491,7 +496,7 @@ impl Planner<'_> {
             let named = &assigned[i];
             let units = att_units + 1 + utf16_len(&named.final_name);
             let mut c = comps.to_vec();
-            c.push("attachments".to_string());
+            c.push(ATTACHMENTS_DIR.to_string());
             c.push(named.final_name.clone());
             match &a.embedded {
                 None => self.push_entry(PlanEntry {

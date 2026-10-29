@@ -31,13 +31,12 @@ use crate::oxmsg_envelope::extract_envelope_at;
 use crate::oxmsg_extract::{read_body_forms_at, read_string_property};
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
 use crate::shared::{
-    CompoundFile, MAX_DIRECTORY_DEPTH, PROP_ATTACH_CONTENT_ID, PROP_ATTACH_DATA_BINARY,
-    PROP_ATTACH_METHOD,
+    ATTACH_METHOD_EMBEDDED_MESSAGE, CompoundFile, MAX_DIRECTORY_DEPTH, PROP_ATTACH_CONTENT_ID,
+    PROP_ATTACH_DATA_BINARY, PROP_ATTACH_METHOD, is_msg_file,
 };
 
 /// Deepest embedded-message nesting read.
 const MAX_EMBEDDED_READ_DEPTH: usize = 8;
-const ATTACH_METHOD_EMBEDDED: i32 = 5;
 
 /// Source ID of each top-level message (one that came from a `.msg` file of its own) to that file.
 pub(crate) type MsgFileMap = BTreeMap<u64, PathBuf>;
@@ -81,12 +80,6 @@ pub(crate) fn build_msg_export_source(
 pub(crate) fn build_msg_tree(input: &Path) -> Result<(SourceFolder, SourceCensus)> {
     let (root, census, _files) = build_msg_export_source(input)?;
     Ok((root, census))
-}
-
-fn is_msg_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("msg"))
 }
 
 /// Storage paths of the attachments directly under `base`, sorted: the order the planner's
@@ -214,7 +207,7 @@ impl Builder {
         for attach_path in paths {
             let method = attach_method(comp, &attach_path);
             let embedded_path = attach_path.join(EMBEDDED_OBJECT_STORAGE_NAME);
-            let is_nested_message = method == Some(ATTACH_METHOD_EMBEDDED)
+            let is_nested_message = method == Some(ATTACH_METHOD_EMBEDDED_MESSAGE)
                 && depth < MAX_EMBEDDED_READ_DEPTH
                 && read_stream_bytes(comp, &embedded_path.join("__properties_version1.0"))
                     .is_some();

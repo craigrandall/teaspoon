@@ -22,8 +22,9 @@ use crate::oxmsg_decode::{
     extract_string8_codepage, properties_stream_header_len, read_long_property, read_stream_bytes,
 };
 use crate::shared::{
-    CompoundFile, PROP_ATTACH_CONTENT_ID, PROP_ATTACH_METHOD, PROP_BODY, PROP_BODY_HTML,
-    PROP_RECIPIENT_TYPE, PROP_RTF_COMPRESSED, RtfHtmlCheck, check_compressed_rtf_bytes,
+    ATTACH_METHOD_BY_VALUE, ATTACH_METHOD_EMBEDDED_MESSAGE, ATTACH_METHOD_OLE, CompoundFile,
+    PROP_ATTACH_CONTENT_ID, PROP_ATTACH_METHOD, PROP_BODY, PROP_BODY_HTML, PROP_RECIPIENT_TYPE,
+    PROP_RTF_COMPRESSED, RtfHtmlCheck, check_compressed_rtf_bytes,
 };
 
 // =============================================================================
@@ -393,12 +394,12 @@ pub(crate) fn extract_attachment_method_counts(comp: &mut CompoundFile) -> Attac
         }
 
         match method {
-            Some(1) => counts.by_value += 1,
-            Some(5) => {
+            Some(ATTACH_METHOD_BY_VALUE) => counts.by_value += 1,
+            Some(ATTACH_METHOD_EMBEDDED_MESSAGE) => {
                 counts.embedded_message += 1;
                 counts.embedded_paths.push(attach_path.clone());
             }
-            Some(6) => counts.ole += 1,
+            Some(ATTACH_METHOD_OLE) => counts.ole += 1,
             Some(_) => counts.other += 1,
             None => counts.unresolved += 1,
         }
@@ -406,7 +407,7 @@ pub(crate) fn extract_attachment_method_counts(comp: &mut CompoundFile) -> Attac
             counts.with_content_id += 1;
         }
 
-        let is_by_value = matches!(method, Some(1));
+        let is_by_value = method == Some(ATTACH_METHOD_BY_VALUE);
         if is_by_value {
             // Drained in chunks, not read whole (M4f): the answers are the same as with
             // `read_stream_bytes` (empty, non-empty, unreadable), but a huge attachment no

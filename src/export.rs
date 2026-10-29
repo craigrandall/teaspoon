@@ -48,7 +48,8 @@ use crate::dry_run::{SourceKind, classify_source, input_leaf_name, root_stem, ro
 use crate::model::MessageContent;
 use crate::naming::{collision_key, utf16_len};
 use crate::plan::{
-    EntryKind, Plan, PlanEntry, Policy, SourceFolder, SourceMessage, plan_export, verify_plan,
+    EntryKind, MAX_PATH_UNITS, Plan, PlanEntry, Policy, SourceFolder, SourceMessage, plan_export,
+    verify_plan,
 };
 use crate::shared::{
     ATTACH_METHOD_BY_REFERENCE, ATTACH_METHOD_BY_REFERENCE_ONLY,
@@ -62,8 +63,6 @@ use crate::stage::{
     Disposition, STAGING_TAIL_UNITS, SourceFailure, StagedFile, Stager, StreamOutcome, hash_file,
     hex, join_path,
 };
-
-const MAX_PATH_UNITS: usize = 259;
 
 mod nested;
 

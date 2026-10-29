@@ -6,6 +6,7 @@ mod body;
 mod cli;
 mod dry_run;
 mod export;
+mod layout;
 mod model;
 mod msg_report;
 mod naming;

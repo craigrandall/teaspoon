@@ -12,9 +12,9 @@ use crate::shared::CompoundFile;
 // =============================================================================
 // Custom MS-OXMSG parser: property-stream and value decoding primitives
 //
-// Pure, CFB-free decoding helpers. Entry values are never read or reported
-// as content -- only structural fields (type, ID, flags, and, for
-// variable-length entries, size/reserved).
+// Decoding helpers (pure, CFB-free), followed by the readers that take an open container
+// (`read_stream_bytes`, `stream_len`, `drain_stream_len`). The values decoded here are real
+// content: callers decide what is printed, and the reports print counts only.
 // =============================================================================
 
 /// Decides only whether a property's value fits inline in a Property
@@ -211,8 +211,8 @@ pub(crate) fn decode_unicode_value(bytes: &[u8]) -> Result<String, std::string::
 /// Windows-1252, per the WHATWG Encoding Standard's windows-1252 index --
 /// identical to ISO-8859-1/Latin-1 outside 0x80-0x9F. UNVERIFIED against
 /// real fixture data: the corpus has no PT_STRING8 property to check
-/// against, and `PidTagMessageCodepage` isn't consulted here -- this is
-/// the conventional default, not a codepage-aware decode.
+/// against, and `PidTagMessageCodepage` is not consulted by this table-only function: the code page is
+/// chosen by `extract_string8_codepage` and applied by `decode_string8_with_codepage`.
 pub(crate) fn cp1252_to_char(byte: u8) -> Option<char> {
     // Index 0 = 0x80. A 0 entry marks one of the five byte values
     // Windows-1252 leaves genuinely undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D).

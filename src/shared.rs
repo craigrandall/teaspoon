@@ -13,6 +13,13 @@ pub(crate) const MAX_DIRECTORY_DEPTH: usize = 64;
 /// Subfolders below it are not opened; each one is counted as a folder open error.
 pub(crate) const MAX_FOLDER_DEPTH: usize = 128;
 
+/// True for a path whose extension is `.msg`, in any letter case. Extension only: nothing is read.
+pub(crate) fn is_msg_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("msg"))
+}
+
 // =============================================================================
 // Shared: MS-OXRTFEX "RTF containing encapsulated HTML" detection
 // =============================================================================

@@ -25,7 +25,9 @@ PST and MSG must not leak into the renderer or archive writer.
 
 `architecture.mmd` and `pipeline.mmd` in this folder draw this target
 architecture. They describe where the project is going, not what the code
-does today; the sections below say what exists.
+does today. The sections below record the boundaries milestone by milestone, so an older
+section can describe a state that a later one supersedes (the later section says so);
+"Code layout" at the end is current.
 
 ## Domain boundary
 
@@ -159,7 +161,8 @@ grow later already separated.
 - `archive.rs` has no I/O, so what is written is testable byte for byte (golden files are committed under `tests/golden/`).
 - `export.rs` never overwrites or deletes what it did not generate: the target must be absent, empty, or a directory whose root `folder.json` was written by `tsp` for the same source; its own files are replaced only with consent (`--overwrite` or a yes at the prompt).
 - Each file is replaced atomically (written under a short numeric name in `.tsp-tmp`, then renamed). The archive as a whole is not all-or-nothing: the root `folder.json` is first written as `incomplete` and replaced with the `complete` version last, so an interrupted run is recognizable.
-- Not exported yet: attachments and embedded messages (counted and recorded as not extracted), HTML and RTF bodies, the remaining message properties, and `.pst` input.
+- As of M4c, not exported: attachments and embedded messages (added in M4f), HTML and RTF bodies (added in M4e-2b), the remaining message properties, and `.pst` input. The sections below record each addition.
+- Since M4h-0 `export.rs` no longer renders everything in memory first: it stages each file as it is rendered and keeps only a manifest (see `stage.rs` and the M4f-1 section). `read_message_content` in the diagram above is now `open_message`; the former survives only as a test helper.
 
 ## M4d boundary: the envelope
 
@@ -213,7 +216,7 @@ PidTagRtfCompressed (bytes)
                              whole-document \fromhtml1 search
 ```
 
-- `rtf_deencap` imports only the `PT_STRING8` decoders from `oxmsg_decode`; it reads no file and knows no adapter type. Nothing in the export calls it yet; M4e-2 (the body pipeline) will.
+- `rtf_deencap` imports only the `PT_STRING8` decoders from `oxmsg_decode`; it reads no file and knows no adapter type. At M4e-1 nothing in the export called it; since M4e-2 `body.rs` does.
 - The recovered text is UTF-8, so a `charset=` declaration inside it is stale; the diagnostics flag one.
 
 ## M4f-1 boundary: by-value attachments, streamed in chunks (built in v0.1.34)
@@ -242,7 +245,7 @@ M4f-1 adds attachment bytes to the export without letting memory depend on their
 - The attachments are staged before `metadata.json` because it records each one's size and SHA-256, which are known only after the copy.
 - `stream_len` reads a stream's length from its directory entry without reading the stream (the export's declared length); `drain_stream_len` reads a stream through in chunks and counts the bytes (the diagnostics' zero-byte check), so an unreadable stream is still noticed.
 - Embedded messages, OLE objects, and by-reference attachments are recorded as not extracted, with a reason (embedded messages until M4f-2a, which writes them as nested message directories; see the next section). `cid:` references in `message.md` stayed as written until M4f-2b (see the last of these sections).
-- Verified so far: synthetic tests, and a synthetic memory gate (peak working set flat at 28 MB for attachments of 1, 50, and 200 MB); not yet run on the real corpus.
+- Verified so far: synthetic tests, and a synthetic memory gate (peak working set flat at 28 MB for attachments of 1, 50, and 200 MB); the real-corpus runs came with M4f-2 (next section).
 
 ## M4f-2 boundary: embedded messages as nested folders, and the payload differential (built in v0.1.35)
 
@@ -354,7 +357,7 @@ and a full corpus export for that tag has not been reported.
 The code lives in `src/`, one module per seam:
 
 - `cli` — arguments and input classification; `main` — dispatch.
-- `shared` — vocabulary, the encapsulated-HTML check, shared counters.
+- `shared` — vocabulary, the encapsulated-HTML check, shared counters, the traversal depth limits, and `is_msg_file`.
 - `pst` — the PST diagnostic; `msg_report` — the shared MSG report.
 - `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, `oxmsg_extract` — the custom MS-OXMSG parser, from naming conventions through extraction; `oxmsg_envelope` — the envelope extraction (M4d).
 - `verify` — the `--verify` comparison and structural gates; `verify_envelope` — the `--verify-envelope` comparison (M4d); `verify_deencap` — the `--verify-deencap` comparison (M4e-1).
@@ -362,12 +365,15 @@ The code lives in `src/`, one module per seam:
 - `naming`, `plan` — the pure naming rules and export planner (M4b).
 - `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also opens message content for export (the body forms, the envelope, and a descriptor for each attachment) together with a handle that streams one attachment's data at a time and opens an embedded attachment as a nested message through that handle (M4f-2a).
 - `model`, `archive`, `export` — the model so far (message content and envelope), the pure renderers, and the writer with its preflight and consent rules (M4c, extended by M4d).
-- `stage` - the staging area of the streamed export (M4h-0): files are written to `.tsp-tmp` as they are rendered, only a manifest is kept, and `add_stream` copies attachment data in chunks (M4f-1).
+- `stage` — the staging area of the streamed export (M4h-0): files are written to `.tsp-tmp` as they are rendered, only a manifest is kept, and `add_stream` copies attachment data in chunks (M4f-1).
 - `body` — the pure body pipeline (M4e-2a); since M4f-2b it also holds the scanner for `cid:` references, the comparison of content IDs, and the link from a message to one of its extracted attachments.
 - `tests` — most of the older unit tests; the newer modules keep theirs beside their code.
-- `export/nested` - a child module of `export` (M4f-2a): stages one message's files for both top-level and embedded messages and writes embedded messages as nested message directories, to the planner's depth cap.
-- `verify_attachments` - `--verify-attachments` (M4f-2c): the byte-level comparison of extracted attachments with `msg_parser`.
+- `export/nested` — a child module of `export` (M4f-2a): stages one message's files for both top-level and embedded messages and writes embedded messages as nested message directories, to the planner's depth cap.
+- `verify_attachments` — `--verify-attachments` (M4f-2c): the byte-level comparison of extracted attachments with `msg_parser`.
+- `verify_bodies` — `--verify-bodies` (M4e-2c): the content-preservation check of the HTML-to-Markdown conversion, in order, counts only.
+- `bakeoff` — the HTML-to-Markdown bake-off harness (M4e-0, `--bakeoff-md`); the candidate converters compile only with `--features bakeoff`.
+- `layout` — the archive's fixed names (`folder.json`, `message.md`, `metadata.json`, `attachments`). The planner derives its path-budget tails from their lengths, and the renderers, the writer, and the body pipeline's links use the same constants.
 
 The README lists the contents of each module.
 
-Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. The envelope modules follow the same pattern: `oxmsg_envelope` is an adapter module that depends on `oxmsg_classify`, `oxmsg_decode`, `oxmsg_extract`, and `shared` and produces `model` types (it also takes the submit and delivery time property IDs from `dry_run`, where they were first defined, which is a small layering oddity: an adapter importing from the reporting module), and `verify_envelope` depends on `model`, `source_msg`, `dry_run` (for the subject-marker stripping), and `verify` (for the shared comparison tallies). Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. `naming.rs` and `plan.rs` still carry `#![allow(dead_code)]`; the plan was to drop it when the writer landed, and it has not been tried yet. The full normalized model (M4b-4) has not been written: bodies with raw bytes, the raw property bag, named properties, embedded messages, and diagnostics are not modelled yet (attachments are modelled as descriptors since M4f-1).
+Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. The envelope modules follow the same pattern: `oxmsg_envelope` is an adapter module that depends on `oxmsg_classify`, `oxmsg_decode`, `oxmsg_extract`, and `shared` and produces `model` types (it also takes the submit and delivery time property IDs from `dry_run`, where they were first defined, which is a small layering oddity: an adapter importing from the reporting module), and `verify_envelope` depends on `model`, `source_msg`, `dry_run` (for the subject-marker stripping), and `verify` (for the shared comparison tallies). Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. The blanket `#![allow(dead_code)]` that `naming.rs` and `plan.rs` carried is gone, so dead code is reported there like everywhere else. `layout` holds only constants and is imported by `plan`, `archive`, and `body`. The full normalized model (M4b-4) has not been written: bodies with raw bytes, the raw property bag, named properties, embedded messages, and diagnostics are not modelled yet (attachments are modelled as descriptors since M4f-1).

@@ -604,7 +604,7 @@ pub(crate) fn content_id_key(id: &str) -> String {
 /// non-ASCII letter cannot end or break the Markdown destination). A nested message's
 /// `message.md` sits beside its own `attachments/`, so the same form serves every level.
 pub(crate) fn attachment_link(file_name: &str) -> String {
-    let mut link = String::from("attachments/");
+    let mut link = format!("{}/", crate::layout::ATTACHMENTS_DIR);
     for byte in file_name.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             link.push(char::from(byte));

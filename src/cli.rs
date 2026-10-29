@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use crate::shared::MAX_DIRECTORY_DEPTH;
+use crate::shared::{MAX_DIRECTORY_DEPTH, is_msg_file};
 
 // =============================================================================
 // CLI and input classification
@@ -146,13 +146,6 @@ pub(crate) enum InputKind {
         /// in the output, not just in the source.
         subdirectories_skipped: u64,
     },
-}
-
-fn is_msg_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("msg"))
-        .unwrap_or(false)
 }
 
 /// Every `.msg` file under `root`, down to [`MAX_DIRECTORY_DEPTH`] levels, sorted, and the number
