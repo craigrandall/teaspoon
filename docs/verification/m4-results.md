@@ -888,3 +888,32 @@ What it does not show:
 ### Status
 
 **M4f-2b is built and its corpus gate is met as far as the output shows; M4f is not complete.** Open: the remaining adversarial fixtures (reserved names, 255-character names, case-only differences, control characters, and for this change a percent-escaped, non-ASCII, or shared content ID); the owner review of exported messages, including one with a rewritten image and a nested one; a `cid:` link inside an embedded message on real data; a counts-only reconciliation of the attachments inside embedded messages; the quality-gate output for the tag.
+
+## Review patches, steps 1 and 2 (v0.1.37, 2026-10-29)
+
+A review of the whole code base through the GitHub connection led to two patches, both committed.
+
+**Step 1 (counting and bounds, hygiene).**
+- The PST diagnostic walk (`pst.rs`) had no depth limit and now stops at `MAX_FOLDER_DEPTH` (128), the limit `source_pst.rs` already had; both count the folders they do not open (`folder_open_errors` in the diagnostic, `source_open_errors` in a dry run).
+- The `--recursive` scan stops at `MAX_DIRECTORY_DEPTH` (64) and counts the directories it does not enter in `subdirectories_skipped`.
+- A directory export counts unreadable directory entries (`export_source_open_errors`) and directories below the cap (`export_source_directories_beyond_depth_cap`; the dry run prints `source_directories_beyond_depth_cap`), and warns on standard error when either is above zero. Before, only a dry run showed that a `.msg` file could not be opened, and the export left it out without a trace.
+- The blanket `#![allow(dead_code)]` was removed from `naming.rs` and `plan.rs`; `.gitignore` gained `tsp-out/` and `.tsp-tmp/`; `Cargo.toml` declares `rust-version`; CI builds with `--locked`; `CONTRIBUTING.md`, `LICENSE-MIT`, and `LICENSE-APACHE` were added.
+
+**Step 2 (one definition per fact).**
+- New `src/layout.rs`: the archive's fixed names. `plan.rs` derives its path-budget tails from their lengths instead of hand-counted numbers.
+- The path budget (259) is defined once (`plan::MAX_PATH_UNITS`); the attach-method numbers are the `shared.rs` constants; `is_msg_file` is defined once.
+- The `adjustments` labels in the archive come from `NameFlag::label`, not from the variants' debug names; a test ties `archive::CONVERTER_VERSION` to the `htmd` pin in `Cargo.toml`.
+- Stale comments and `docs/ARCHITECTURE.md` were corrected.
+
+**Results reported by the owner.** Everything builds and 372 tests pass. The archive format is unchanged: no file name or content differs, so the corpus export differs only through the tool version recorded in the root `folder.json`.
+
+**Not reported or not yet run.** The corpus export tree hash with this build (`93fa4e7928079d32f810825b9ab919f38531114e09bd0f569514c33f3a09103b` (with `Cargo.toml` at 0.1.37; no archive file changed in content, but the root `folder.json` records the tool version, so the hash differs from the v0.1.36 hash `9e459ddc...`)); `verify-split.ps1` default, `--verify`, and PST outputs; CI on Linux and Windows for the tag; the depth limits on real data (no corpus input reaches them, and the PST limit needs a very deep or cyclic folder hierarchy to test).
+
+**Found by the review and not changed here.**
+- `tsp <dir> --recursive --verify-*` fails when every `.msg` file is in a subdirectory, because the input is classified by a non-recursive scan first.
+- The scans of the diagnostic modes in `cli.rs` still drop unreadable directory entries silently.
+- Hostile-input bounds: the length guard before `compressed_rtf::decompress_rtf` exists in three places with no panic containment and no output limit; stream reads have no size limit; the HTML conversion is isolated against a panic but not against stack exhaustion, and has no time limit.
+- The exported `message.md` heading (the subject) is not escaped, remote image links are kept, and extracted attachments carry no Mark-of-the-Web.
+- The planner holds every planned entry in memory (about messages times depth), which will matter for multi-gigabyte PST files (M4i).
+- `PT_STRING8` text outside four code pages is not decoded (the `encoding_rs` decision is open), and `is_invisible` omits U+200E, U+200F, U+061C, and U+2060 to U+2064 although its comment says bidi controls.
+- Duplicated hash and hex helpers (`stage`, `archive`, `export`) and a duplicated RTF length guard (`oxmsg_extract`, `shared`, `verify_deencap`).
