@@ -202,6 +202,11 @@ fn empty_preflight(ownership: Ownership) -> Preflight {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExportReport {
     root_units: usize,
+    /// Source files or directory entries that could not be opened or read and are therefore not
+    /// in the export (directory input; a single unopenable file is an error instead).
+    source_open_errors: usize,
+    /// Directories not entered because they lie below the directory depth cap.
+    source_directories_beyond_depth_cap: usize,
     plan_entries_total: usize,
     plan_folders: usize,
     plan_messages: usize,
@@ -305,6 +310,11 @@ fn print_export_report(r: &ExportReport) {
     println!("inventory=privacy_safe");
     println!("input_kind=msg_export");
     println!("export_root_units={}", r.root_units);
+    println!("export_source_open_errors={}", r.source_open_errors);
+    println!(
+        "export_source_directories_beyond_depth_cap={}",
+        r.source_directories_beyond_depth_cap
+    );
     println!("plan_entries_total={}", r.plan_entries_total);
     println!("plan_folders={}", r.plan_folders);
     println!("plan_messages={}", r.plan_messages);
@@ -990,6 +1000,8 @@ pub(crate) fn run_export(
     let gate = verify_plan(&plan, &policy);
     let mut report = ExportReport {
         root_units: policy.root_units,
+        source_open_errors: census.open_errors,
+        source_directories_beyond_depth_cap: census.directories_beyond_depth_cap,
         plan_entries_total: plan.counters.entries_total,
         plan_folders: plan.counters.folders,
         plan_messages: plan.counters.messages,
@@ -1109,6 +1121,12 @@ pub(crate) fn run_export(
     report.files_unchanged = unchanged;
     report.readback_mismatches = stager.read_back_mismatches(&root_dir);
     print_export_report(&report);
+    if report.source_open_errors > 0 || report.source_directories_beyond_depth_cap > 0 {
+        // Content-free: the counts are in the report above; no name or path is printed.
+        eprintln!(
+            "warning: some input was not exported and is not in the archive (see the export_source_* counts)"
+        );
+    }
     if report.readback_mismatches > 0 {
         bail!(
             "read-back found files that differ from what was planned; the archive is not trustworthy"
@@ -2020,6 +2038,184 @@ mod tests {
             ExportStatus::Completed
         );
         assert_eq!(tree_files(&out), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- adversarial attachment names (M4f) -----------------------------------
+
+    /// The Windows device names of rule N4 (the part before the first `.`, any case, including
+    /// the superscript digits).
+    fn is_reserved_device_name(name: &str) -> bool {
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end()
+            .to_uppercase();
+        if matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) {
+            return true;
+        }
+        ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix).is_some_and(|rest| {
+                let mut chars = rest.chars();
+                matches!(
+                    (chars.next(), chars.next()),
+                    (Some(c), None)
+                        if c.is_ascii_digit() || matches!(c, '\u{b9}' | '\u{b2}' | '\u{b3}')
+                )
+            })
+        })
+    }
+
+    /// What Windows (and rule N3) will not accept as a file name.
+    fn assert_legal_windows_name(name: &str) {
+        assert!(!name.is_empty(), "an empty name was written");
+        assert!(name != "." && name != "..", "a dot name was written");
+        for c in name.chars() {
+            let code = c as u32;
+            assert!(
+                !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+                    && code >= 0x20
+                    && !(0x7f..=0x9f).contains(&code)
+                    && !('\u{202a}'..='\u{202e}').contains(&c)
+                    && !('\u{2066}'..='\u{2069}').contains(&c)
+                    && !('\u{200b}'..='\u{200d}').contains(&c)
+                    && c != '\u{feff}',
+                "a forbidden character (U+{code:04X}) is in a written name"
+            );
+        }
+        assert!(
+            !name.ends_with('.') && !name.ends_with(' '),
+            "a trailing dot or space is in a written name"
+        );
+        assert!(utf16_len(name) <= 255, "a component is over 255 units");
+        assert!(
+            !is_reserved_device_name(name),
+            "a device name was written as a file name"
+        );
+    }
+
+    #[test]
+    fn adversarial_attachment_names_become_legal_unique_files_inside_attachments() {
+        let dir = temp_dir("advnames");
+        let file = dir.join("v.msg");
+        let long = format!("{}.pdf", "x".repeat(300));
+        let names: Vec<String> = vec![
+            "CON.txt".into(),
+            "nul".into(),
+            "aux.tar.gz".into(),
+            "LPT1".into(),
+            "COM\u{b9}.txt".into(),
+            long,
+            "Report.pdf".into(),
+            "report.PDF".into(),
+            "caf\u{e9}.txt".into(),
+            "cafe\u{301}.txt".into(),
+            "bad\u{1}name.txt".into(),
+            "tab\tname.txt".into(),
+            "trailing dot.".into(),
+            "trailing space ".into(),
+            "a<b>c:d\"e|f?g*h.txt".into(),
+            "desktop.ini".into(),
+            "~$lock.docx".into(),
+            "..".into(),
+            ".".into(),
+            "   ".into(),
+            "\u{1F600}\u{1F600}.png".into(),
+            "bidi\u{202e}gnp.exe".into(),
+            "zero\u{200b}width.txt".into(),
+            "../../escape.txt".into(),
+            "..\\..\\escape2.txt".into(),
+            "C:\\evil.txt".into(),
+            "/abs/evil.txt".into(),
+            "\\\\server\\share\\x.txt".into(),
+        ];
+        let datas: Vec<Vec<u8>> = (0..names.len())
+            .map(|i| format!("data-{i}").into_bytes())
+            .collect();
+        let attachments: Vec<TestAttachment<'_>> = names
+            .iter()
+            .zip(&datas)
+            .map(|(name, data)| by_value(name, data))
+            .collect();
+        write_msg_attachments(&file, "Adv", &attachments);
+        let out = dir.join("out");
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+
+        let files = tree_files(&out);
+        let meta = meta_of(&files, "v/Adv/metadata.json");
+        let records = meta["attachments"].as_array().unwrap();
+        assert_eq!(records.len(), names.len());
+        let prefix = "v/Adv/attachments/";
+        let mut keys = BTreeSet::new();
+        for (i, record) in records.iter().enumerate() {
+            assert_eq!(record["status"], "extracted", "attachment {i}");
+            let name = record["file"].as_str().expect("an extracted file name");
+            assert_legal_windows_name(name);
+            assert!(
+                keys.insert(collision_key(name).to_string()),
+                "attachment {i} shares a collision key with another"
+            );
+            assert_eq!(
+                files[&format!("{prefix}{name}")],
+                datas[i],
+                "the bytes of attachment {i} are not under its planned name"
+            );
+            assert_eq!(record["bytes"], datas[i].len());
+            assert_eq!(record["sha256"], hex(Sha256::digest(&datas[i])));
+        }
+
+        // One file per attachment, none merged or lost, none in a subdirectory.
+        let written: Vec<&String> = files.keys().filter(|k| k.starts_with(prefix)).collect();
+        assert_eq!(written.len(), names.len());
+        for key in &written {
+            assert!(
+                !key[prefix.len()..].contains('/'),
+                "a name created a subdirectory"
+            );
+        }
+        // Nothing escaped the archive: a `..` or an absolute name must not reach outside it.
+        for key in files.keys() {
+            assert!(
+                key.starts_with("v/"),
+                "a file was written outside the archive root"
+            );
+        }
+        for stray in ["escape.txt", "escape2.txt", "evil.txt", "x.txt"] {
+            assert!(!dir.join(stray).exists(), "{stray} escaped to the parent");
+            assert!(!out.join(stray).exists(), "{stray} escaped the archive");
+        }
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            2,
+            "only the input and the output may exist"
+        );
+
+        // Every written path is within the Windows budget, measured independently of the plan.
+        let absolute_out = std::path::absolute(&out).unwrap();
+        for key in files.keys() {
+            let units = utf16_len(&absolute_out.join(key).to_string_lossy());
+            assert!(units <= 259, "a written path is {units} units");
+        }
+
+        // Deterministic: a repeat export writes nothing, and a second output is identical.
+        assert_eq!(
+            export(&file, &out, &opts(false, false)),
+            ExportStatus::Completed
+        );
+        assert_eq!(tree_files(&out), files);
+        let out_b = dir.join("out2");
+        assert_eq!(
+            export(&file, &out_b, &opts(false, false)),
+            ExportStatus::Completed
+        );
+        assert_eq!(tree_files(&out_b), files);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

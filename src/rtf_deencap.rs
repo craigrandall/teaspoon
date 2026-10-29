@@ -1153,12 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn a_trailing_backslash_is_harmless() {
-        assert_eq!(html(b"{\\rtf1\\fromhtml1 {\\*\\htmltag64}a\\"), "a");
-    }
-
-    #[test]
-    fn a_trailing_backslash_is_dropped_but_a_escaped_one_is_not() {
+    fn a_trailing_backslash_is_dropped_but_an_escaped_one_is_not() {
         // A lone trailing backslash is malformed and produces nothing.
         assert_eq!(html(b"{\\rtf1\\fromhtml1 {\\*\\htmltag64}a\\"), "a");
         // An escaped backslash at end of input is a literal backslash.

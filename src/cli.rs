@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 
+use crate::shared::MAX_DIRECTORY_DEPTH;
+
 // =============================================================================
 // CLI and input classification
 // =============================================================================
@@ -153,19 +155,25 @@ fn is_msg_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Every `.msg` file under `root`, at any depth, sorted. Used by `--recursive`. Never includes
-/// the path in an error message.
-pub(crate) fn collect_msg_files_recursive(root: &Path) -> Result<Vec<PathBuf>> {
+/// Every `.msg` file under `root`, down to [`MAX_DIRECTORY_DEPTH`] levels, sorted, and the number
+/// of directories below that depth that were not entered (guards against link loops; counted,
+/// never silently skipped). Used by `--recursive`. Never includes the path in an error message.
+pub(crate) fn collect_msg_files_recursive(root: &Path) -> Result<(Vec<PathBuf>, u64)> {
     let mut files = Vec::new();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
+    let mut beyond_depth_cap = 0u64;
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    while let Some((directory, depth)) = pending.pop() {
         for entry in std::fs::read_dir(&directory)
             .context("failed to read input directory")?
             .filter_map(|entry| entry.ok())
         {
             let entry_path = entry.path();
             if entry_path.is_dir() {
-                pending.push(entry_path);
+                if depth < MAX_DIRECTORY_DEPTH {
+                    pending.push((entry_path, depth + 1));
+                } else {
+                    beyond_depth_cap += 1;
+                }
             } else if is_msg_file(&entry_path) {
                 files.push(entry_path);
             }
@@ -175,7 +183,7 @@ pub(crate) fn collect_msg_files_recursive(root: &Path) -> Result<Vec<PathBuf>> {
     if files.is_empty() {
         anyhow::bail!("input directory contains no .msg files");
     }
-    Ok(files)
+    Ok((files, beyond_depth_cap))
 }
 
 /// Classifies the input by extension (or, for a directory, by scanning for
@@ -224,5 +232,52 @@ pub(crate) fn classify_input(path: &Path) -> Result<InputKind> {
         _ => anyhow::bail!(
             "unsupported input: expected a .pst file, a .msg file, or a directory of .msg files"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tsp-cli-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn a_recursive_scan_stops_at_the_depth_cap_and_counts_what_it_did_not_enter() {
+        let root = temp_dir("deep");
+        let mut dir = root.clone();
+        // Two levels more than the cap: the first is seen and counted, the second never reached.
+        for _ in 0..(MAX_DIRECTORY_DEPTH + 2) {
+            dir.push("d");
+        }
+        std::fs::create_dir_all(&dir).expect("create the deep chain");
+        std::fs::write(root.join("a.msg"), b"x").expect("write a file");
+
+        let (files, beyond_depth_cap) = collect_msg_files_recursive(&root).expect("scan");
+        assert_eq!(files.len(), 1);
+        assert_eq!(beyond_depth_cap, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_recursive_scan_finds_files_at_every_level_within_the_cap() {
+        let root = temp_dir("levels");
+        std::fs::create_dir_all(root.join("a").join("b")).expect("create directories");
+        for path in [
+            root.join("top.msg"),
+            root.join("a").join("mid.MSG"),
+            root.join("a").join("b").join("low.msg"),
+            root.join("a").join("ignored.txt"),
+        ] {
+            std::fs::write(path, b"x").expect("write a file");
+        }
+        let (files, beyond_depth_cap) = collect_msg_files_recursive(&root).expect("scan");
+        assert_eq!(files.len(), 3);
+        assert_eq!(beyond_depth_cap, 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

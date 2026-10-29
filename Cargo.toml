@@ -2,6 +2,7 @@
 name = "teaspoon"
 version = "0.1.36"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 publish = false
 description = "Deterministic, loss-aware mining of Outlook .pst and .msg files; a standalone tool"

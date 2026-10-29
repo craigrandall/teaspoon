@@ -704,7 +704,7 @@ fn push_loss(loss: &mut Vec<Loss>, reason: LossReason, count: u64) {
 }
 
 /// Renders the selected body with the production converter.
-#[allow(dead_code)] // the export calls `render_with` through `archive::body_outcome`
+#[cfg(test)]
 pub(crate) fn render_body(selection: &Selection) -> Rendered {
     render_with(selection, &convert_html_isolated)
 }

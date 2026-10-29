@@ -22,12 +22,10 @@ use crate::dry_run::{
 };
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
 use crate::pst::{column_index, read_i32_at};
-use crate::shared::{ATTACH_METHOD_EMBEDDED_MESSAGE, PROP_ATTACH_METHOD};
+use crate::shared::{ATTACH_METHOD_EMBEDDED_MESSAGE, MAX_FOLDER_DEPTH, PROP_ATTACH_METHOD};
 
 /// PidTagEntryId, injected into every folder's properties by the crate.
 const PROP_ENTRY_ID: u16 = 0x0FFF;
-/// Deepest folder nesting walked (guards against a corrupt hierarchy).
-const MAX_FOLDER_DEPTH: usize = 128;
 
 struct PstBuilder {
     census: SourceCensus,
@@ -134,10 +132,13 @@ impl PstBuilder {
         }
 
         let mut folders = Vec::new();
-        if depth < MAX_FOLDER_DEPTH
-            && let Some(hierarchy) = folder.hierarchy_table()
-        {
+        if let Some(hierarchy) = folder.hierarchy_table() {
             for row in hierarchy.rows_matrix() {
+                if depth >= MAX_FOLDER_DEPTH {
+                    // Not opened: a corrupt hierarchy must not recurse without bound. Counted.
+                    self.census.open_errors += 1;
+                    continue;
+                }
                 let node = NodeId::from(u32::from(row.id()));
                 let entry_id = match store.properties().make_entry_id(node) {
                     Ok(entry_id) => entry_id,

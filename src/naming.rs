@@ -1,10 +1,6 @@
 //! Pure naming rules for the export planner (N, L, and U rules in
 //! `docs/plans/m4a-export-rules.md`): sanitizing, UTF-16 measurement, shortening, collision keys,
 //! and duplicate suffixes. No I/O and no PST or MSG types.
-//!
-//! The planner is not wired into the CLI until M4b-3 (`--dry-run`), so its items are unused
-//! outside tests for now; the allow below is removed in that stage.
-#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 

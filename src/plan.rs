@@ -3,13 +3,10 @@
 //! each checked against the Windows path budget, plus content-free counters. No I/O.
 //!
 //! Layout planned: `<root>/<folder>.../<message>/{message.md,metadata.json,attachments/...}`.
-//! The planner is not wired into the CLI until M4b-3 (`--dry-run`), so its items are unused
-//! outside tests for now; the allow below is removed in that stage.
 //!
 //! Known limit, to be closed before the PST export ships: when even the floor names cannot fit
 //! (very deep folder chains on a long root), the planner reports `budget_exceeded` instead of
 //! flattening folder chains (rule L4 step 4) or falling back to identity names (step 5).
-#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 

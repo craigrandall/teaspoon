@@ -2,14 +2,8 @@
 /target/
 **/*.rs.bk
 
-# Cargo lockfile is checked in for binaries (see Cargo.toml workspace members).
-# We do check it in here because the workspace produces shipping binaries.
-
-# WiX intermediate files
-*.wixobj
-*.wixpdb
-*.msi
-!installer/*.wxs
+# Cargo.lock is checked in on purpose: teaspoon builds a binary (`tsp`), and the CI gate and the
+# verification evidence depend on a reproducible dependency set.
 
 # IDE
 /.idea/
@@ -30,5 +24,8 @@ desktop.ini
 *.msg
 *.eml
 
-# Output
+# Export output and staging. An archive holds message content (headers, bodies, attachments):
+# never commit one.
 out/
+tsp-out/
+.tsp-tmp/

@@ -31,11 +31,10 @@ use crate::oxmsg_envelope::extract_envelope_at;
 use crate::oxmsg_extract::{read_body_forms_at, read_string_property};
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
 use crate::shared::{
-    CompoundFile, PROP_ATTACH_CONTENT_ID, PROP_ATTACH_DATA_BINARY, PROP_ATTACH_METHOD,
+    CompoundFile, MAX_DIRECTORY_DEPTH, PROP_ATTACH_CONTENT_ID, PROP_ATTACH_DATA_BINARY,
+    PROP_ATTACH_METHOD,
 };
 
-/// Deepest directory nesting mirrored (guards against link loops).
-const MAX_DIRECTORY_DEPTH: usize = 64;
 /// Deepest embedded-message nesting read.
 const MAX_EMBEDDED_READ_DEPTH: usize = 8;
 const ATTACH_METHOD_EMBEDDED: i32 = 5;
@@ -115,11 +114,14 @@ impl Builder {
     }
 
     fn folder_from_dir(&mut self, dir: &Path, depth: usize) -> Result<SourceFolder> {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-            .context("failed to read input directory")?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .collect();
+        let mut entries: Vec<PathBuf> = Vec::new();
+        for entry in std::fs::read_dir(dir).context("failed to read input directory")? {
+            match entry {
+                Ok(entry) => entries.push(entry.path()),
+                // A directory entry that cannot be read is input that was not looked at: counted.
+                Err(_) => self.census.open_errors += 1,
+            }
+        }
         entries.sort();
 
         let mut folder = SourceFolder {
@@ -137,6 +139,9 @@ impl Builder {
                     self.census.subdirectories_mirrored += 1;
                     let sub = self.folder_from_dir(&path, depth + 1)?;
                     folder.folders.push(sub);
+                } else {
+                    // Not entered: link loops must not recurse without bound. Counted.
+                    self.census.directories_beyond_depth_cap += 1;
                 }
             } else if is_msg_file(&path)
                 && let Some(message) = self.message_from_file(&path)
@@ -680,6 +685,24 @@ mod tests {
         assert_eq!(drain_stream_len(&mut comp, Path::new("/store")), None);
         assert_eq!(drain_stream_len(&mut comp, Path::new("/missing")), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn directories_below_the_depth_cap_are_counted_not_skipped_silently() {
+        let root = temp_dir("deep");
+        let mut dir = root.clone();
+        // Two levels more than the cap: the first is seen and counted, the second never reached.
+        for _ in 0..(MAX_DIRECTORY_DEPTH + 2) {
+            dir.push("d");
+        }
+        std::fs::create_dir_all(&dir).expect("create the deep chain");
+        write_synthetic_msg(&root.join("a.msg"));
+
+        let (tree, census) = build_msg_tree(&root).expect("build tree");
+        assert_eq!(tree.messages.len(), 1);
+        assert_eq!(census.subdirectories_mirrored, MAX_DIRECTORY_DEPTH);
+        assert_eq!(census.directories_beyond_depth_cap, 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

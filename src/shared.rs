@@ -5,6 +5,14 @@
 /// A generic MS-CFB container opened from a file on disk.
 pub(crate) type CompoundFile = cfb::CompoundFile<std::fs::File>;
 
+/// Deepest directory nesting an input scan descends into (guards against link loops). Directories
+/// below it are not entered; they are counted, never silently skipped.
+pub(crate) const MAX_DIRECTORY_DEPTH: usize = 64;
+
+/// Deepest PST folder nesting walked (guards against a corrupt or cyclic folder hierarchy).
+/// Subfolders below it are not opened; each one is counted as a folder open error.
+pub(crate) const MAX_FOLDER_DEPTH: usize = 128;
+
 // =============================================================================
 // Shared: MS-OXRTFEX "RTF containing encapsulated HTML" detection
 // =============================================================================

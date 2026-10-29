@@ -26,6 +26,7 @@ pub(crate) const PROP_ATTACH_LONG_FILENAME: u16 = 0x3707; // PidTagAttachLongFil
 pub(crate) struct SourceCensus {
     pub(crate) open_errors: usize,
     pub(crate) subdirectories_mirrored: usize,
+    pub(crate) directories_beyond_depth_cap: usize,
     pub(crate) subject_markers_stripped: usize,
     pub(crate) attachments_without_name: usize,
     pub(crate) internet_id_missing: usize,
@@ -202,6 +203,10 @@ pub(crate) fn print_dry_run_report(
     println!(
         "source_subdirectories_mirrored={}",
         census.subdirectories_mirrored
+    );
+    println!(
+        "source_directories_beyond_depth_cap={}",
+        census.directories_beyond_depth_cap
     );
     println!(
         "source_subject_markers_stripped={}",

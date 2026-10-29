@@ -15,10 +15,11 @@ use outlook_pst::ndb::node_id::NodeId;
 use crate::shared::{
     ATTACH_METHOD_BY_REFERENCE, ATTACH_METHOD_BY_REFERENCE_ONLY,
     ATTACH_METHOD_BY_REFERENCE_RESOLVE, ATTACH_METHOD_BY_VALUE, ATTACH_METHOD_EMBEDDED_MESSAGE,
-    ATTACH_METHOD_NONE, ATTACH_METHOD_OLE, BodyCounters, CountStats, PROP_ATTACH_CONTENT_ID,
-    PROP_ATTACH_METHOD, PROP_ATTACH_SIZE, PROP_BODY, PROP_BODY_HTML, PROP_RECIPIENT_TYPE,
-    PROP_RTF_COMPRESSED, RECIPIENT_TYPE_BCC, RECIPIENT_TYPE_CC, RECIPIENT_TYPE_ORIG,
-    RECIPIENT_TYPE_TO, RtfHtmlCheck, ZeroByteStats, check_compressed_rtf_bytes,
+    ATTACH_METHOD_NONE, ATTACH_METHOD_OLE, BodyCounters, CountStats, MAX_FOLDER_DEPTH,
+    PROP_ATTACH_CONTENT_ID, PROP_ATTACH_METHOD, PROP_ATTACH_SIZE, PROP_BODY, PROP_BODY_HTML,
+    PROP_RECIPIENT_TYPE, PROP_RTF_COMPRESSED, RECIPIENT_TYPE_BCC, RECIPIENT_TYPE_CC,
+    RECIPIENT_TYPE_ORIG, RECIPIENT_TYPE_TO, RtfHtmlCheck, ZeroByteStats,
+    check_compressed_rtf_bytes,
 };
 
 // =============================================================================
@@ -200,10 +201,24 @@ pub(crate) struct PstTotals {
     pub(crate) attachments_method_unknown: u64,
 }
 
+/// Walks `folder` and everything below it, adding to `totals`.
 pub(crate) fn walk_folder(
     store: &dyn Store,
     folder: &dyn PstFolder,
     totals: &mut PstTotals,
+) -> Result<()> {
+    walk_folder_at(store, folder, totals, 0)
+}
+
+/// [`walk_folder`] at nesting `depth`. Below [`MAX_FOLDER_DEPTH`] the subfolders are not opened
+/// (a corrupt or cyclic hierarchy would otherwise recurse until the stack overflows and the
+/// process aborts); each one not opened is counted in `folder_open_errors`, so the report shows
+/// the loss. The same cap guards `source_pst.rs`.
+fn walk_folder_at(
+    store: &dyn Store,
+    folder: &dyn PstFolder,
+    totals: &mut PstTotals,
+    depth: usize,
 ) -> Result<()> {
     totals.folders += 1;
 
@@ -233,6 +248,10 @@ pub(crate) fn walk_folder(
 
     if let Some(hierarchy) = folder.hierarchy_table() {
         for row in hierarchy.rows_matrix() {
+            if depth >= MAX_FOLDER_DEPTH {
+                totals.folder_open_errors += 1;
+                continue;
+            }
             let node = NodeId::from(u32::from(row.id()));
 
             let entry_id = match store.properties().make_entry_id(node) {
@@ -244,7 +263,7 @@ pub(crate) fn walk_folder(
             };
 
             match store.open_folder(&entry_id) {
-                Ok(child) => walk_folder(store, child.as_ref(), totals)?,
+                Ok(child) => walk_folder_at(store, child.as_ref(), totals, depth + 1)?,
                 Err(_) => totals.folder_open_errors += 1,
             }
         }

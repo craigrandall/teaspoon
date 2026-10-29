@@ -96,9 +96,10 @@ fn main() -> Result<()> {
             files,
             subdirectories_skipped,
         } => {
-            // With --recursive a directory input is scanned at any depth, so nothing is skipped.
+            // With --recursive a directory input is scanned down to the directory depth cap;
+            // directories below it are counted in `subdirectories_skipped`, never dropped silently.
             let (files, subdirectories_skipped) = if args.recursive && args.input.is_dir() {
-                (collect_msg_files_recursive(&args.input)?, 0)
+                collect_msg_files_recursive(&args.input)?
             } else {
                 (files, subdirectories_skipped)
             };
