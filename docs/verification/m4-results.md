@@ -917,3 +917,26 @@ A review of the whole code base through the GitHub connection led to two patches
 - The planner holds every planned entry in memory (about messages times depth), which will matter for multi-gigabyte PST files (M4i).
 - `PT_STRING8` text outside four code pages is not decoded (the `encoding_rs` decision is open), and `is_invisible` omits U+200E, U+200F, U+061C, and U+2060 to U+2064 although its comment says bidi controls.
 - Duplicated hash and hex helpers (`stage`, `archive`, `export`) and a duplicated RTF length guard (`oxmsg_extract`, `shared`, `verify_deencap`).
+
+## Hardening: bounds on untrusted input (v0.1.38, 2026-10-30)
+
+A patch that acts on the review's findings about hostile or corrupt input, committed after the review patches.
+
+**Changes.**
+- `shared::decompress_rtf_bounded` is the one caller of `compressed_rtf::decompress_rtf`: it refuses input shorter than the 16-byte header and a header that declares more than `MAX_DECOMPRESSED_RTF_BYTES` (256 MiB) of output, and contains a panic inside the crate, reporting each as a decompression failure. `oxmsg_extract.rs` and `shared.rs` use it; `verify_deencap.rs` lost its private copy of the RTF reader and uses `oxmsg_extract::read_decompressed_rtf`.
+- `shared::run_contained` is the one place that silences the panic hook around code that may panic; `body.rs` uses it instead of its own hook swap.
+- HTML nested deeper than `MAX_HTML_NESTING` (1,000) is refused before `htmd` runs and recorded as `html_conversion_failed`. The scan (`body::nests_deeper_than`) follows the parser's rules: void elements never nest, `<div/>` opens a div, a new `<p>`, `<li>`, `<dt>`, `<dd>`, cell, row, or `<option>` ends the open one, an end tag closes the nearest open element of that name, a stray end tag is ignored. A test converts a document nested exactly at the limit, to show the stack holds it.
+- `stage.rs` retries a rename that Windows refuses for a moment (access denied, sharing violation, lock violation) up to five times, 50 to 200 ms apart; other errors and other systems are not retried.
+- `--recursive` decides the classification of a directory (`classify_input_with`), so a directory whose `.msg` files are all in subdirectories works with `--verify-*`.
+- `src/robustness_tests.rs`: 14 property and boundary tests (no panic on arbitrary or header-shaped RTF, properties-stream, and string bytes; HTML preprocessing only removes; padding collapse never grows the text; `cid:` extents lie on character boundaries inside the text; the nesting scan is monotonic in its limit; attachment links hold only unreserved characters, percent escapes, and the slash).
+
+**Results reported by the owner.** Everything builds and 393 tests pass (372 before: +14 robustness, +3 body, +3 stage, +1 cli). The corpus export tree hash is unchanged, `verify-split.ps1` default, `--verify`, and PST outputs are identical, and CI passed.
+
+**Not reported or not yet run.** `measure-peak.ps1` on the 45 MB synthetic corpus after the nesting scan (one more transient copy of each HTML body is expected, not growth with the message count); the limits on real data (no corpus message is nested past 1,000 levels or declares a very large RTF).
+
+**Still open from the review.**
+- Hostile-input: no time limit on the HTML conversion (a pathological slow input remains possible; Rust cannot kill a thread); no fuzz targets (they need the crate split into a library and a binary); a crafted compound file can make stream reads slow (cross-linked sectors; the `cfb` crate's handling is not verified); no lock on `.tsp-tmp` for two runs into one `--out`.
+- Output: the exported `message.md` heading (the subject) is not escaped, remote image links are kept, and extracted attachments carry no Mark-of-the-Web. Each changes the archive, so each needs a decision.
+- The diagnostic scans in `cli.rs` still drop unreadable directory entries silently (counting them needs a report key).
+- M4i groundwork: `PT_STRING8` text outside four code pages is not decoded (the `encoding_rs` decision), the planner holds every planned entry in memory, two PST traversals count differently, and the export is tied to the MSG source types.
+- Duplicated hash and hex helpers (`stage`, `archive`, `export`); `is_invisible` omits U+200E, U+200F, U+061C, and U+2060 to U+2064 although its comment says bidi controls.

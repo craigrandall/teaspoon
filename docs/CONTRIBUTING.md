@@ -34,7 +34,10 @@ name and confirm that it ran.
   (`--overwrite` or a yes at the prompt).
 - **Malformed input must not crash the tool.** No panic, and no recursion or allocation without a
   bound, on a hostile or corrupt file. Every such bound is a named constant, and what a bound cuts
-  off is counted.
+  off is counted. Code that can panic on corrupt input (a dependency that indexes without
+  checking, say) is called through `shared::run_contained`, and compressed RTF only through
+  `shared::decompress_rtf_bounded`. Recursion on untrusted nesting is bounded before it starts,
+  because a stack overflow cannot be caught.
 - **Deterministic output.** Two exports of the same input are byte-identical.
 - **Dependencies** must be licensed compatibly with `MIT OR Apache-2.0` (no GPL). A new dependency
   needs an ADR or a note in one.

@@ -357,7 +357,7 @@ and a full corpus export for that tag has not been reported.
 The code lives in `src/`, one module per seam:
 
 - `cli` — arguments and input classification; `main` — dispatch.
-- `shared` — vocabulary, the encapsulated-HTML check, shared counters, the traversal depth limits, and `is_msg_file`.
+- `shared` — vocabulary, the encapsulated-HTML check, shared counters, the traversal depth limits, `is_msg_file`, the one bounded and panic-contained RTF decompression, and `run_contained`.
 - `pst` — the PST diagnostic; `msg_report` — the shared MSG report.
 - `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, `oxmsg_extract` — the custom MS-OXMSG parser, from naming conventions through extraction; `oxmsg_envelope` — the envelope extraction (M4d).
 - `verify` — the `--verify` comparison and structural gates; `verify_envelope` — the `--verify-envelope` comparison (M4d); `verify_deencap` — the `--verify-deencap` comparison (M4e-1).
