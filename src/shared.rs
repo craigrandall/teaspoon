@@ -20,6 +20,26 @@ pub(crate) fn is_msg_file(path: &std::path::Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("msg"))
 }
 
+/// Serializes the temporary silencing of the panic hook (see [`run_contained`]), so concurrent
+/// callers (tests run in parallel) cannot restore each other's hooks out of order.
+static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs `f` and returns its result, or `None` if it panicked. While it runs the panic hook is
+/// silenced: a panic message could quote the content being processed, and tsp never prints
+/// content. A panic on a thread that `f` spawns and joins is silenced too (the caller sees the
+/// failed join). This contains a panic; it does not contain a stack overflow, which aborts the
+/// process, so recursion on untrusted nesting has to be bounded before calling.
+pub(crate) fn run_contained<T>(f: impl FnOnce() -> T) -> Option<T> {
+    let _guard = PANIC_HOOK_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    std::panic::set_hook(previous_hook);
+    outcome.ok()
+}
+
 // =============================================================================
 // Shared: MS-OXRTFEX "RTF containing encapsulated HTML" detection
 // =============================================================================
@@ -62,27 +82,49 @@ pub(crate) enum RtfHtmlCheck {
     },
 }
 
+/// The largest decompressed RTF accepted: 256 MiB. A document whose header declares more is
+/// refused before decompression starts, and counts as a decompression failure like any other.
+pub(crate) const MAX_DECOMPRESSED_RTF_BYTES: usize = 256 * 1024 * 1024;
+
+/// Decompresses raw `PidTagRtfCompressed` bytes (MS-OXRTFCP) with `compressed-rtf`, or `None` when
+/// they cannot be. The one place in tsp that calls the crate, so the three guards it needs are in
+/// one place:
+///
+/// - `compressed_rtf::decompress_rtf` unconditionally indexes the first 16 bytes of its input (its
+///   MS-OXRTFCP header read) and panics rather than erroring if given fewer (confirmed by reading
+///   the crate's source), so shorter input is refused first;
+/// - the header's raw size (bytes 4 to 8, little-endian) is checked against
+///   [`MAX_DECOMPRESSED_RTF_BYTES`] before decompression, and the result after it;
+/// - a panic inside the crate on corrupt input is contained ([`run_contained`]) and reported as a
+///   failure, not allowed to take the process down.
+///
+/// The decompressed bytes are the caller's to use; nothing here prints them.
+pub(crate) fn decompress_rtf_bounded(compressed: &[u8]) -> Option<Vec<u8>> {
+    let header: [u8; 16] = compressed.get(..16)?.try_into().ok()?;
+    let raw_size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+    if usize::try_from(raw_size).is_ok_and(|size| size > MAX_DECOMPRESSED_RTF_BYTES) {
+        return None;
+    }
+    let rtf = run_contained(|| compressed_rtf::decompress_rtf(compressed).ok())??;
+    if rtf.len() > MAX_DECOMPRESSED_RTF_BYTES {
+        return None;
+    }
+    Some(rtf.as_bytes().to_vec())
+}
+
 /// Checks raw `PidTagRtfCompressed` bytes for MS-OXRTFEX HTML
 /// encapsulation (see [`FROMHTML_MARKER`]). Decompression uses
-/// `compressed-rtf` (MS-OXRTFCP); its magic numbers and dictionary were
-/// independently cross-checked against `msg_parser`'s own implementation
-/// and match. Never returns or exposes the actual RTF or HTML content.
-///
-/// `compressed_rtf::decompress_rtf` unconditionally indexes the first 16
-/// bytes of its input (its MS-OXRTFCP header read) and panics rather than
-/// erroring if given fewer -- confirmed by reading the crate's source, not
-/// assumed. The length guard keeps truncated or corrupt data from
-/// crashing tsp.
+/// `compressed-rtf` (MS-OXRTFCP), through [`decompress_rtf_bounded`]; its
+/// magic numbers and dictionary were independently cross-checked against
+/// `msg_parser`'s own implementation and match. Never returns or exposes
+/// the actual RTF or HTML content.
 pub(crate) fn check_compressed_rtf_bytes(compressed: &[u8]) -> RtfHtmlCheck {
-    if compressed.len() < 16 {
-        return RtfHtmlCheck::DecompressionFailed;
-    }
-    match compressed_rtf::decompress_rtf(compressed) {
-        Ok(rtf) => RtfHtmlCheck::Decompressed {
-            contains_fromhtml: rtf_bytes_contain_fromhtml(rtf.as_bytes()),
+    match decompress_rtf_bounded(compressed) {
+        Some(rtf) => RtfHtmlCheck::Decompressed {
+            contains_fromhtml: rtf_bytes_contain_fromhtml(&rtf),
             decompressed_bytes: rtf.len(),
         },
-        Err(_) => RtfHtmlCheck::DecompressionFailed,
+        None => RtfHtmlCheck::DecompressionFailed,
     }
 }
 

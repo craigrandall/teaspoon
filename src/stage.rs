@@ -149,12 +149,60 @@ fn prepare_staging(staging: &Path) -> Result<()> {
     }
 }
 
+/// How many times in all a rename that Windows refuses for a moment is tried, and the pause
+/// before each retry (this many milliseconds times the number of tries so far): 50, 100, 150,
+/// and 200 ms, under half a second in all.
+const RENAME_ATTEMPTS: u32 = 5;
+const RENAME_PAUSE_MS: u64 = 50;
+
+/// True for the errors that a file something else holds open for a moment produces on Windows:
+/// access denied (5), a sharing violation (32), and a lock violation (33). Antivirus scanners
+/// and indexers do this to files that were just written, and a large export renames thousands.
+/// On other systems those numbers mean something else, so nothing is retried there.
+fn is_transient_rename_error(error: &std::io::Error) -> bool {
+    cfg!(windows)
+        && (error.kind() == std::io::ErrorKind::PermissionDenied
+            || matches!(error.raw_os_error(), Some(5 | 32 | 33)))
+}
+
+/// Runs `attempt`; while it fails with an error `is_transient` accepts, calls `pause` with the
+/// number of tries so far and tries again, up to `attempts` tries in all. Any other error, and
+/// the last transient one, is returned.
+fn retry_transient<T>(
+    attempts: u32,
+    mut pause: impl FnMut(u32),
+    mut attempt: impl FnMut() -> std::io::Result<T>,
+    is_transient: impl Fn(&std::io::Error) -> bool,
+) -> std::io::Result<T> {
+    let mut tried = 1u32;
+    loop {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) if tried < attempts && is_transient(&error) => {
+                pause(tried);
+                tried += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn move_into_place(staged: &Path, final_path: &Path) -> Result<()> {
     if let Some(parent) = final_path.parent() {
         std::fs::create_dir_all(parent).context("failed to create an output directory")?;
     }
     // On Windows `rename` replaces an existing file (MoveFileExW with MOVEFILE_REPLACE_EXISTING).
-    std::fs::rename(staged, final_path).context("failed to move a staged file into place")
+    retry_transient(
+        RENAME_ATTEMPTS,
+        |tried| {
+            std::thread::sleep(std::time::Duration::from_millis(
+                RENAME_PAUSE_MS * u64::from(tried),
+            ))
+        },
+        || std::fs::rename(staged, final_path),
+        is_transient_rename_error,
+    )
+    .context("failed to move a staged file into place")
 }
 
 impl Stager {
@@ -383,6 +431,66 @@ mod tests {
             .unwrap_or_default();
         names.sort();
         names
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried_until_it_succeeds() {
+        let mut calls = 0u32;
+        let mut pauses = Vec::new();
+        let result = retry_transient(
+            5,
+            |tried| pauses.push(tried),
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(std::io::Error::other("busy"))
+                } else {
+                    Ok(calls)
+                }
+            },
+            |_| true,
+        );
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(pauses, vec![1, 2]);
+    }
+
+    #[test]
+    fn a_failure_that_is_not_transient_is_not_retried_and_a_stuck_one_gives_up() {
+        let mut calls = 0u32;
+        let result: std::io::Result<()> = retry_transient(
+            5,
+            |_| {},
+            || {
+                calls += 1;
+                Err(std::io::Error::other("no"))
+            },
+            |_| false,
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+
+        let mut calls = 0u32;
+        let result: std::io::Result<()> = retry_transient(
+            4,
+            |_| {},
+            || {
+                calls += 1;
+                Err(std::io::Error::other("still busy"))
+            },
+            |_| true,
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn only_windows_busy_file_errors_count_as_transient() {
+        let denied = std::io::Error::from_raw_os_error(5);
+        let sharing = std::io::Error::from_raw_os_error(32);
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(is_transient_rename_error(&denied), cfg!(windows));
+        assert_eq!(is_transient_rename_error(&sharing), cfg!(windows));
+        assert!(!is_transient_rename_error(&missing));
     }
 
     #[test]

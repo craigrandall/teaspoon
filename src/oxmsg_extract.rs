@@ -24,7 +24,7 @@ use crate::oxmsg_decode::{
 use crate::shared::{
     ATTACH_METHOD_BY_VALUE, ATTACH_METHOD_EMBEDDED_MESSAGE, ATTACH_METHOD_OLE, CompoundFile,
     PROP_ATTACH_CONTENT_ID, PROP_ATTACH_METHOD, PROP_BODY, PROP_BODY_HTML, PROP_RECIPIENT_TYPE,
-    PROP_RTF_COMPRESSED, RtfHtmlCheck, check_compressed_rtf_bytes,
+    PROP_RTF_COMPRESSED, RtfHtmlCheck, check_compressed_rtf_bytes, decompress_rtf_bounded,
 };
 
 // =============================================================================
@@ -165,16 +165,17 @@ pub(crate) fn extract_body_flags(comp: &mut CompoundFile) -> BodyFlags {
 }
 
 /// What reading the message's compressed RTF gave.
-enum RtfRead {
+pub(crate) enum RtfRead {
     Absent,
     DecompressionFailed,
     Bytes(Vec<u8>),
 }
 
-/// Reads and decompresses `PidTagRtfCompressed` (MS-OXRTFCP, via `compressed-rtf`). A zero-length
-/// stream is absent, as in [`extract_body_flags`]. (`verify_deencap.rs` keeps an identical private
-/// copy; deduplicate in a later housekeeping change.)
-fn read_decompressed_rtf(comp: &mut CompoundFile, base: &Path) -> RtfRead {
+/// Reads and decompresses `PidTagRtfCompressed` (MS-OXRTFCP) through [`decompress_rtf_bounded`],
+/// which refuses a document that is too short or declares too large an output and contains a
+/// panic inside the crate. A zero-length stream is absent, as in [`extract_body_flags`].
+/// `verify_deencap.rs` uses this function too.
+pub(crate) fn read_decompressed_rtf(comp: &mut CompoundFile, base: &Path) -> RtfRead {
     let Some(compressed) = read_stream_bytes(
         comp,
         &expected_variable_stream_path(base, PROP_RTF_COMPRESSED, 0x0102),
@@ -182,13 +183,9 @@ fn read_decompressed_rtf(comp: &mut CompoundFile, base: &Path) -> RtfRead {
     .filter(|bytes| !bytes.is_empty()) else {
         return RtfRead::Absent;
     };
-    // `compressed_rtf::decompress_rtf` indexes the first 16 bytes unconditionally.
-    if compressed.len() < 16 {
-        return RtfRead::DecompressionFailed;
-    }
-    match compressed_rtf::decompress_rtf(&compressed) {
-        Ok(rtf) => RtfRead::Bytes(rtf.as_bytes().to_vec()),
-        Err(_) => RtfRead::DecompressionFailed,
+    match decompress_rtf_bounded(&compressed) {
+        Some(rtf) => RtfRead::Bytes(rtf),
+        None => RtfRead::DecompressionFailed,
     }
 }
 

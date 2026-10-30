@@ -17,6 +17,8 @@ mod oxmsg_extract;
 mod oxmsg_structure;
 mod plan;
 mod pst;
+#[cfg(test)]
+mod robustness_tests;
 mod rtf_deencap;
 mod shared;
 mod source_msg;
@@ -36,7 +38,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::bakeoff::run_bakeoff;
-use crate::cli::{Args, InputKind, classify_input, collect_msg_files_recursive};
+use crate::cli::{Args, InputKind, classify_input_with};
 use crate::dry_run::run_dry_run;
 use crate::export::{ExportOptions, ExportStatus, prompt_for_consent, run_export};
 use crate::oxmsg_extract::run_msg_extract;
@@ -83,7 +85,7 @@ fn main() -> Result<()> {
         };
     }
 
-    match classify_input(&args.input)? {
+    match classify_input_with(&args.input, args.recursive)? {
         InputKind::Pst => {
             if args.verify_bodies {
                 anyhow::bail!("--verify-bodies applies only to .msg input");
@@ -97,13 +99,8 @@ fn main() -> Result<()> {
             files,
             subdirectories_skipped,
         } => {
-            // With --recursive a directory input is scanned down to the directory depth cap;
-            // directories below it are counted in `subdirectories_skipped`, never dropped silently.
-            let (files, subdirectories_skipped) = if args.recursive && args.input.is_dir() {
-                collect_msg_files_recursive(&args.input)?
-            } else {
-                (files, subdirectories_skipped)
-            };
+            // (With --recursive, `classify_input_with` has already scanned the directory down to
+            // the depth cap and counted the directories below it in `subdirectories_skipped`.)
             // The custom MS-OXMSG extraction path is the .msg path (M3f).
             // `msg_parser` survives only as the independent oracle behind
             // --verify (ADR: custom MS-OXMSG parser graduates to the

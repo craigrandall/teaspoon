@@ -13,8 +13,8 @@
 //!   pass, then Word's downlevel markers and `o:p` tags. The bake-off harness shares this
 //!   function, so its figures measure what production does.
 //! - **Conversion**: `htmd` (pinned `=0.5.4`, default mode) on a worker thread with a large
-//!   stack, because it recurses on nesting depth and a panic must not take the process down; a
-//!   failure is recorded and falls back to the plain-text body.
+//!   stack, because it recurses on nesting depth and a panic must not take the process down, and nesting deeper than `MAX_HTML_NESTING` is
+//!   refused before the conversion starts; a failure is recorded and falls back to the plain-text body.
 //! - **Invisible padding** (ADR 2, decision 5): runs of invisible formatting characters are
 //!   removed from the Markdown only; the original body is untouched (the caller keeps it).
 //! - **Loss** (ADR 2, decision 4, amended twice): a closed list of reasons with counts.
@@ -24,11 +24,11 @@
 //! check (M4e-2c).
 
 use std::collections::BTreeSet;
-use std::sync::Mutex;
 
 use crate::model::BodyForms;
 use crate::oxmsg_decode::{String8Decoded, decode_string8_with_codepage};
 use crate::rtf_deencap::{Limits, RtfKind, deencapsulate_html, recognize};
+use crate::shared::run_contained;
 
 /// Stack for the conversion thread (the bake-off harness uses the same size; Windows' default
 /// main-thread stack is only 1 MiB and `htmd` recurses on nesting depth).
@@ -38,10 +38,12 @@ const STACK_BYTES: usize = 32 * 1024 * 1024;
 /// are 200 long; emoji joiner sequences are never 8 invisible characters in a row.
 const PADDING_MIN_RUN: usize = 8;
 
-/// Serializes the temporary silencing of the panic hook around a conversion, so a panic inside
-/// the converter cannot print content to stderr and concurrent conversions (in tests) cannot
-/// restore each other's hooks out of order.
-static HOOK_LOCK: Mutex<()> = Mutex::new(());
+/// Deepest element nesting that is converted. `htmd` recurses on nesting depth, and a stack
+/// overflow aborts the whole process and cannot be caught, so a document nested deeper than this
+/// is not converted: it is recorded as a failed conversion (the original body is kept either
+/// way). Real mail nests dozens of levels; 1,000 is far beyond that and far below what the
+/// conversion thread's stack holds.
+pub(crate) const MAX_HTML_NESTING: usize = 1_000;
 
 // =============================================================================
 // Selection
@@ -457,24 +459,94 @@ pub(crate) fn collapse_invisible_padding(text: &str) -> (String, u64) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConversionFailed;
 
-/// `htmd` on a worker thread with a large stack. A panic is the thread's failure, not the
-/// process's, and its message (which could quote content) is not printed.
+/// Elements that never have content or an end tag.
+const VOID_ELEMENTS: [&str; 14] = [
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+/// Whether opening `name` ends the open element `top` by the parser's own rules (it supplies the
+/// end tag): a new `<p>` ends an open `<p>`, a new `<li>` an open `<li>`, a new cell an open cell,
+/// a new row an open cell and row, and so on. Omitted end tags are legal HTML and common in
+/// generated mail, so they must not count as nesting.
+fn ends_open_element(name: &str, top: &str) -> bool {
+    match name {
+        "p" => top == "p",
+        "li" => top == "li",
+        "dt" | "dd" => matches!(top, "dt" | "dd"),
+        "td" | "th" => matches!(top, "td" | "th"),
+        "tr" => matches!(top, "tr" | "td" | "th"),
+        "option" => top == "option",
+        _ => false,
+    }
+}
+
+/// True when `html` nests elements deeper than `limit`. A scan that follows the parser closely
+/// enough for a bound, without building a tree: void elements never nest; `<div/>` opens a div (the
+/// slash is ignored on a non-void element in HTML); a start tag ends the open elements it implies
+/// (see [`ends_open_element`]); an end tag closes the nearest open element of that name and
+/// everything left open inside it; a stray end tag is ignored; comments, declarations, and a bare
+/// `<` are not elements. It may overcount in odd documents (for example markup inside an attribute
+/// value), never undercount by much, and it stops at the first excess.
+pub(crate) fn nests_deeper_than(html: &str, limit: usize) -> bool {
+    let lower = html.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut open: Vec<&str> = Vec::new();
+    let mut i = 0usize;
+    while let Some(relative) = lower[i..].find('<') {
+        let after = i + relative + 1;
+        let closing = bytes.get(after) == Some(&b'/');
+        let name_start = if closing { after + 1 } else { after };
+        if !bytes.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
+            i = after;
+            continue;
+        }
+        let name_len = bytes[name_start..]
+            .iter()
+            .take_while(|b| b.is_ascii_alphanumeric() || matches!(**b, b':' | b'-'))
+            .count();
+        let name_end = name_start + name_len;
+        let name = &lower[name_start..name_end];
+        if closing {
+            if let Some(position) = open.iter().rposition(|open_name| *open_name == name) {
+                open.truncate(position);
+            }
+        } else if !VOID_ELEMENTS.contains(&name) {
+            while open.last().is_some_and(|top| ends_open_element(name, top)) {
+                open.pop();
+            }
+            open.push(name);
+            if open.len() > limit {
+                return true;
+            }
+        }
+        i = lower[name_end..]
+            .find('>')
+            .map_or(lower.len(), |end| name_end + end + 1);
+    }
+    false
+}
+
+/// `htmd` on a worker thread with a large stack. A document nested deeper than
+/// [`MAX_HTML_NESTING`] is refused before the conversion starts (a stack overflow would abort the
+/// process). A panic is the thread's failure, not the process's, and its message (which could
+/// quote content) is not printed.
 pub(crate) fn convert_html_isolated(html: &str) -> Result<String, ConversionFailed> {
+    if nests_deeper_than(html, MAX_HTML_NESTING) {
+        return Err(ConversionFailed);
+    }
     let owned = html.to_string();
-    let _guard = HOOK_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let spawned = std::thread::Builder::new()
-        .stack_size(STACK_BYTES)
-        .spawn(move || htmd::convert(&owned).map_err(|_| ConversionFailed));
-    let joined = match spawned {
-        Ok(handle) => handle.join().map_err(|_| ConversionFailed),
-        Err(_) => Err(ConversionFailed),
-    };
-    std::panic::set_hook(previous_hook);
-    joined.and_then(|converted| converted)
+    run_contained(|| {
+        let spawned = std::thread::Builder::new()
+            .stack_size(STACK_BYTES)
+            .spawn(move || htmd::convert(&owned).map_err(|_| ConversionFailed));
+        let joined = match spawned {
+            Ok(handle) => handle.join().map_err(|_| ConversionFailed),
+            Err(_) => Err(ConversionFailed),
+        };
+        joined.and_then(|converted| converted)
+    })
+    .unwrap_or(Err(ConversionFailed))
 }
 
 fn count_html_rows(html: &str) -> u64 {
@@ -1390,6 +1462,75 @@ mod tests {
             Some("**Hello**")
         );
         assert!(rendered.loss.is_empty());
+    }
+
+    #[test]
+    fn nesting_at_the_limit_still_converts_without_overflowing_the_stack() {
+        let html = format!(
+            "{}deep{}",
+            "<div>".repeat(MAX_HTML_NESTING),
+            "</div>".repeat(MAX_HTML_NESTING)
+        );
+        assert!(!nests_deeper_than(&html, MAX_HTML_NESTING));
+        let markdown = convert_html_isolated(&html).unwrap();
+        assert!(markdown.contains("deep"));
+    }
+
+    #[test]
+    fn nesting_beyond_the_limit_is_refused_before_the_converter_runs() {
+        let html = "<div>".repeat(MAX_HTML_NESTING + 1);
+        assert!(nests_deeper_than(&html, MAX_HTML_NESTING));
+        assert_eq!(convert_html_isolated(&html), Err(ConversionFailed));
+        // The body pipeline records it as a failed conversion and falls back to the plain text.
+        let selection = select_body(&BodyForms {
+            native_html: Some(html.into_bytes()),
+            plain_text: Some("fallback".to_string()),
+            ..forms()
+        });
+        let rendered = render_body(&selection);
+        assert_eq!(rendered.source, BodySource::PlainText);
+        assert_eq!(
+            rendered.loss,
+            vec![Loss {
+                reason: LossReason::HtmlConversionFailed,
+                count: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn the_nesting_scan_follows_the_parser_not_the_markup_alone() {
+        let limit = 50;
+        // `<div/>` opens a div in HTML: the slash is ignored on a non-void element.
+        assert!(nests_deeper_than(&"<div/>".repeat(limit + 1), limit));
+        // Void elements never nest.
+        assert!(!nests_deeper_than(&"<br>".repeat(10_000), limit));
+        assert!(!nests_deeper_than(&"<img src=x>".repeat(10_000), limit));
+        // Omitted end tags do not accumulate: a new paragraph, item, cell, or row ends the old one.
+        assert!(!nests_deeper_than(&"<p>x".repeat(10_000), limit));
+        assert!(!nests_deeper_than(
+            &format!("<ul>{}</ul>", "<li>x".repeat(10_000)),
+            limit
+        ));
+        assert!(!nests_deeper_than(
+            &format!("<table>{}</table>", "<tr><td>x<td>y".repeat(10_000)),
+            limit
+        ));
+        // Stray end tags are ignored, and an end tag closes what was left open inside it.
+        assert!(!nests_deeper_than(&"</div>".repeat(10_000), limit));
+        let balanced = format!("{}{}", "<div><span><b>".repeat(10), "</div>".repeat(10));
+        assert!(!nests_deeper_than(
+            &format!("{balanced}{balanced}{balanced}"),
+            limit
+        ));
+        // At the limit passes, one above it does not.
+        assert!(!nests_deeper_than(&"<div>".repeat(limit), limit));
+        assert!(nests_deeper_than(&"<div>".repeat(limit + 1), limit));
+        // Comments, declarations, and a bare `<` are not elements.
+        assert!(!nests_deeper_than(
+            &"<!-- x --><!doctype html>< 3 <3 ".repeat(10_000),
+            limit
+        ));
     }
 
     #[test]

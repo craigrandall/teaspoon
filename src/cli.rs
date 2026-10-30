@@ -182,8 +182,27 @@ pub(crate) fn collect_msg_files_recursive(root: &Path) -> Result<(Vec<PathBuf>, 
 /// Classifies the input by extension (or, for a directory, by scanning for
 /// `.msg` files directly inside it -- not recursive). Never includes the
 /// input path itself in any error message: paths can disclose information
-/// about the user or their mailbox.
+/// about the user or their mailbox. The tests call this form; the program
+/// calls [`classify_input_with`].
+#[cfg(test)]
 pub(crate) fn classify_input(path: &Path) -> Result<InputKind> {
+    classify_input_with(path, false)
+}
+
+/// [`classify_input`], with `recursive` choosing how a directory is scanned: only its top level
+/// (subdirectories are counted in `subdirectories_skipped`) or, for `--recursive`, down to
+/// [`MAX_DIRECTORY_DEPTH`] levels (the directories below that are counted instead). The choice is
+/// made here, before the scan: a directory whose `.msg` files are all in subdirectories has none
+/// at its top level, and a top-level scan would refuse it as empty before `--recursive` was
+/// consulted.
+pub(crate) fn classify_input_with(path: &Path, recursive: bool) -> Result<InputKind> {
+    if path.is_dir() && recursive {
+        let (files, subdirectories_skipped) = collect_msg_files_recursive(path)?;
+        return Ok(InputKind::Msg {
+            files,
+            subdirectories_skipped,
+        });
+    }
     if path.is_dir() {
         let mut files = Vec::new();
         let mut subdirectories_skipped = 0u64;
@@ -253,6 +272,29 @@ mod tests {
         let (files, beyond_depth_cap) = collect_msg_files_recursive(&root).expect("scan");
         assert_eq!(files.len(), 1);
         assert_eq!(beyond_depth_cap, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_directory_whose_files_are_all_in_subdirectories_classifies_only_when_recursive() {
+        let root = temp_dir("subonly");
+        std::fs::create_dir_all(root.join("sub")).expect("create a subdirectory");
+        std::fs::write(root.join("sub").join("m.msg"), b"x").expect("write a file");
+
+        assert!(
+            classify_input_with(&root, false).is_err(),
+            "no .msg file at the top level"
+        );
+        match classify_input_with(&root, true).expect("classify recursively") {
+            InputKind::Msg {
+                files,
+                subdirectories_skipped,
+            } => {
+                assert_eq!(files.len(), 1);
+                assert_eq!(subdirectories_skipped, 0);
+            }
+            InputKind::Pst => panic!("a directory is not a PST"),
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

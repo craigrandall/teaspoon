@@ -26,9 +26,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use msg_parser::Outlook;
 
-use crate::oxmsg_decode::{expected_variable_stream_path, read_stream_bytes};
+use crate::oxmsg_extract::{RtfRead, read_decompressed_rtf};
 use crate::rtf_deencap::{Diagnostics, Limits, RtfKind, deencapsulate_html, recognize};
-use crate::shared::{CompoundFile, PROP_RTF_COMPRESSED, rtf_bytes_contain_fromhtml};
+use crate::shared::rtf_bytes_contain_fromhtml;
 use crate::verify::{BoolFieldTally, compare_bool_field, print_bool_field_tally};
 
 /// How closely two HTML strings agree, from most to least.
@@ -185,37 +185,6 @@ impl DumpDir {
     }
 }
 
-// =============================================================================
-// Reading the RTF
-// =============================================================================
-
-/// What reading the message's compressed RTF gave.
-enum RtfRead {
-    Absent,
-    DecompressionFailed,
-    Bytes(Vec<u8>),
-}
-
-/// Reads and decompresses `PidTagRtfCompressed` (MS-OXRTFCP, via `compressed-rtf`), the same
-/// stream the default report reads.
-fn read_decompressed_rtf(comp: &mut CompoundFile) -> RtfRead {
-    let Some(compressed) = read_stream_bytes(
-        comp,
-        &expected_variable_stream_path(Path::new("/"), PROP_RTF_COMPRESSED, 0x0102),
-    )
-    .filter(|bytes| !bytes.is_empty()) else {
-        return RtfRead::Absent;
-    };
-    // `compressed_rtf::decompress_rtf` indexes the first 16 bytes unconditionally.
-    if compressed.len() < 16 {
-        return RtfRead::DecompressionFailed;
-    }
-    match compressed_rtf::decompress_rtf(&compressed) {
-        Ok(rtf) => RtfRead::Bytes(rtf.as_bytes().to_vec()),
-        Err(_) => RtfRead::DecompressionFailed,
-    }
-}
-
 #[derive(Default)]
 struct DiagnosticsTotals {
     htmltag_groups: u64,
@@ -341,7 +310,7 @@ pub(crate) fn collect_deencap_verify_totals(
         let oracle_html = outlook.html_from_rtf().filter(|html| !html.is_empty());
 
         let mut custom_html: Option<String> = None;
-        match read_decompressed_rtf(&mut comp) {
+        match read_decompressed_rtf(&mut comp, Path::new("/")) {
             RtfRead::Absent => totals.rtf_absent += 1,
             RtfRead::DecompressionFailed => totals.rtf_decompression_failed += 1,
             RtfRead::Bytes(rtf) => {
