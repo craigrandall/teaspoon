@@ -1,7 +1,7 @@
 name: CI
 # This workflow runs on every push to `main` and every pull request targeting `main`.
 # It automates the compile/lint/unit-test portion of the verification gate defined
-# in CONTRIBUTING.md.
+# in docs/CONTRIBUTING.md.
 #
 # IMPORTANT SCOPE NOTE: this workflow cannot exercise tsp's actual PST/MSG parsing
 # behavior. Real .pst/.msg fixtures are deliberately excluded from the repo
