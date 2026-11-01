@@ -29,6 +29,10 @@ use crate::shared::{
 pub(crate) fn run_pst_diagnostic(path: &Path) -> Result<()> {
     let store = outlook_pst::open_store(path).context("failed to open PST")?;
 
+    let outcome =
+        crate::pst_password::enforce(store.as_ref(), crate::pst_password::supplied_from_env()?)?;
+    println!("pst_password={}", outcome.key());
+
     // Deliberately do not print the input path or PST display name. Both can
     // disclose information about the user or their mailbox.
 

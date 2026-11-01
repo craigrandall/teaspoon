@@ -22,6 +22,7 @@ use crate::dry_run::{
 };
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
 use crate::pst::{column_index, read_i32_at};
+use crate::pst_password::{enforce, supplied_from_env};
 use crate::shared::{ATTACH_METHOD_EMBEDDED_MESSAGE, MAX_FOLDER_DEPTH, PROP_ATTACH_METHOD};
 
 /// PidTagEntryId, injected into every folder's properties by the crate.
@@ -36,6 +37,11 @@ struct PstBuilder {
 /// Builds the source tree for the IPM subtree of a PST.
 pub(crate) fn build_pst_tree(path: &Path) -> Result<(SourceFolder, SourceCensus)> {
     let store = outlook_pst::open_store(path).context("failed to open PST")?;
+
+    // Refuse a password-protected PST unless the password in TSP_PST_PASSWORD verifies
+    // (MS-PST 2.4.3.3). The outcome is not reported yet; a refusal is an early `?` return.
+    let outcome = enforce(store.as_ref(), supplied_from_env()?)?;
+
     let ipm_id = store
         .properties()
         .ipm_sub_tree_entry_id()
@@ -45,7 +51,10 @@ pub(crate) fn build_pst_tree(path: &Path) -> Result<(SourceFolder, SourceCensus)
         .context("failed to open IPM subtree")?;
 
     let mut builder = PstBuilder {
-        census: SourceCensus::default(),
+        census: SourceCensus {
+            pst_password: Some(outcome),
+            ..SourceCensus::default()
+        },
         ids: InternetIdTracker::default(),
         next_attachment_id: 0,
     };

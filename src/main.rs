@@ -17,6 +17,7 @@ mod oxmsg_extract;
 mod oxmsg_structure;
 mod plan;
 mod pst;
+mod pst_password;
 #[cfg(test)]
 mod robustness_tests;
 mod rtf_deencap;

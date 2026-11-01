@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 
 use crate::naming::{sanitize_component, utf16_len};
 use crate::plan::{GateReport, Plan, Policy, plan_export, verify_plan};
+use crate::pst_password::PasswordOutcome;
 use crate::source_msg::build_msg_tree;
 use crate::source_pst::build_pst_tree;
 
@@ -40,6 +41,8 @@ pub(crate) struct SourceCensus {
     pub(crate) folder_identity_nid: usize,
     pub(crate) folder_identity_entry_id: usize,
     pub(crate) folder_identity_unavailable: usize,
+    /// Outcome of the PST password check; `None` for inputs that are not PSTs.
+    pub(crate) pst_password: Option<PasswordOutcome>,
 }
 
 /// Counts messages without an Internet message ID and messages repeating one already seen.
@@ -164,6 +167,12 @@ pub(crate) fn print_dry_run_report(
     let c = &plan.counters;
     println!("inventory=privacy_safe");
     println!("input_kind={label}");
+    println!(
+        "pst_password={}",
+        census
+            .pst_password
+            .map_or("not_applicable", PasswordOutcome::key)
+    );
     println!("plan_root_units={}", policy.root_units);
     println!("plan_max_path_units_allowed={}", policy.max_path_units);
     println!("plan_entries_total={}", c.entries_total);
