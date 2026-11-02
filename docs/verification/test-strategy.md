@@ -48,14 +48,14 @@ The project distinguishes:
 
 | Level | PST | MSG |
 |---|---|---|
-| T0 build/static | CI on Linux and Windows | CI on Linux and Windows (last reported for `v0.1.23.1`; not reported for `v0.1.25.1`) |
-| T1 unit | Yes (naming, planning, rendering) | Yes: classification, decoding (including the `PT_STRING8` code page chain), counters, every verify-comparison outcome, structural gates, the archive renderers against golden files (including an envelope-rich message), the envelope comparison rules, the export writer; 225 tests at the bake-off harness |
-| T2 fixture | `tsp-tester.pst` (57 messages, enhanced to cover 5 of 7 identified gaps) | 29-file `.msg` corpus (plus 3 subdirectories for the dry run and export), plus synthetic `.msg` files built at test time |
-| T3 behavioral | Not started | Partial: export, consent, and overwrite behavior exercised on real output (v0.1.23.1) |
+| T0 build/static | CI on Linux and Windows | CI on Linux and Windows (last reported green for the `v0.1.39` push) |
+| T1 unit | Yes (naming, planning, rendering) | Yes: classification, decoding (including the `PT_STRING8` code page chain), counters, every verify-comparison outcome, structural gates, the archive renderers against golden files (including an envelope-rich message), the envelope comparison rules, the export writer; 396 tests pass at v0.1.39 |
+| T2 fixture | `tsp-tester.pst` (57 messages, enhanced to cover 5 of 7 identified gaps) and a password-protected PST of about 6.5 GB (v0.1.39) | 29-file `.msg` corpus (plus 3 subdirectories for the dry run and export), plus synthetic `.msg` files built at test time |
+| T3 behavioral | Partial: the password check exercised on a real protected PST (missing, wrong, and right password) and on an unprotected one (v0.1.39) | Partial: export, consent, and overwrite behavior exercised on real output (v0.1.23.1) |
 | T4 fidelity | Not started | Partial: field-by-field agreement with `msg_parser` on every comparable field, including (M4d) the subject, sender, and recipients of the 29 top-level files |
 | T5 differential | Not started; no `libpff`/`libpst` comparison has been run | Done against `msg_parser` (`--verify`, re-run through `v0.1.25.1`; `--verify-envelope --recursive`, 0 mismatches over 34 files; `--verify-deencap`, recognition and presence agree and every difference in the recovered HTML was traced to `msg_parser` using `--dump-deencap`), two differences triaged against the specifications in M3; `libpff`/`libpst` not used |
 | T6 adversarial | Not started | Partial: synthetic fixtures for unsupported code pages and undecodable strings; no malformed or truncated container corpus |
-| T7 corpus | One PST | One 29-file corpus; fixtures deliberately not in the repository, and provenance is not recorded in it |
+| T7 corpus | Two PSTs (`tsp-tester.pst` and a password-protected one) | One 29-file corpus; fixtures deliberately not in the repository, and provenance is not recorded in it |
 
 CI runs T0 and T1 only. It cannot run T2 or above, because real PST/MSG
 files are excluded from the repository for privacy reasons. Those levels
@@ -106,7 +106,7 @@ Design choices behind this, for the next fixture-gated check:
 
 ## Regression and golden evidence in M4
 
-- **`verify-split.ps1`** compares the default, `--verify`, and PST outputs of an earlier tag with those of the new build, byte for byte. It has been run for v0.1.20, v0.1.22, v0.1.23.1, and v0.1.25.1 (always IDENTICAL: 850, 2705, and 1092 bytes). It proves a change did not alter existing diagnostics; it says nothing about new output.
+- **`verify-split.ps1`** compares the default, `--verify`, and PST outputs of an earlier tag with those of the new build, byte for byte. It has been run for v0.1.20, v0.1.22, v0.1.23.1, and v0.1.25.1 (always IDENTICAL: 850, 2705, and 1092 bytes). At v0.1.39 the PST comparison ignores the one line `pst_password=` (1110 bytes with it, 1092 without), and the default and `--verify` comparisons were IDENTICAL. It proves a change did not alter existing diagnostics; it says nothing about new output.
 - **Golden files** (`tests/golden/`, synthetic messages, no personal data) pin the exact bytes of `message.md`, `metadata.json`, and an envelope-rich `message.md`. They run in CI.
 - **Tree hash** (`export_tree_sha256`) lets two exports be compared at a glance; it changes whenever the output format changes, so each format change needs a new baseline from a real-corpus export.
 - **Memory gate** (M4h-0, M4f-1): an ignored test generates a synthetic corpus (`TSP_BIG_CORPUS_DIR`, `TSP_BIG_COUNT`, `TSP_BIG_MB`, `TSP_BIG_ATTACH_MB`), and `measure-peak.ps1` polls the export's peak working set; the pass criterion is that the peak does not grow with the message count or with the attachment size. It is a manual T3 check and does not run in CI. Results: `m4-results.md`.
@@ -145,6 +145,7 @@ M4 is intended to establish a deterministic, loss-explicit archive: names and
 paths that are valid and unique on Windows, byte-identical re-exports, consent
 before replacing anything, and every gap recorded. Each stage has its own
 gate in `docs/plans/m4-plan.md` and its results in `m4-results.md`. As of
-`v0.1.25.1` the evidence covers the planner, the `.msg` export with its
-consent rules, and the envelope; it does not yet cover attachment bytes,
-HTML and RTF body conversion, or PST export.
+`v0.1.39` the evidence covers the planner, the `.msg` export with its
+consent rules, the envelope, the body (conversion and its content-preservation check), attachment
+bytes and embedded messages (with the `msg_parser` payload differential and the `cid:` links), the
+streamed export, and the PST password check; it does not yet cover PST export.

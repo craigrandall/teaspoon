@@ -23,7 +23,9 @@ CI (`.github/workflows/ci.yml`) runs the same commands on Linux and Windows, wit
 CI cannot run the fixture-dependent checks: real `.pst` and `.msg` fixtures are never committed
 (`*.pst`, `*.ost`, `*.msg`, `*.eml`, and `_NOTES/` are ignored). A passing `cargo test` does not
 show that a fixture-gated test ran, because such a test skips when its fixture variable is unset;
-run it by name and confirm that it ran.
+run it by name and confirm that it ran. A password-protected PST fixture is opened by setting
+`TSP_PST_PASSWORD` for the shell session only (read it with `Read-Host -AsSecureString`; never put it in a
+file, a script, or a command line) and clearing it afterwards.
 
 ## Rules
 

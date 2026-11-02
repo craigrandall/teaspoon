@@ -940,3 +940,67 @@ A patch that acts on the review's findings about hostile or corrupt input, commi
 - The diagnostic scans in `cli.rs` still drop unreadable directory entries silently (counting them needs a report key).
 - M4i groundwork: `PT_STRING8` text outside four code pages is not decoded (the `encoding_rs` decision), the planner holds every planned entry in memory, two PST traversals count differently, and the export is tied to the MSG source types.
 - Duplicated hash and hex helpers (`stage`, `archive`, `export`); `is_invisible` omits U+200E, U+200F, U+061C, and U+2060 to U+2064 although its comment says bidi controls.
+
+## M4i groundwork: the PST password check (v0.1.39, 2026-10-31 to 2026-11-01)
+
+The check is described in `ADRs/pst-password-protection.md` (proposed) and `docs/ARCHITECTURE.md`. This section records what was run and what it showed. Everything below is a count, a size, or a status; no password, no hash of a password, and no name or subject appears.
+
+### Before the check existed (a v0.1.38 build, 2026-10-31)
+
+The owner's PST of about 6 GB, protected with a password the owner knows (6,476,809,216 bytes), was run with no password supplied. The diagnostic and `--dry-run` both exited 0 with empty standard error, in 7.3 s and 2.5 s.
+
+| Report | Figures |
+|---|---|
+| Diagnostic | 36 folders (the root included), 6,473 messages (all `IPM.Note`), 7,016 attachments (all by value; none embedded, OLE, or by reference), 536,160 property values, 6,468 HTML bodies (6,277 native, 191 recovered from the RTF), 1,458 plain-text bodies, 193 RTF bodies, `rtf_decompression_errors=0`, every error counter 0 |
+| Dry run | 35 folders, 6,473 messages, 7,016 attachment files, 13,524 entries, 0 gate violations, longest path 253 (root 16, relative 237), 791 collision groups (largest 33), 21 associated items skipped |
+
+The file was therefore read completely, with every counter clean, without its password. The specification says an implementation must enforce the check; that is what this change adds.
+
+Read volume, from a counter of the process's read bytes polled every 20 ms (a lower bound, with noise of some megabytes): the dry run read 328,617,508 bytes and the diagnostic 285,816,740, under 5% of the file. Both modes open every message with `open_message(..., None)`, which, as far as the crate's signature shows, loads all of a message's properties, bodies included; neither opens an attachment payload.
+
+### The file used from here on
+
+That PST was then repaired with Outlook's Inbox Repair tool (no log and no backup were kept), and the repaired copy is the golden fixture: 6,504,743,936 bytes, SHA-256 `30FC776B7DFB731765AA6E2D4DF0B4B1A074D4AC34DD2F838E26AFFD2CA217AA`. Same commands:
+
+| Report | Figures |
+|---|---|
+| Diagnostic | 36 folders, 6,508 messages, 7,016 attachments, 537,875 property values, 6,503 HTML bodies (6,312 native, 191 via RTF), every error counter 0; two runs gave byte-identical output |
+| Dry run | 35 folders, 6,508 messages, 7,016 attachment files, 13,559 entries, 0 gate violations |
+
+Both reports equal the first run's except for 35 more messages and the figures that depend on the output root's length (root 14 units instead of 16: 33 names truncated instead of 35, longest relative path 239 instead of 237, longest component 193 instead of 191). The 35 extra messages share one shape (a native HTML body, one To recipient, no attachment, 49 property values each; property values grew by exactly 35 x 49 = 1,715), and no folder was added. The owner knows of at least one message that arrived after the first copy, so they look like new mail and not repair artifacts, but this was not confirmed. Read volume: 329,143,668 bytes for the dry run (5.1% of the file) and 307,568,116 for the diagnostic (4.7%).
+
+### The scheme
+
+A read-only probe printed the store property 0x67FF (a 32-bit integer) of the golden fixture. A local script outside the repository, which prompts for the password without echo, computed 16 candidates (four text encodings times four seed and final-XOR combinations) and compared them with it. Exactly one matched: a reflected CRC-32 (polynomial 0xEDB88320) with initial value 0 and no final XOR, over the password's ANSI bytes with no terminator. The standard CRC-32 (initial value and final XOR 0xFFFFFFFF) did not match. An independent PowerShell implementation of the same scheme gave the same value. The property survived the Inbox Repair run. Neither the password nor its hash is recorded here.
+
+### Quality gate and acceptance runs (2026-11-01)
+
+The gate passed with 396 tests (393 at v0.1.38 plus 3: the CRC vectors, the decision table, and the report keys), and CI passed for the push (1 min 55 s).
+
+| Run | Exit | Standard output | Standard error |
+|---|---|---|---|
+| Protected PST, no `TSP_PST_PASSWORD`, diagnostic and dry run | 1 | 0 bytes | "the PST is password protected; set TSP_PST_PASSWORD to its password" |
+| Protected PST, wrong password, diagnostic and dry run | 1 | 0 bytes | "the password in TSP_PST_PASSWORD does not match this PST" |
+| Protected PST, right password, diagnostic | 0 | 1,149 bytes | empty |
+| Protected PST, right password, dry run | 0 | 1,298 bytes | empty |
+| `tsp-tester.pst` (unprotected), diagnostic | 0 | 1,110 bytes | empty |
+| `tsp-tester.pst`, dry run | 0 | 1,273 bytes | empty |
+| `tsp-tester.pst`, a wrong password set, diagnostic | 0 | 1,110 bytes, identical (SHA-256) to the run without it | empty |
+
+- With the right password the outputs are the earlier ones plus the 22-byte line `pst_password=verified` (1,149 = 1,127 + 22 and 1,298 = 1,276 + 22); with that line removed they are identical to the earlier outputs line for line.
+- For `tsp-tester.pst`, with the new line removed, both outputs are identical to those of a build of tag v0.1.38.
+- A search of the wrong-password runs' outputs for the password found nothing.
+- `verify-split.ps1` (baseline tag v0.1.19.1): default IDENTICAL (850 bytes, 33 lines), `--verify` IDENTICAL (2705, 82; 29 files, `rtf_decompressed_bytes_mismatch=1`, `embedded_message_class_readable_total=1`, 0 structural gate violations), PST IDENTICAL once the line `pst_password=` is ignored (1,110 bytes and 45 lines, 1 line ignored; the script now ignores it).
+- Corpus export tree hash at the tag (`Cargo.toml` at 0.1.39): `6023f1d1435ffc1bb9a9fc15fe280d207b3ca9eca7439b5b2742458b46773f71`.
+
+### A manual look at the folder tree (2026-10-31)
+
+Outlook's Folder Size dialog for the data file (the original, loaded in Outlook; the first copy was made from it) listed 35 subfolders below the root, the same as the plan's 35. Its per-folder sizes add up exactly to the root's total of 6,172,640 KB, which is 97.6% of the file's 6,476,809,216 bytes if the dialog's KB is 1,024 bytes (95.3% if 1,000). Message and attachment counts from Outlook were not obtained: Outlook's call that adds a data file (`AddStoreEx`) failed on copies of the file ("The Outlook data file (.pst) failed to load for this session", after 11 ms, before any password prompt could be answered), and the cause was not determined; opening the original by hand worked.
+
+### What this shows, and what it does not
+
+It shows that the check works on one real protected PST in both modes: the right password is accepted, a missing or wrong one is refused with no output, nothing derived from the password was found in any output, and an unprotected PST changes by exactly one line. It does not show: a second protected PST or producer; a password with a non-ASCII character (refused); each block-encoding method (the method of the tested file was not reported); a PST marked `bCryptMethod` 0x10 (`outlook-pst` cannot open it); Outlook's item and attachment counts; or an export from a PST (not implemented).
+
+### A difference from the plan
+
+The plan (v4.26, decisions still needed, item 10) recommended exit code 2 for a refusal, the status of a consent refusal. The build uses exit code 1, the status of any other error. This is open for the owner; changing it needs a small change in how the error is mapped and a re-run of the acceptance runs above.
