@@ -310,7 +310,7 @@ one message (top-level or embedded)
 - `render_message_md` remains, as a test-only wrapper of `render_message_md_linked` without a rewrite.
 - Verified so far: synthetic tests of each rule and of a real export, and the corpus (26 of 26 references rewritten, each resolving to a file the same message records as extracted, checked by a counts-only script outside the crate). A `cid:` link inside an embedded message has not been seen on real data.
 
-## M4i-0 boundary: the PST password check (built in v0.1.39)
+## M4i-0 boundary: the PST password check (built in v0.1.39; exit status 2 for a refusal since v0.1.40)
 
 A PST can carry a password, which the format treats as advisory: a CRC-32 of it is stored in the message store, and the data can be read without it. `tsp` checks it before it reads anything else from the file, and refuses a protected PST whose password is missing or wrong.
 
@@ -325,13 +325,13 @@ PST file
   |     +-- evaluate                   pure: stored value + supplied text -> NotProtected, Verified,
   |                                    Missing, Wrong, or UnsupportedEncoding (no store, no I/O)
   |
-  +-- refused: an error (exit code 1), nothing on standard output
+  +-- refused: a PasswordRefusal error (exit code 2), nothing on standard output
   +-- allowed: pst_password= is reported (the diagnostic prints it first, the dry run carries it
                in SourceCensus) and the walk continues
 ```
 
 - One function guards both entry points, so the diagnostic and the planner cannot disagree about which files they read. The `.msg` path never calls it.
-- `evaluate` is a pure function over the stored value and the supplied text, so the decision table is unit-tested without a PST. `enforce` only adds the property read and turns a refusal into an error.
+- `evaluate` is a pure function over the stored value and the supplied text, so the decision table is unit-tested without a PST. `enforce` only adds the property read and turns a refusal into a typed error, `PasswordRefusal`; `main` maps that error to exit code 2 (since v0.1.40) and every other error to exit code 1.
 - The scheme (reflected CRC-32, polynomial 0xEDB88320, initial value 0, no final XOR, over ASCII bytes) is written in `pst_password.rs` and recorded in `ADRs/pst-password-protection.md`. The MS-PST pages do not state it, so it was found against a real protected PST.
 - Nothing derived from the password, including the stored hash, is printed or put in an error message. The password is read from the environment only.
 - The PST header's block-encoding method is a separate matter and is not reported.
@@ -383,10 +383,10 @@ and a full corpus export for that tag has not been reported.
 
 The code lives in `src/`, one module per seam:
 
-- `cli` — arguments and input classification; `main` — dispatch.
+- `cli` — arguments and input classification; `main` — dispatch and the exit status (since v0.1.40 `run` returns the error and `main` prints it and maps a `PasswordRefusal` to exit code 2 and every other error to 1).
 - `shared` — vocabulary, the encapsulated-HTML check, shared counters, the traversal depth limits, `is_msg_file`, the one bounded and panic-contained RTF decompression, and `run_contained`.
 - `pst` — the PST diagnostic; `msg_report` — the shared MSG report.
-- `pst_password` - the PST password check (v0.1.39): reads `PidTagPstPassword`, compares a CRC-32 of the password in `TSP_PST_PASSWORD` with it, and refuses a protected PST whose password is missing or wrong; called by `pst` and `source_pst` right after the store is opened.
+- `pst_password` - the PST password check (v0.1.39): reads `PidTagPstPassword`, compares a CRC-32 of the password in `TSP_PST_PASSWORD` with it, and refuses a protected PST whose password is missing or wrong, with a typed `PasswordRefusal` that `main` maps to exit code 2 (v0.1.40); called by `pst` and `source_pst` right after the store is opened.
 - `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, `oxmsg_extract` — the custom MS-OXMSG parser, from naming conventions through extraction; `oxmsg_envelope` — the envelope extraction (M4d).
 - `verify` — the `--verify` comparison and structural gates; `verify_envelope` — the `--verify-envelope` comparison (M4d); `verify_deencap` — the `--verify-deencap` comparison (M4e-1).
 - `rtf_deencap` — the pure MS-OXRTFEX de-encapsulation (M4e-1).
@@ -404,4 +404,4 @@ The code lives in `src/`, one module per seam:
 
 The README lists the contents of each module.
 
-Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. The envelope modules follow the same pattern: `oxmsg_envelope` is an adapter module that depends on `oxmsg_classify`, `oxmsg_decode`, `oxmsg_extract`, and `shared` and produces `model` types (it also takes the submit and delivery time property IDs from `dry_run`, where they were first defined, which is a small layering oddity: an adapter importing from the reporting module), and `verify_envelope` depends on `model`, `source_msg`, `dry_run` (for the subject-marker stripping), and `verify` (for the shared comparison tallies). Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. The blanket `#![allow(dead_code)]` that `naming.rs` and `plan.rs` carried is gone, so dead code is reported there like everywhere else. `layout` holds only constants and is imported by `plan`, `archive`, and `body`. `pst_password` depends only on `outlook_pst`; `pst` and `source_pst` call it, and `dry_run` imports its `PasswordOutcome` for the census, which puts one adapter-side type in the reporting module. The full normalized model (M4b-4) has not been written: bodies with raw bytes, the raw property bag, named properties, embedded messages, and diagnostics are not modelled yet (attachments are modelled as descriptors since M4f-1).
+Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. The envelope modules follow the same pattern: `oxmsg_envelope` is an adapter module that depends on `oxmsg_classify`, `oxmsg_decode`, `oxmsg_extract`, and `shared` and produces `model` types (it also takes the submit and delivery time property IDs from `dry_run`, where they were first defined, which is a small layering oddity: an adapter importing from the reporting module), and `verify_envelope` depends on `model`, `source_msg`, `dry_run` (for the subject-marker stripping), and `verify` (for the shared comparison tallies). Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. The blanket `#![allow(dead_code)]` that `naming.rs` and `plan.rs` carried is gone, so dead code is reported there like everywhere else. `layout` holds only constants and is imported by `plan`, `archive`, and `body`. `pst_password` depends only on `outlook_pst`; `pst` and `source_pst` call it, `main` imports its `PasswordRefusal` to choose the exit status, and `dry_run` imports its `PasswordOutcome` for the census, which puts one adapter-side type in the reporting module. The full normalized model (M4b-4) has not been written: bodies with raw bytes, the raw property bag, named properties, embedded messages, and diagnostics are not modelled yet (attachments are modelled as descriptors since M4f-1).

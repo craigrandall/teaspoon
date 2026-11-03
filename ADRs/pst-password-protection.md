@@ -9,7 +9,8 @@ informed: none
 # Refuse a password-protected PST unless its password verifies
 
 Status history: proposed 2026-11-01; accepted 2026-11-02, except the exit status in
-item 3, which stays open until the owner rules.
+item 3, which the owner ruled on (2026-11-02): exit status 2, amended into item 3 and built in
+`v0.1.40`.
 
 ## Context and Problem Statement
 
@@ -53,24 +54,29 @@ had real alternatives.
 Chosen option: 3, because it is the only option that meets the specification's must-enforce rule
 without a way to leak the password (a command-line option appears in process listings and shell
 history, and a prompt breaks non-interactive use), and because option 4 or a prompt can be added
-later without changing anything decided here. Items 1 to 9 were accepted by the owner on 2026-11-02,
-except the exit status in item 3, which stays open; they describe what `v0.1.39` builds.
+later without changing anything decided here. Items 1 to 9 were accepted by the owner on 2026-11-02 and describe what `v0.1.40` builds;
+`v0.1.39` differs only in the exit status of item 3 (1 there).
 
 1. **Detection.** Right after the store is opened, before anything else is read, read
    `PidTagPstPassword` (0x67FF, a 32-bit integer) from the store's properties. Absent or zero means
-   unprotected. Any other value type is refused, because verification is impossible.
+   unprotected. Any other value type is an error (exit status 1), because verification is impossible.
 2. **Scheme.** Verify with a CRC-32 using the reflected polynomial 0xEDB88320, initial value 0, and
    no final XOR, over the password's bytes. It is written in-house (about ten lines, no new
    dependency). Stock CRC-32 crates use the standard variant (initial value and final XOR
    0xFFFFFFFF), which is the wrong one here and must not be used.
 3. **Policy.** If the property is nonzero and the password is missing or does not verify, refuse:
-   the run ends with an error, exit status 1, and prints nothing on standard output. Both entry
-   points (the diagnostic and the dry-run planner) enforce through one shared function. The plan
-   (v4.26, decisions still needed, item 10) recommended exit status 2, the status of a consent
-   refusal; the build uses 1, the status of any other error. The owner may rule for 2, which needs a
-   small change in how the error is mapped and a re-run of the acceptance runs.
+   the run ends with an error, exit status 2, and prints nothing on standard output. Exit status 2
+   is the status `tsp` already gives a run that declined to proceed (an export that needs consent):
+   it understood the input, the caller can fix the cause, and a script can tell it from a failure,
+   which exits 1 (a PST that does not open, a store property of an unexpected type, a
+   `TSP_PST_PASSWORD` that is not valid Unicode). Three outcomes are refusals: the password missing,
+   wrong, or containing a non-ASCII character (item 6). Both entry points (the diagnostic and the
+   dry-run planner) enforce through one shared function, which returns a typed error
+   (`PasswordRefusal`) with the same message text as before; `main` maps it to the status. `v0.1.39`
+   exited 1 for these refusals; the owner ruled for 2 on 2026-11-02 (the plan, v4.26, decisions still
+   needed, item 10, had recommended it), and `v0.1.40` builds it.
 4. **Supply.** The environment variable `TSP_PST_PASSWORD`. An empty value counts as unset, and a
-   value that is not valid Unicode is refused. There is no command-line option.
+   value that is not valid Unicode is an error (exit status 1). There is no command-line option.
 5. **Secrets.** Error messages never contain the password or the stored hash, and the hash is never
    printed: a 32-bit hash of a password narrows guesses, and the reports are content-free. Tests use
    made-up passwords, and any test that needs a real password runs only when the variable is set.
@@ -107,7 +113,12 @@ except the exit status in item 3, which stays open; they describe what `v0.1.39`
   verify, as with any reader that implements the specification's check.
 * Bad, because the refusal is policy and not protection, and a reader might take it for security;
   item 9 and the README say so.
-* Bad, because exit status 1 differs from the plan's recommendation of 2 until the owner rules.
+* Good, because exit status 2 separates a refusal the caller can fix from a failure, and matches
+  the status a consent refusal already has.
+* Neutral, because `v0.1.39` exited 1 for these refusals, so a script written against that tag
+  sees a changed status from `v0.1.40` (none is known to exist).
+* Bad, because status 2 is also what the argument parser (clap) uses for a usage error, so the
+  status alone does not tell a refusal from a bad option; the message does.
 
 ### Confirmation
 
@@ -115,7 +126,8 @@ except the exit status in item 3, which stays open; they describe what `v0.1.39`
    quality gate passes with 396 tests; CI passed for the push.
 2. Done (2026-11-01), on a real protected PST (the repaired copy, about 6.5 GB, 36 folders, 6,508
    messages, 7,016 attachments): no password and a wrong password are refused by both modes with
-   exit status 1 and 0 bytes on standard output; the right password gives the earlier output plus
+   exit status 1 (`v0.1.39`; `v0.1.40` exits 2, see item 7) and 0 bytes on standard output; the
+   right password gives the earlier output plus
    `pst_password=verified`; the wrong-password outputs contain no trace of the password.
 3. Done (2026-11-01), on the unprotected `tsp-tester.pst`: `pst_password=none`, otherwise identical
    to a build of `v0.1.38`; a wrong password in the environment changes nothing.
@@ -126,6 +138,12 @@ except the exit status in item 3, which stays open; they describe what `v0.1.39`
 6. Open: a second protected PST or producer; a password with a non-ASCII character; one PST per
    block-encoding method; Outlook's item and attachment counts for the protected PST (Outlook's
    call to add a data file failed on copies of it, cause undetermined).
+7. Done (2026-11-02, `v0.1.40`; details in `docs/verification/m4-results.md`): on the same
+   protected PST, a missing, a wrong, and a non-ASCII password are each refused by both modes with
+   exit status 2, 0 bytes on standard output, and the same message as before on standard error; the
+   right password gives the earlier output sizes (1,149 and 1,298 bytes); the unprotected
+   `tsp-tester.pst` is unchanged (1,110 bytes for the diagnostic, with or without a wrong password
+   set); a path that does not exist exits 1.
 
 ## Pros and Cons of the Options
 

@@ -44,13 +44,41 @@ use crate::dry_run::run_dry_run;
 use crate::export::{ExportOptions, ExportStatus, prompt_for_consent, run_export};
 use crate::oxmsg_extract::run_msg_extract;
 use crate::pst::run_pst_diagnostic;
+use crate::pst_password::PasswordRefusal;
 use crate::verify::run_msg_verify;
 use crate::verify_attachments::run_attachments_verify;
 use crate::verify_bodies::run_bodies_verify;
 use crate::verify_deencap::run_deencap_verify;
 use crate::verify_envelope::run_envelope_verify;
 
-fn main() -> Result<()> {
+/// Exit status of a run that failed: something broke (a file would not open, the input was not
+/// usable, a store property had an unexpected type).
+const EXIT_ERROR: i32 = 1;
+
+/// Exit status of a run that understood the input and declined to proceed, so that it read or
+/// wrote nothing the caller asked for, and the caller can fix the cause: an export that needs
+/// consent, and a password-protected PST whose password is missing or wrong.
+const EXIT_REFUSED: i32 = 2;
+
+fn main() {
+    if let Err(err) = run() {
+        // The text the default `fn main() -> Result<()>` printed, so standard error is unchanged.
+        eprintln!("Error: {err:?}");
+        std::process::exit(exit_code(&err));
+    }
+}
+
+/// The exit status of a failed run: [`EXIT_REFUSED`] for a password refusal (found whatever
+/// context was added to it), [`EXIT_ERROR`] for every other error.
+fn exit_code(err: &anyhow::Error) -> i32 {
+    if err.downcast_ref::<PasswordRefusal>().is_some() {
+        EXIT_REFUSED
+    } else {
+        EXIT_ERROR
+    }
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
 
     if args.recursive
@@ -80,9 +108,9 @@ fn main() -> Result<()> {
         };
         return match run_export(&args.input, out, &options, &mut prompt_for_consent)? {
             ExportStatus::Completed => Ok(()),
-            // Nothing was written; the reason was printed. Exit code 2 is "refused", as
+            // Nothing was written; the reason was printed. Exit status 2 is "refused", as
             // distinct from 1 (an error).
-            ExportStatus::Refused => std::process::exit(2),
+            ExportStatus::Refused => std::process::exit(EXIT_REFUSED),
         };
     }
 
@@ -121,5 +149,54 @@ fn main() -> Result<()> {
                 run_msg_extract(&files, subdirectories_skipped)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod exit_status_tests {
+    use anyhow::{Context, anyhow};
+
+    use super::*;
+
+    #[test]
+    fn a_password_refusal_exits_2_bare_or_with_context() {
+        for refusal in [
+            PasswordRefusal::Missing,
+            PasswordRefusal::Wrong,
+            PasswordRefusal::UnsupportedEncoding,
+        ] {
+            let bare = anyhow::Error::new(refusal);
+            assert_eq!(exit_code(&bare), EXIT_REFUSED, "{refusal:?}");
+            let wrapped = Err::<(), anyhow::Error>(bare)
+                .context("while opening the PST")
+                .unwrap_err();
+            assert_eq!(
+                exit_code(&wrapped),
+                EXIT_REFUSED,
+                "{refusal:?} with context"
+            );
+        }
+    }
+
+    #[test]
+    fn any_other_error_exits_1() {
+        assert_eq!(exit_code(&anyhow!("failed to open PST")), EXIT_ERROR);
+        assert_eq!(
+            exit_code(&anyhow!(
+                "PidTagPstPassword has an unexpected type; cannot verify the PST password"
+            )),
+            EXIT_ERROR
+        );
+        assert_eq!(
+            exit_code(&anyhow!("TSP_PST_PASSWORD is not valid Unicode")),
+            EXIT_ERROR
+        );
+    }
+
+    #[test]
+    fn the_two_statuses_are_distinct_and_not_success() {
+        assert_ne!(EXIT_ERROR, EXIT_REFUSED);
+        assert_ne!(EXIT_ERROR, 0);
+        assert_ne!(EXIT_REFUSED, 0);
     }
 }

@@ -1003,4 +1003,39 @@ It shows that the check works on one real protected PST in both modes: the right
 
 ### A difference from the plan
 
-The plan (v4.26, decisions still needed, item 10) recommended exit code 2 for a refusal, the status of a consent refusal. The build uses exit code 1, the status of any other error. This is open for the owner; changing it needs a small change in how the error is mapped and a re-run of the acceptance runs above.
+The plan (v4.26, decisions still needed, item 10) recommended exit code 2 for a refusal, the status of a consent refusal. `v0.1.39` used exit code 1, the status of any other error; the table above records those runs. The owner ruled for 2 on 2026-11-02 and it is built in `v0.1.40` (next section).
+
+## PST password refusal: exit code 2 (v0.1.40, 2026-11-02)
+
+The owner ruled for exit code 2 on 2026-11-02, the recommendation of the plan (v4.26, decisions still needed, item 10), and the change is built and was run on the real files the same day.
+
+What was built: a refused protected PST (the password missing, wrong, or containing a non-ASCII character) exits with status 2, the status of any refusal, where `v0.1.39` exited 1 (the table above). Every other failure still exits 1: a PST that does not open, a store property of an unexpected type, and a `TSP_PST_PASSWORD` that is not valid Unicode. `pst_password.rs` returns a typed error, `PasswordRefusal`, with the message text unchanged, and `main.rs` maps it to the status. Standard output (empty on a refusal), standard error, the report keys, and the archive do not change.
+
+### Quality gate and acceptance runs (2026-11-02)
+
+Run by the owner on the uncommitted `v0.1.40` working tree, release build, Windows. `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean; 403 tests pass (396 plus 7 new: 4 in `pst_password.rs`, 3 in `main.rs`). `Cargo.toml` at 0.1.40. Exit codes were read right after each run, with standard output and standard error captured to files.
+
+| Run | Mode | Exit | Standard output | Standard error (first line) |
+|---|---|---|---|---|
+| protected PST, no password | diagnostic | 2 | 0 bytes | `Error: the PST is password protected; set TSP_PST_PASSWORD to its password` |
+| protected PST, no password | `--dry-run` | 2 | 0 bytes | the same |
+| protected PST, a wrong password (a made-up string) | diagnostic | 2 | 0 bytes | `Error: the password in TSP_PST_PASSWORD does not match this PST` |
+| protected PST, a wrong password | `--dry-run` | 2 | 0 bytes | the same |
+| protected PST, a password with a non-ASCII character | diagnostic | 2 | 0 bytes | `Error: the password in TSP_PST_PASSWORD contains non-ASCII characters; verifying those is not supported yet` |
+| protected PST, a password with a non-ASCII character | `--dry-run` | 2 | 0 bytes | the same |
+| protected PST, the right password | diagnostic | 0 | 1,149 bytes | (none) |
+| protected PST, the right password | `--dry-run` | 0 | 1,298 bytes | (none) |
+| `tsp-tester.pst` (unprotected) | diagnostic | 0 | 1,110 bytes | (none) |
+| `tsp-tester.pst` | `--dry-run` | 0 | 1,273 bytes | (none) |
+| `tsp-tester.pst`, a wrong password set | diagnostic | 0 | 1,110 bytes | (none) |
+| a path that does not exist | diagnostic | 1 | 0 bytes | `Error: failed to open PST`, then the cause (the system cannot find the file specified, os error 2) |
+
+A first attempt with a mistyped path to the protected PST (the file did not exist) gave the same result as the last row for both the diagnostic and `--dry-run`: exit 1, nothing on standard output, 102 bytes on standard error.
+
+`verify-split.ps1` against the baseline: default IDENTICAL (850 bytes, 33 lines), `--verify` IDENTICAL (2,705 bytes, 82 lines, `structural_gate_violations=0`), PST IDENTICAL once the `pst_password=` line is ignored (1,110 bytes, 45 lines, 1 ignored line); standard error 0 bytes in all three.
+
+Corpus export (34 messages), run twice into the same directory: 217 files written, then 217 unchanged and none written; 0 read-back mismatches; 32 attachment files extracted (6,282,892 bytes), 3 embedded messages, 26 `cid:` links rewritten, 0 unresolved, and the other counters as recorded for `v0.1.36`. `export_tree_sha256=6ea3c22c8ae49ae9dd9c34dacd7443121c7252cf8db3662b58bfeccd7bc3de35` in both runs, the baseline for `Cargo.toml` 0.1.40 (it differs from `6023f1d1...` because the root `folder.json` records the tool version); measured on the working tree before the commit.
+
+**What this shows.** A password refusal reaches `main` as a typed error from both entry points and exits 2 with nothing on standard output; the three refusal cases carry the earlier message text behind the same `Error: ` prefix; a plain error exits 1 and prints its chain in the same format as before; the right password and the unprotected PST give the same sizes as at `v0.1.39`; and nothing an export writes changed apart from the tool version.
+
+**What it does not show.** Equality of the whole standard error with `v0.1.39` (the first line was compared); a second protected PST or producer; a non-ASCII password that verifies (not supported by design); `measure-peak.ps1` (the writer is untouched); and whether `measure-peak.ps1` reads the exit code (not checked).
