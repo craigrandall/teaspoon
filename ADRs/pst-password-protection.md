@@ -1,6 +1,6 @@
 ---
-status: "proposed"
-date: 2026-11-01
+status: "accepted"
+date: 2026-11-02
 decision-makers: Craig Randall (project owner)
 consulted: none
 informed: none
@@ -8,7 +8,8 @@ informed: none
 
 # Refuse a password-protected PST unless its password verifies
 
-Status history: proposed 2026-11-01.
+Status history: proposed 2026-11-01; accepted 2026-11-02, except the exit status in
+item 3, which stays open until the owner rules.
 
 ## Context and Problem Statement
 
@@ -52,8 +53,8 @@ had real alternatives.
 Chosen option: 3, because it is the only option that meets the specification's must-enforce rule
 without a way to leak the password (a command-line option appears in process listings and shell
 history, and a prompt breaks non-interactive use), and because option 4 or a prompt can be added
-later without changing anything decided here. Items 1 to 9 are recommendations until the owner
-accepts them; they describe what `v0.1.39` builds.
+later without changing anything decided here. Items 1 to 9 were accepted by the owner on 2026-11-02,
+except the exit status in item 3, which stays open; they describe what `v0.1.39` builds.
 
 1. **Detection.** Right after the store is opened, before anything else is read, read
    `PidTagPstPassword` (0x67FF, a 32-bit integer) from the store's properties. Absent or zero means

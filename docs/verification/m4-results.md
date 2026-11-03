@@ -943,7 +943,7 @@ A patch that acts on the review's findings about hostile or corrupt input, commi
 
 ## M4i groundwork: the PST password check (v0.1.39, 2026-10-31 to 2026-11-01)
 
-The check is described in `ADRs/pst-password-protection.md` (proposed) and `docs/ARCHITECTURE.md`. This section records what was run and what it showed. Everything below is a count, a size, or a status; no password, no hash of a password, and no name or subject appears.
+The check is described in `ADRs/pst-password-protection.md` (accepted) and `docs/ARCHITECTURE.md`. This section records what was run and what it showed. Everything below is a count, a size, or a status; no password, no hash of a password, and no name or subject appears.
 
 ### Before the check existed (a v0.1.38 build, 2026-10-31)
 
