@@ -21,23 +21,51 @@ pub(crate) fn is_msg_file(path: &std::path::Path) -> bool {
 }
 
 /// Serializes the temporary silencing of the panic hook (see [`run_contained`]), so concurrent
-/// callers (tests run in parallel) cannot restore each other's hooks out of order.
+/// top-level callers (tests run in parallel) cannot restore each other's hooks out of order.
+/// Nested calls on the *same* thread are supported: only the outermost acquisition replaces the
+/// hook and holds the mutex.
 static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    /// Depth of nested [`run_contained`] calls on this thread. Zero means no containment is
+    /// active; the next call becomes the outermost and owns the hook swap + mutex.
+    static CONTAIN_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Runs `f` and returns its result, or `None` if it panicked. While it runs the panic hook is
 /// silenced: a panic message could quote the content being processed, and tsp never prints
 /// content. A panic on a thread that `f` spawns and joins is silenced too (the caller sees the
 /// failed join). This contains a panic; it does not contain a stack overflow, which aborts the
 /// process, so recursion on untrusted nesting has to be bounded before calling.
+///
+/// Nesting is intentional and supported. Helpers such as [`decompress_rtf_bounded`] themselves
+/// call `run_contained`; an outer caller (for example the PST message open path) may also wrap
+/// a larger region. Only the outermost call on a thread acquires the mutex and replaces the
+/// global panic hook; inner calls simply run under the already-silent hook. Concurrent top-level
+/// callers on different threads still serialize via the mutex.
 pub(crate) fn run_contained<T>(f: impl FnOnce() -> T) -> Option<T> {
-    let _guard = PANIC_HOOK_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    std::panic::set_hook(previous_hook);
-    outcome.ok()
+    CONTAIN_DEPTH.with(|depth| {
+        let current = depth.get();
+        if current == 0 {
+            // Outermost: take the mutex, install the silent hook, run, restore.
+            let _guard = PANIC_HOOK_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            depth.set(1);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            depth.set(0);
+            std::panic::set_hook(previous_hook);
+            outcome.ok()
+        } else {
+            // Nested: the silent hook is already installed; just catch and restore depth.
+            depth.set(current + 1);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            depth.set(current);
+            outcome.ok()
+        }
+    })
 }
 
 // =============================================================================

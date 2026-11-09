@@ -73,6 +73,58 @@ fn a_panic_inside_a_contained_call_becomes_none() {
     assert_eq!(run_contained(|| "fine"), Some("fine"));
 }
 
+#[test]
+fn nested_contained_calls_on_the_same_thread_succeed() {
+    // The PST export path nests run_contained (open_message) around decompress_rtf_bounded,
+    // which itself calls run_contained. Nesting must not deadlock.
+    let outer = run_contained(|| {
+        let inner = run_contained(|| 20 + 2);
+        assert_eq!(inner, Some(22));
+        let deeper = run_contained(|| run_contained(|| "nested").unwrap());
+        assert_eq!(deeper, Some("nested"));
+        100
+    });
+    assert_eq!(outer, Some(100));
+    // After the outer call finishes, a fresh top-level call still works.
+    assert_eq!(run_contained(|| 7), Some(7));
+}
+
+#[test]
+fn a_panic_in_an_inner_contained_call_is_contained_and_does_not_poison_the_outer() {
+    let outer = run_contained(|| {
+        let inner = run_contained(|| -> i32 { panic!("expected: inner panic") });
+        assert_eq!(inner, None);
+        // Outer continues and returns a value.
+        99
+    });
+    assert_eq!(outer, Some(99));
+    // Subsequent top-level call is unaffected.
+    assert_eq!(run_contained(|| "recovered"), Some("recovered"));
+}
+
+#[test]
+fn nested_decompress_rtf_bounded_under_outer_containment_does_not_deadlock() {
+    // Exact shape of the PST export path: outer run_contained around a call that itself
+    // enters run_contained via decompress_rtf_bounded. The crafted header is long enough
+    // and declares a small output so the early rejects are skipped and the inner
+    // run_contained (around compressed_rtf::decompress_rtf) is actually reached.
+    let outcome = run_contained(|| {
+        // Minimal header: 16 bytes, small declared raw size, LZFu magic. Body may be
+        // nonsense; the point is that decompress_rtf_bounded reaches its run_contained.
+        let mut bytes = vec![0u8; 32];
+        bytes[4..8].copy_from_slice(&16u32.to_le_bytes()); // raw_size well under the limit
+        bytes[8..12].copy_from_slice(b"LZFu");
+        // Result may be Some or None depending on the crate; we only care that we return.
+        let _ = decompress_rtf_bounded(&bytes);
+
+        // Also exercise a path that is refused before the inner call, for completeness.
+        assert_eq!(decompress_rtf_bounded(&[]), None);
+
+        "ok"
+    });
+    assert_eq!(outcome, Some("ok"));
+}
+
 // ----- the bounded RTF decompression -----------------------------------------------------------
 
 #[test]

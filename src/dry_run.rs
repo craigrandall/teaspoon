@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use crate::naming::{sanitize_component, utf16_len};
 use crate::plan::{GateReport, Plan, Policy, plan_export, verify_plan};
 use crate::pst_password::PasswordOutcome;
+use crate::pst_text::TextStats;
 use crate::source_msg::build_msg_tree;
 use crate::source_pst::build_pst_tree;
 
@@ -43,6 +44,9 @@ pub(crate) struct SourceCensus {
     pub(crate) folder_identity_unavailable: usize,
     /// Outcome of the PST password check; `None` for inputs that are not PSTs.
     pub(crate) pst_password: Option<PasswordOutcome>,
+    /// `PT_STRING8` values read while building a PST tree and what was lost reading them
+    /// (zero for other inputs).
+    pub(crate) string8: TextStats,
 }
 
 /// Counts messages without an Internet message ID and messages repeating one already seen.
@@ -266,6 +270,22 @@ pub(crate) fn print_dry_run_report(
         "folder_identity_unavailable={}",
         census.folder_identity_unavailable
     );
+    // The PT_STRING8 counts exist only for a PST (a .msg run does not fill them).
+    if census.pst_password.is_some() {
+        println!("source_string8_values={}", census.string8.string8_values);
+        println!(
+            "source_string8_non_ascii={}",
+            census.string8.string8_non_ascii
+        );
+        println!(
+            "source_string8_replaced_bytes={}",
+            census.string8.string8_replaced_bytes
+        );
+        println!(
+            "source_string8_unsupported={}",
+            census.string8.string8_unsupported
+        );
+    }
 }
 
 #[cfg(test)]

@@ -335,7 +335,62 @@ PST file
 - The scheme (reflected CRC-32, polynomial 0xEDB88320, initial value 0, no final XOR, over ASCII bytes) is written in `pst_password.rs` and recorded in `ADRs/pst-password-protection.md`. The MS-PST pages do not state it, so it was found against a real protected PST.
 - Nothing derived from the password, including the stored hash, is printed or put in an error message. The password is read from the environment only.
 - The PST header's block-encoding method is a separate matter and is not reported.
-- The code is verified against one real protected PST (see `docs/verification/m4-results.md`). The export from a PST (M4i) will call the same function.
+- The code is verified against one real protected PST (see `docs/verification/m4-results.md`). The PST export (M4i-2, drop A) calls the same function from `PstSource::open`, and so does the attachment spike.
+
+## M4i-1 boundary: the attachment-reach spike (working tree 0.1.41, run 2026-11-05 and 2026-11-06; not tagged)
+
+The spike answers one question before any PST export code exists: can attachment bytes be read from a Unicode PST through the public `outlook-pst` API, correctly, and at what memory cost? It is a temporary, read-only, counts-only mode (`--spike-attachments`, `src/spike_pst_attachments.rs`). The reading it does lives in `src/pst_attachments.rs`, which the PST export reuses.
+
+```text
+PST file
+  |
+  +-- pst_attachments::open_unicode_pst    UnicodePstFile::open; an ANSI PST is told apart and refused
+  +-- UnicodeStore::read                   a concrete store (the dyn Store reaches no attachment)
+  +-- pst_password::enforce                the same rule as the diagnostic and the planner
+  |
+  +-- walk the folders (dyn open_folder), and per message:
+        UnicodeMessage::read(store, entry ID, None)
+          |
+          +-- attachment_rows          the attachment table: row ID (taken as the attachment's node),
+          |                            method, size, content ID
+          +-- open_attachment          UnicodeAttachment::read(message, node, None), then data():
+                Binary                 hashed in memory (SHA-256), then dropped
+                error or no data       counted by method and by the crate's error variant name
+```
+
+- The crate reads every property of an attachment, the payload included, whatever property filter is passed, and holds a by-value payload about twice while the attachment object lives. The spike drops each attachment after hashing it.
+- Output is counts only. With `--spike-hash-file FILE` it also writes one line per attachment row (ordinals, method, kind, size, SHA-256; no names) to a new file, and refuses to do so for a PST over 256 MiB, so that a list for a large mailbox cannot be made by accident.
+- Error labels are the variant name of the crate's error (plus a bare property type or number), never a payload; the by-value arm raises the embedded-message variants, so a label is read beside the method.
+- Verified by the owner's runs: on the tester the by-value payloads of a PNG (seven identical copies) and a JPG equal Outlook's Save As on size and SHA-256, the row ID is the attachment's node (0 method or size disagreements), and the 3 embedded-message and 2 OLE attachments fail with `AttachmentMethodNotFound`; on `crkb.pst` all 7,016 attachments read (5,991,077,209 bytes in 116 s at a 91 MB peak working set under `measure-peak.ps1`). Details and limits: `docs/plans/m4-plan.md`, M4i.
+
+## M4i-2 boundary: exporting a PST (drop A; written in the working tree, not yet built or run by the owner)
+
+A PST is exported through the same lazy, staged, streaming exporter as `.msg` input. Two seams change; consent, preflight, staging, read-back, the tree hash, and naming do not.
+
+```text
+tsp <pst> --out <dir>
+  |
+  +-- PstSource::open                  Unicode store; password enforced (a refusal is exit code 2,
+  |                                    before anything is staged); an ANSI PST is refused (exit code 1)
+  +-- PstSource::build_tree            source_pst::build_pst_tree_from, the builder the dry run uses
+  |                                    (one store for the plan and the export) -> SourceFolder + census
+  +-- plan gates, preflight, consent, staging, read-back        unchanged (export.rs, stage.rs)
+  |
+  +-- per planned message:  ExportSources::Pst -> PstSource::open_message   (inside run_contained)
+  |     content   subject, Internet message ID, time, bodies as stored, attachment descriptors
+  |               (the envelope is empty until drop B)
+  |     reader    AttachmentReader::Pst: open_data(i) -> DataOpen::Stream (a cursor over the crate's
+  |               buffer, copied to staging in chunks) | Missing | ReadFailed
+  |               embedded-message and OLE rows are never opened: recorded not_extracted from their
+  |               method (embedded_message_unreadable, ole_object)
+  |     identity  pst_identity in metadata.json (node ID, provider UID) and folder.json (+ entry ID)
+```
+
+- `export_source.rs` is the seam: `ExportSources` (the `.msg` file map or the open PST), `AttachmentReader` (an enum over the `.msg` reader and the PST reader), and `DataOpen`. The enum, not a trait object, keeps the nested-message code on its existing concrete reader.
+- A by-value read failure is recorded `failed` (`data_stream_missing` for a null or missing data property, `data_read_failed` otherwise); the crate's error label is counted in the stdout report (`export_pst_attachment_read_error`) and is not written to the archive. No vocabulary is added before M4g closes it.
+- PST strings are read through `pst_text.rs`: a `PT_STRING8` value from its raw bytes through the chain the `.msg` path verified (message code page, Internet code page, Windows-1252), with the loss counted. The crate's own `to_string()` reads each byte as Latin-1 and is not used on a `String8` value. The planner reads names the same way, so a planned name and the exported text agree.
+- The new metadata fields (`pst_identity`) are omitted for `.msg` input, and the PST-only report keys print only for a PST export, so `.msg` output should be byte-identical to the build before drop A except for the version the root marker records. That is a regression check (a `.msg` corpus export at `Cargo.toml` 0.1.40 should reproduce `6ea3c22c…de35`), expected and not yet measured.
+- Not in drop A: the PST envelope (drop B), class-specific handling of non-mail items, skipping or counting associated items and search folders, and ANSI.
 
 ## Verification structure
 
@@ -368,7 +423,7 @@ embedded messages, which `msg_parser` does not open.
 
 After M4f-2b a counts-only PowerShell check (`verify-cid-links.ps1`, kept outside the crate) walks an exported tree and, for every `message.md` at any depth, checks that each link to `attachments/` resolves to a file on disk that the `metadata.json` beside it records as an extracted attachment, that no `cid:` link is left, that the links equal the sum of the `rewritten` counts, and that no attachment is marked `inline` without a content ID. On the corpus: 26 links, all resolving, 0 violations. It shows that a link points at a recorded extracted file, not that the match by content ID was the right one.
 
-The PST side has no independent-oracle comparison yet, apart from one manual comparison of the folder tree with Outlook's Folder Size dialog (35 subfolders in both; see `docs/verification/m4-results.md`). The PST password check was verified differently: against a real protected PST, where the stored hash equals the hash of the known password under the scheme in the ADR (an independent computation agreed), a missing and a wrong password are refused, and the right one is accepted with the census unchanged.
+The PST side has no `libpff` or `libpst` comparison yet. The comparisons made by hand with Outlook are the attachment payloads of the M4i spike (2026-11-05: the tester's PNG, seven identical copies, and its JPG equal the payloads read, on size and SHA-256) and one manual comparison of the folder tree with Outlook's Folder Size dialog (35 subfolders in both; see `docs/verification/m4-results.md`). The PST password check was verified differently: against a real protected PST, where the stored hash equals the hash of the known password under the scheme in the ADR (an independent computation agreed), a missing and a wrong password are refused, and the right one is accepted with the census unchanged.
 
 The planner is verified differently: `verify_plan` is a gate over every plan
 (its violation count prints under `--dry-run` and gates `export`), unit and
@@ -399,6 +454,11 @@ The code lives in `src/`, one module per seam:
 - `export/nested` — a child module of `export` (M4f-2a): stages one message's files for both top-level and embedded messages and writes embedded messages as nested message directories, to the planner's depth cap.
 - `verify_attachments` — `--verify-attachments` (M4f-2c): the byte-level comparison of extracted attachments with `msg_parser`.
 - `verify_bodies` — `--verify-bodies` (M4e-2c): the content-preservation check of the HTML-to-Markdown conversion, in order, counts only.
+- `pst_attachments` — the concrete route to a PST attachment's payload (M4i-1): the attachment-table rows, `open_attachment`, content-free error and method labels, the shared Unicode open that refuses an ANSI PST; reused by the PST export.
+- `pst_text` — PST text (M4i-2): string values read through the verified `PT_STRING8` chain, with counted loss.
+- `pst_export` — the PST side of the export (M4i-2): the open Unicode store, the message opener, the attachment reader, and the identity records.
+- `export_source` — the exporter's two source seams (M4i-2): `ExportSources`, `AttachmentReader`, `DataOpen`.
+- `spike_pst_attachments` — `--spike-attachments` (M4i-1), temporary: counts and an optional per-attachment hash file for the tester.
 - `bakeoff` — the HTML-to-Markdown bake-off harness (M4e-0, `--bakeoff-md`); the candidate converters compile only with `--features bakeoff`.
 - `layout` — the archive's fixed names (`folder.json`, `message.md`, `metadata.json`, `attachments`). The planner derives its path-budget tails from their lengths, and the renderers, the writer, and the body pipeline's links use the same constants.
 

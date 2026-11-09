@@ -2,15 +2,22 @@
 //! subjects and times, and attachment names from each message's attachment table. Content is
 //! read into memory only; nothing is printed.
 //!
-//! Limits of `outlook-pst` v1.2.0's public API, reported rather than hidden: embedded-message
-//! attachments cannot be opened (they are planned as ordinary files and counted), and the
-//! attachment table may carry only the short (8.3) file name.
+//! Limits of `outlook-pst` v1.2.0, reported rather than hidden. The planner reads only the
+//! attachment table (the dyn `Store` and `Message` API reaches no attachment), and that table
+//! may carry only the short (8.3) file name. The concrete route reads by-value attachment
+//! bytes (`pst_attachments.rs`), but an embedded-message or OLE attachment fails to read
+//! (`AttachmentMethodNotFound` on the tester), so those are planned as ordinary files, counted
+//! as not opened, and recorded as not extracted by the export.
+//!
+//! String values are read through `pst_text.rs`, never through the crate's `to_string()` on a
+//! `PT_STRING8` value (which reads every byte as Latin-1): the planned names and the exported
+//! text use one decoder.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use outlook_pst::ltp::prop_context::PropertyValue;
-use outlook_pst::ltp::table_context::{TableContext, TableContextInfo, TableRowColumnValue};
+use outlook_pst::ltp::table_context::TableContext;
 use outlook_pst::messaging::folder::Folder as PstFolder;
 use outlook_pst::messaging::message::Message as PstMessage;
 use outlook_pst::messaging::store::Store;
@@ -20,28 +27,44 @@ use crate::dry_run::{
     InternetIdTracker, PROP_ATTACH_FILENAME, PROP_ATTACH_LONG_FILENAME, PROP_DELIVERY_TIME,
     PROP_INTERNET_MESSAGE_ID, PROP_SUBJECT, PROP_SUBMIT_TIME, SourceCensus, strip_subject_marker,
 };
+use crate::oxmsg_decode::{PROP_INTERNET_CODEPAGE, PROP_MESSAGE_CODEPAGE};
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
 use crate::pst::{column_index, read_i32_at};
-use crate::pst_password::{enforce, supplied_from_env};
+use crate::pst_password::{PasswordOutcome, enforce, supplied_from_env};
+use crate::pst_text::{TextReader, integer32, read_text_at};
 use crate::shared::{ATTACH_METHOD_EMBEDDED_MESSAGE, MAX_FOLDER_DEPTH, PROP_ATTACH_METHOD};
 
 /// PidTagEntryId, injected into every folder's properties by the crate.
 const PROP_ENTRY_ID: u16 = 0x0FFF;
 
+/// PidTagDisplayName: a folder's name.
+const PROP_DISPLAY_NAME: u16 = 0x3001;
+
 struct PstBuilder {
     census: SourceCensus,
     ids: InternetIdTracker,
     next_attachment_id: u64,
+    /// Reads every string; its counts go into the census when the tree is done.
+    text: TextReader,
 }
 
-/// Builds the source tree for the IPM subtree of a PST.
+/// Builds the source tree for the IPM subtree of a PST (either format, through the dyn API).
 pub(crate) fn build_pst_tree(path: &Path) -> Result<(SourceFolder, SourceCensus)> {
     let store = outlook_pst::open_store(path).context("failed to open PST")?;
 
     // Refuse a password-protected PST unless the password in TSP_PST_PASSWORD verifies
-    // (MS-PST 2.4.3.3). The outcome is not reported yet; a refusal is an early `?` return.
+    // (MS-PST 2.4.3.3). A refusal is an early `?` return.
     let outcome = enforce(store.as_ref(), supplied_from_env()?)?;
+    build_pst_tree_from(store.as_ref(), outcome)
+}
 
+/// Builds the source tree from an open store whose password has already been checked. The
+/// export calls this with its own concrete Unicode store, so the plan and the export read one
+/// store.
+pub(crate) fn build_pst_tree_from(
+    store: &dyn Store,
+    outcome: PasswordOutcome,
+) -> Result<(SourceFolder, SourceCensus)> {
     let ipm_id = store
         .properties()
         .ipm_sub_tree_entry_id()
@@ -57,33 +80,15 @@ pub(crate) fn build_pst_tree(path: &Path) -> Result<(SourceFolder, SourceCensus)
         },
         ids: InternetIdTracker::default(),
         next_attachment_id: 0,
+        text: TextReader::new(),
     };
-    let root = builder.folder(store.as_ref(), ipm.as_ref(), 0);
+    let root = builder.folder(store, ipm.as_ref(), 0);
+    builder.census.string8 = builder.text.stats.clone();
     Ok((root, builder.census))
 }
 
-/// Text of a string-typed property value, or `None` for any other type.
-fn property_text(value: &PropertyValue) -> Option<String> {
-    match value {
-        PropertyValue::String8(v) => Some(v.to_string()),
-        PropertyValue::Unicode(v) => Some(v.to_string()),
-        _ => None,
-    }
-}
-
-fn read_text_at(
-    table: &dyn TableContext,
-    context: &TableContextInfo,
-    row_values: &[Option<TableRowColumnValue>],
-    column_idx: usize,
-) -> Option<String> {
-    let descriptor = context.columns().get(column_idx)?;
-    let value = row_values.get(column_idx)?.as_ref()?;
-    property_text(&table.read_column(value, descriptor.prop_type()).ok()?)
-}
-
 /// Delivery time, falling back to submit time, as FILETIME ticks.
-fn message_time(message: &dyn PstMessage) -> Option<i64> {
+pub(crate) fn message_time(message: &dyn PstMessage) -> Option<i64> {
     let properties = message.properties();
     [PROP_DELIVERY_TIME, PROP_SUBMIT_TIME]
         .into_iter()
@@ -107,9 +112,13 @@ impl PstBuilder {
         if properties.get(PROP_ENTRY_ID).is_some() {
             self.census.folder_identity_entry_id += 1;
         }
-        let name = match properties.display_name() {
-            Ok(name) => name,
-            Err(_) => {
+        self.text.use_fallback_codepage();
+        let name = match properties
+            .get(PROP_DISPLAY_NAME)
+            .and_then(|value| self.text.text(value))
+        {
+            Some(name) => name,
+            None => {
                 self.census.folder_name_read_errors += 1;
                 String::new()
             }
@@ -173,10 +182,14 @@ impl PstBuilder {
 
     fn message(&mut self, message: &dyn PstMessage, nid: u64) -> SourceMessage {
         let properties = message.properties();
+        self.text.use_message_codepage(
+            integer32(properties.get(PROP_MESSAGE_CODEPAGE)),
+            integer32(properties.get(PROP_INTERNET_CODEPAGE)),
+        );
 
         let subject = properties
             .get(PROP_SUBJECT)
-            .and_then(property_text)
+            .and_then(|value| self.text.text(value))
             .map(|raw| {
                 let (text, marker) = strip_subject_marker(&raw);
                 if marker {
@@ -186,7 +199,7 @@ impl PstBuilder {
             });
         let internet_id = properties
             .get(PROP_INTERNET_MESSAGE_ID)
-            .and_then(property_text);
+            .and_then(|value| self.text.text(value));
         self.ids.note(internet_id.as_deref(), &mut self.census);
         if let Ok(class) = properties.message_class() {
             let is_note = class
@@ -232,8 +245,11 @@ impl PstBuilder {
                 continue;
             };
             let name = long_idx
-                .and_then(|idx| read_text_at(table, context, &values, idx))
-                .or_else(|| short_idx.and_then(|idx| read_text_at(table, context, &values, idx)))
+                .and_then(|idx| read_text_at(table, context, &values, idx, &mut self.text))
+                .or_else(|| {
+                    short_idx
+                        .and_then(|idx| read_text_at(table, context, &values, idx, &mut self.text))
+                })
                 .filter(|n| !n.trim().is_empty());
             if name.is_none() {
                 self.census.attachments_without_name += 1;

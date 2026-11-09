@@ -340,6 +340,7 @@ impl Planner<'_> {
                     | NameFlag::InvisibleRemoved
                     | NameFlag::Trimmed
                     | NameFlag::DeviceNameMangled
+                    | NameFlag::TildeReplaced
                     | NameFlag::SpecialNameProtected
             )
         });

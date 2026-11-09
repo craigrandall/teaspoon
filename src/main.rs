@@ -6,6 +6,7 @@ mod body;
 mod cli;
 mod dry_run;
 mod export;
+mod export_source;
 mod layout;
 mod model;
 mod msg_report;
@@ -17,13 +18,17 @@ mod oxmsg_extract;
 mod oxmsg_structure;
 mod plan;
 mod pst;
+mod pst_attachments;
+mod pst_export;
 mod pst_password;
+mod pst_text;
 #[cfg(test)]
 mod robustness_tests;
 mod rtf_deencap;
 mod shared;
 mod source_msg;
 mod source_pst;
+mod spike_pst_attachments;
 mod stage;
 #[cfg(test)]
 mod tests;
@@ -45,6 +50,7 @@ use crate::export::{ExportOptions, ExportStatus, prompt_for_consent, run_export}
 use crate::oxmsg_extract::run_msg_extract;
 use crate::pst::run_pst_diagnostic;
 use crate::pst_password::PasswordRefusal;
+use crate::spike_pst_attachments::run_spike_attachments;
 use crate::verify::run_msg_verify;
 use crate::verify_attachments::run_attachments_verify;
 use crate::verify_bodies::run_bodies_verify;
@@ -122,6 +128,9 @@ fn run() -> Result<()> {
             if args.verify_attachments {
                 anyhow::bail!("--verify-attachments applies only to .msg input");
             }
+            if args.spike_attachments {
+                return run_spike_attachments(&args.input, args.spike_hash_file.as_deref());
+            }
             run_pst_diagnostic(&args.input)
         }
         InputKind::Msg {
@@ -130,6 +139,9 @@ fn run() -> Result<()> {
         } => {
             // (With --recursive, `classify_input_with` has already scanned the directory down to
             // the depth cap and counted the directories below it in `subdirectories_skipped`.)
+            if args.spike_attachments {
+                anyhow::bail!("--spike-attachments applies only to .pst input");
+            }
             // The custom MS-OXMSG extraction path is the .msg path (M3f).
             // `msg_parser` survives only as the independent oracle behind
             // --verify (ADR: custom MS-OXMSG parser graduates to the

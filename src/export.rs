@@ -45,20 +45,20 @@ use crate::archive::{
 };
 use crate::body::{BodySource, LossReason};
 use crate::dry_run::{SourceKind, classify_source, input_leaf_name, root_stem, root_units};
+use crate::export_source::{AttachmentReader, DataOpen, ExportSources};
 use crate::model::MessageContent;
 use crate::naming::{collision_key, utf16_len};
 use crate::plan::{
     EntryKind, MAX_PATH_UNITS, Plan, PlanEntry, Policy, SourceFolder, SourceMessage, plan_export,
     verify_plan,
 };
+use crate::pst_export::{PstNotes, PstSource};
 use crate::shared::{
     ATTACH_METHOD_BY_REFERENCE, ATTACH_METHOD_BY_REFERENCE_ONLY,
     ATTACH_METHOD_BY_REFERENCE_RESOLVE, ATTACH_METHOD_BY_VALUE, ATTACH_METHOD_EMBEDDED_MESSAGE,
     ATTACH_METHOD_NONE, ATTACH_METHOD_OLE,
 };
-use crate::source_msg::{
-    MsgAttachments, MsgFileMap, OpenMessage, build_msg_export_source, open_message,
-};
+use crate::source_msg::{MsgFileMap, OpenMessage, build_msg_export_source, open_message};
 use crate::stage::{
     Disposition, STAGING_TAIL_UNITS, SourceFailure, StagedFile, Stager, StreamOutcome, hash_file,
     hex, join_path,
@@ -200,6 +200,15 @@ fn empty_preflight(ownership: Ownership) -> Preflight {
 /// Content-free results printed at the end (all keys always printed, zero when not applicable).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExportReport {
+    /// `msg_export` or `pst_export`.
+    input_kind: &'static str,
+    /// The PST password check outcome (`none` or `verified`); `None` for `.msg` input.
+    pst_password: Option<&'static str>,
+    /// What reading PST messages counted (text decoding loss, binary-typed body forms that were
+    /// not binary). Zero for `.msg` input.
+    pst_notes: PstNotes,
+    /// Attachment reads that failed or found no data, by reason and the crate's error label.
+    pst_attachment_errors: BTreeMap<String, u64>,
     root_units: usize,
     /// Source files or directory entries that could not be opened or read and are therefore not
     /// in the export (directory input; a single unopenable file is an error instead).
@@ -307,7 +316,10 @@ impl ExportReport {
 
 fn print_export_report(r: &ExportReport) {
     println!("inventory=privacy_safe");
-    println!("input_kind=msg_export");
+    println!("input_kind={}", r.input_kind);
+    if let Some(key) = r.pst_password {
+        println!("pst_password={key}");
+    }
     println!("export_root_units={}", r.root_units);
     println!("export_source_open_errors={}", r.source_open_errors);
     println!(
@@ -405,6 +417,24 @@ fn print_export_report(r: &ExportReport) {
         "export_embedded_attachments_inline={}",
         r.embedded_attachments_inline
     );
+    if r.input_kind == "pst_export" {
+        let text = &r.pst_notes.text;
+        println!("export_pst_string8_values={}", text.string8_values);
+        println!("export_pst_string8_non_ascii={}", text.string8_non_ascii);
+        println!(
+            "export_pst_string8_replaced_bytes={}",
+            text.string8_replaced_bytes
+        );
+        println!(
+            "export_pst_string8_unsupported={}",
+            text.string8_unsupported
+        );
+        println!("export_pst_html_not_binary={}", r.pst_notes.html_not_binary);
+        println!("export_pst_rtf_not_binary={}", r.pst_notes.rtf_not_binary);
+        for (key, count) in &r.pst_attachment_errors {
+            println!("export_pst_attachment_read_error {key} count={count}");
+        }
+    }
     println!("export_readback_mismatches={}", r.readback_mismatches);
     println!("export_tree_sha256={}", r.tree_sha256);
 }
@@ -465,8 +495,12 @@ fn source_record(input: &Path, files: &MsgFileMap, hash: bool) -> Result<SourceR
         } else {
             None
         };
+        let kind = match classify_source(input)? {
+            SourceKind::Pst => "pst_file",
+            SourceKind::Msg => "msg_file",
+        };
         return Ok(SourceRecord {
-            kind: "msg_file",
+            kind,
             name,
             size_bytes: size,
             sha256,
@@ -537,15 +571,20 @@ fn stage_by_value(
     stager: &mut Stager,
     entry: &PlanEntry,
     index: usize,
-    reader: &mut MsgAttachments,
+    reader: &mut AttachmentReader,
     report: &mut ExportReport,
     record: &mut AttachmentRecord,
 ) -> Result<()> {
-    let Some((mut data, declared)) = reader.open_data(index) else {
-        record.status = ATTACHMENT_FAILED;
-        record.reason = Some("data_stream_missing");
-        report.attachments_failed += 1;
-        return Ok(());
+    let (mut data, declared) = match reader.open_data(index) {
+        DataOpen::Stream { data, declared } => (data, declared),
+        DataOpen::Missing { label } => {
+            fail_unreadable(report, record, "data_stream_missing", label);
+            return Ok(());
+        }
+        DataOpen::ReadFailed { label } => {
+            fail_unreadable(report, record, "data_read_failed", label);
+            return Ok(());
+        }
     };
     match stager.add_stream(entry.components.clone(), &mut data, Some(declared))? {
         StreamOutcome::Staged { size, digest } => {
@@ -568,6 +607,25 @@ fn stage_by_value(
     Ok(())
 }
 
+/// Records an attachment whose data could not be opened as failed, with its reason, and counts
+/// the crate's content-free error label (PST only) by reason.
+fn fail_unreadable(
+    report: &mut ExportReport,
+    record: &mut AttachmentRecord,
+    reason: &'static str,
+    label: Option<String>,
+) {
+    record.status = ATTACHMENT_FAILED;
+    record.reason = Some(reason);
+    report.attachments_failed += 1;
+    if let Some(label) = label {
+        *report
+            .pst_attachment_errors
+            .entry(format!("reason={reason} error={label}"))
+            .or_insert(0) += 1;
+    }
+}
+
 /// Stages every by-value attachment of one message, one at a time, and returns a record for
 /// every attachment (extracted or not), in storage order. Attachment bytes are never held whole.
 fn stage_attachments(
@@ -575,7 +633,7 @@ fn stage_attachments(
     ctx: &nested::StageCtx<'_>,
     message: &SourceMessage,
     content: &MessageContent,
-    reader: &mut MsgAttachments,
+    reader: &mut AttachmentReader,
     report: &mut ExportReport,
 ) -> Result<Vec<AttachmentRecord>> {
     if content.attachments.len() != message.attachments.len() {
@@ -654,7 +712,7 @@ struct ArchiveInput<'a> {
     tree: &'a SourceFolder,
     plan: &'a Plan,
     policy: &'a Policy,
-    sources: &'a MsgFileMap,
+    sources: &'a ExportSources,
 }
 
 /// Renders every file of the archive and hands it to the stager the moment it exists, so only
@@ -736,13 +794,18 @@ fn stage_archive(
                 if !folders.contains_key(&entry.source_id) {
                     bail!("internal error: a planned folder has no source folder");
                 }
+                let pst_identity = match sources {
+                    ExportSources::Pst(pst) => Some(pst.folder_identity(entry.source_id)?),
+                    ExportSources::Msg(_) => None,
+                };
                 let meta = FolderMetadata::folder(
                     NameRecord {
                         original: entry.original.clone(),
                         adjustments: adjustment_names(&entry.flags),
                     },
                     children.remove(&entry.components).unwrap_or_default(),
-                );
+                )
+                .with_pst_identity(pst_identity);
                 stager.add(
                     rel_with(&entry.components, FOLDER_JSON_NAME),
                     to_json(&meta)?.as_bytes(),
@@ -753,17 +816,35 @@ fn stage_archive(
                 let message = messages
                     .get(&entry.source_id)
                     .ok_or_else(|| anyhow!("internal error: a planned message has no source"))?;
-                let path = sources
-                    .get(&entry.source_id)
-                    .ok_or_else(|| anyhow!("internal error: a planned message has no file"))?;
-                let OpenMessage {
-                    content,
-                    attachments: mut reader,
-                } = open_message(path)?;
+                let (content, mut reader, source_file, pst_identity) = match sources {
+                    ExportSources::Msg(files) => {
+                        let path = files.get(&entry.source_id).ok_or_else(|| {
+                            anyhow!("internal error: a planned message has no file")
+                        })?;
+                        let OpenMessage {
+                            content,
+                            attachments,
+                        } = open_message(path)?;
+                        (
+                            content,
+                            AttachmentReader::Msg(attachments),
+                            relative_source_name(input, path),
+                            None,
+                        )
+                    }
+                    ExportSources::Pst(pst) => {
+                        let opened = pst.open_message(entry.source_id, &mut report.pst_notes)?;
+                        (
+                            opened.content,
+                            AttachmentReader::Pst(opened.attachments),
+                            input_leaf_name(input),
+                            Some(opened.identity),
+                        )
+                    }
+                };
                 // The attachments, `message.md`, `metadata.json`, and the kept body files, in
                 // that order; embedded messages are staged by the same function, one level
                 // below (`export/nested.rs`).
-                let source_file = relative_source_name(input, path);
                 let ctx = nested::StageCtx {
                     planned: &planned,
                     source_file: &source_file,
@@ -772,6 +853,7 @@ fn stage_archive(
                     components: &entry.components,
                     directory: name_record(entry),
                     embedded: false,
+                    pst_identity,
                 };
                 nested::stage_message(stager, &ctx, &job, message, &content, &mut reader, report)?;
             }
@@ -977,12 +1059,8 @@ pub(crate) fn run_export(
     options: &ExportOptions,
     confirm: &mut dyn FnMut(&Preflight) -> bool,
 ) -> Result<ExportStatus> {
-    match classify_source(input)? {
-        SourceKind::Pst => bail!(
-            "exporting a .pst file is not implemented yet (planned for M4i); add --dry-run to plan one"
-        ),
-        SourceKind::Msg => {}
-    }
+    let kind = classify_source(input)?;
+    let is_pst = matches!(kind, SourceKind::Pst);
 
     let stem = root_stem(input);
     let absolute_out = std::path::absolute(out).context("failed to resolve the output path")?;
@@ -990,14 +1068,28 @@ pub(crate) fn run_export(
         bail!("the --out path is too long to stage files under it; choose a shorter directory");
     }
     let policy = Policy::new(root_units(out, &stem)?);
-    let (tree, census, sources) = build_msg_export_source(input)?;
-    if !input.is_dir() && census.open_errors > 0 {
+    // A PST is opened as a Unicode store (an ANSI PST is refused) and its password is enforced
+    // here, before anything is rendered or staged; a refusal ends the run with exit status 2.
+    let (tree, census, sources) = match kind {
+        SourceKind::Pst => {
+            let (pst, outcome) = PstSource::open(input)?;
+            let (tree, census) = pst.build_tree(outcome)?;
+            (tree, census, ExportSources::Pst(pst))
+        }
+        SourceKind::Msg => {
+            let (tree, census, files) = build_msg_export_source(input)?;
+            (tree, census, ExportSources::Msg(files))
+        }
+    };
+    if !is_pst && !input.is_dir() && census.open_errors > 0 {
         bail!("the input could not be opened as a .msg file");
     }
 
     let plan = plan_export(&tree, &policy);
     let gate = verify_plan(&plan, &policy);
     let mut report = ExportReport {
+        input_kind: if is_pst { "pst_export" } else { "msg_export" },
+        pst_password: census.pst_password.map(|outcome| outcome.key()),
         root_units: policy.root_units,
         source_open_errors: census.open_errors,
         source_directories_beyond_depth_cap: census.directories_beyond_depth_cap,
@@ -1032,7 +1124,12 @@ pub(crate) fn run_export(
         return Ok(ExportStatus::Refused);
     }
 
-    let source = source_record(input, &sources, options.source_hash)?;
+    let no_files = MsgFileMap::new();
+    let source_files = match &sources {
+        ExportSources::Msg(files) => files,
+        ExportSources::Pst(_) => &no_files,
+    };
+    let source = source_record(input, source_files, options.source_hash)?;
 
     // A target that is not ours is refused before anything is rendered or staged.
     let root_dir = out.join(&stem);
@@ -2410,8 +2507,9 @@ mod tests {
     }
 
     #[test]
-    fn exporting_a_pst_is_not_implemented_yet() {
+    fn exporting_a_pst_that_cannot_be_opened_is_an_error_and_creates_nothing() {
         let out = std::env::temp_dir().join("tsp-exp-never-created");
+        let _ = std::fs::remove_dir_all(&out);
         let err = run_export(
             Path::new("x.pst"),
             &out,
@@ -2419,7 +2517,45 @@ mod tests {
             &mut never_asked,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("not implemented"));
+        assert!(err.to_string().contains("failed to open PST"));
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn an_unreadable_attachment_is_recorded_as_failed_and_its_label_is_counted() {
+        let mut report = ExportReport::default();
+        let mut record = AttachmentRecord {
+            name: NameRecord {
+                original: String::new(),
+                adjustments: Vec::new(),
+            },
+            method: method_label(Some(ATTACH_METHOD_BY_VALUE)),
+            method_code: Some(ATTACH_METHOD_BY_VALUE),
+            content_id: None,
+            inline: false,
+            status: ATTACHMENT_NOT_EXTRACTED,
+            reason: None,
+            file: None,
+            bytes: None,
+            sha256: None,
+        };
+        fail_unreadable(
+            &mut report,
+            &mut record,
+            "data_stream_missing",
+            Some("InvalidMessageObjectData(Null)".to_string()),
+        );
+        fail_unreadable(&mut report, &mut record, "data_stream_missing", None);
+        assert_eq!(record.status, ATTACHMENT_FAILED);
+        assert_eq!(record.reason, Some("data_stream_missing"));
+        assert_eq!(report.attachments_failed, 2);
+        assert_eq!(
+            report
+                .pst_attachment_errors
+                .get("reason=data_stream_missing error=InvalidMessageObjectData(Null)"),
+            Some(&1)
+        );
+        assert_eq!(report.pst_attachment_errors.len(), 1);
     }
 
     // ---- the streamed pipeline (M4h-0) ---------------------------------------
@@ -2491,6 +2627,7 @@ mod tests {
         let (tree, _census, sources) = build_msg_export_source(&input).unwrap();
         let plan = plan_export(&tree, &policy);
         let source = source_record(&input, &sources, true).unwrap();
+        let sources = ExportSources::Msg(sources);
         let mut report = ExportReport::default();
         let mut stager = Stager::begin(&out_b).unwrap();
         let archive = ArchiveInput {

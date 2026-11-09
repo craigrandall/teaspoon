@@ -19,13 +19,14 @@ use serde::Serialize;
 use super::{ExportReport, name_record, rel_with, stage_attachments};
 use crate::archive::{
     ATTACHMENT_EXTRACTED, AttachmentRecord, MESSAGE_MD_NAME, METADATA_JSON_NAME, NameRecord,
-    SCHEMA_VERSION, body_outcome, link_cid_references, message_metadata, render_message_md_linked,
-    to_json,
+    PstIdentity, SCHEMA_VERSION, body_outcome, link_cid_references, message_metadata,
+    render_message_md_linked, to_json,
 };
+use crate::export_source::AttachmentReader;
 use crate::model::MessageContent;
 use crate::naming::NameFlag;
 use crate::plan::{PlanEntry, SourceMessage};
-use crate::source_msg::{EmbeddedOpen, MsgAttachments};
+use crate::source_msg::EmbeddedOpen;
 use crate::stage::Stager;
 
 /// `kind` in the `metadata.json` of an embedded message.
@@ -51,6 +52,8 @@ pub(super) struct MessageJob<'a> {
     pub(super) directory: NameRecord,
     /// An embedded message (counted and recorded as such) rather than a top-level one.
     pub(super) embedded: bool,
+    /// Where a PST message sits in its store; `None` for `.msg` input and for embedded messages.
+    pub(super) pst_identity: Option<PstIdentity>,
 }
 
 /// One embedded-message attachment: its source, its plan entry, and its position among its
@@ -71,7 +74,7 @@ pub(super) fn stage_message(
     job: &MessageJob<'_>,
     message: &SourceMessage,
     content: &MessageContent,
-    reader: &mut MsgAttachments<'_>,
+    reader: &mut AttachmentReader<'_>,
     report: &mut ExportReport,
 ) -> Result<()> {
     let mut outcome = body_outcome(&content.bodies);
@@ -90,6 +93,7 @@ pub(super) fn stage_message(
     if job.embedded {
         meta.kind = KIND_EMBEDDED_MESSAGE;
     }
+    meta.pst_identity = job.pst_identity.clone();
     stager.add(
         rel_with(job.components, MESSAGE_MD_NAME),
         render_message_md_linked(content, &outcome, linked.markdown.as_deref()).as_bytes(),
@@ -131,7 +135,7 @@ pub(super) fn stage_embedded(
     stager: &mut Stager,
     ctx: &StageCtx<'_>,
     at: &EmbeddedAt<'_>,
-    reader: &mut MsgAttachments<'_>,
+    reader: &mut AttachmentReader<'_>,
     report: &mut ExportReport,
     record: &mut AttachmentRecord,
 ) -> Result<()> {
@@ -146,12 +150,14 @@ pub(super) fn stage_embedded(
     };
     let EmbeddedOpen {
         content,
-        attachments: mut inner,
+        attachments,
     } = open;
+    let mut inner = AttachmentReader::Msg(attachments);
     let job = MessageJob {
         components: &at.entry.components,
         directory: name_record(at.entry),
         embedded: true,
+        pst_identity: None,
     };
     stage_message(stager, ctx, &job, at.message, &content, &mut inner, report)?;
     record.status = ATTACHMENT_EXTRACTED;

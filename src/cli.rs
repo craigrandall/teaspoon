@@ -85,6 +85,24 @@ pub(crate) struct Args {
     )]
     pub(crate) verify_attachments: bool,
 
+    /// Attachment-reach spike (M4i step 0; temporary): read every attachment payload of a
+    /// Unicode `.pst` through the concrete `outlook-pst` route, hash it in memory, and print only
+    /// counts (attachments by method and data kind, read errors by method and error variant,
+    /// payload bytes total, largest, and smallest non-empty). Reads real content internally and
+    /// writes nothing to any archive. Read-only. An ANSI PST is refused.
+    #[arg(
+        long,
+        conflicts_with_all = ["verify", "verify_envelope", "verify_deencap", "dump_deencap", "verify_bodies", "dump_bodies", "verify_attachments", "bakeoff_md", "bakeoff_dump", "recursive", "out", "dry_run", "overwrite", "no_source_hash"]
+    )]
+    pub(crate) spike_attachments: bool,
+
+    /// With `--spike-attachments`, write one line per attachment row (folder, message, and
+    /// attachment ordinals, method, data kind, size, SHA-256; no names) to FILE, so the hashes
+    /// can be compared locally with Outlook's Save As hashes. FILE must not exist, and the PST
+    /// must be 256 MiB or smaller: this is for the small tester PST only.
+    #[arg(long, value_name = "FILE", requires = "spike_attachments")]
+    pub(crate) spike_hash_file: Option<PathBuf>,
+
     /// Run the HTML-to-Markdown bake-off (M4e-0) over the `NNN.custom.html` files in the input
     /// directory (the directory `--dump-deencap` wrote) and a built-in set of synthetic and
     /// adversarial cases, and print only content-free scores. Needs a build with
@@ -109,8 +127,9 @@ pub(crate) struct Args {
     /// Directory to export into. The archive is written to `<DIR>/<input name>/`: one
     /// directory per message holding `message.md` and `metadata.json`, a `folder.json` in every
     /// folder, and a `folder.json` at the archive root that marks the directory as created
-    /// by `tsp`. Exporting `.msg` input works; a `.pst` export arrives with M4i. Standard output
-    /// stays content-free (counts only). With `--dry-run` nothing is written.
+    /// by `tsp`. Exporting `.msg` input works, and so does a Unicode `.pst` (an ANSI `.pst` is
+    /// refused; a password-protected one needs `TSP_PST_PASSWORD`). Standard output stays
+    /// content-free (counts only). With `--dry-run` nothing is written.
     #[arg(long, value_name = "DIR", conflicts_with = "verify")]
     pub(crate) out: Option<PathBuf>,
 
@@ -296,6 +315,21 @@ mod tests {
             InputKind::Pst => panic!("a directory is not a PST"),
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_spike_flags_parse_alone_and_conflict_with_the_other_modes() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["tsp", "a.pst"];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv)
+        };
+        assert!(parse(&["--spike-attachments"]).is_ok());
+        assert!(parse(&["--spike-attachments", "--spike-hash-file", "h.tsv"]).is_ok());
+        assert!(parse(&["--spike-hash-file", "h.tsv"]).is_err());
+        assert!(parse(&["--spike-attachments", "--out", "o"]).is_err());
+        assert!(parse(&["--spike-attachments", "--verify"]).is_err());
+        assert!(parse(&["--spike-attachments", "--recursive"]).is_err());
     }
 
     #[test]

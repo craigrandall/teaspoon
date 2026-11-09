@@ -219,6 +219,10 @@ pub(crate) struct MessageMetadata {
     /// The `.msg` file this message came from: its name, or its path relative to the input
     /// directory (always `/`-separated). Never an absolute path.
     pub(crate) source_file: String,
+    /// Where a PST message sits in its store (omitted for `.msg`): its node ID and the store's
+    /// provider UID (draft schema, M4i). Never a name or a path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pst_identity: Option<PstIdentity>,
     pub(crate) subject: Option<String>,
     pub(crate) internet_message_id: Option<String>,
     pub(crate) time_filetime: Option<i64>,
@@ -231,6 +235,18 @@ pub(crate) struct MessageMetadata {
     pub(crate) attachments: Vec<AttachmentRecord>,
     pub(crate) status: &'static str,
     pub(crate) status_reasons: Vec<&'static str>,
+}
+
+/// The source identifiers of a PST item (identity ADR, points 2 and 3): the node ID, unique
+/// within the PST, and the store's provider UID as lower-case hex. A folder also carries its
+/// entry ID (4 zero flag bytes, the provider UID, and the node ID little-endian, as lower-case
+/// hex). Additive draft fields: omitted for `.msg` input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct PstIdentity {
+    pub(crate) node_id: u32,
+    pub(crate) provider_uid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) entry_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,6 +299,9 @@ pub(crate) struct FolderMetadata {
     pub(crate) kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) directory: Option<NameRecord>,
+    /// Where a PST folder sits in its store (omitted for `.msg` input and for the archive root).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pst_identity: Option<PstIdentity>,
     pub(crate) children: Vec<ChildRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) root: Option<RootRecord>,
@@ -294,9 +313,16 @@ impl FolderMetadata {
             schema_version: SCHEMA_VERSION,
             kind: "folder",
             directory: Some(directory),
+            pst_identity: None,
             children,
             root: None,
         }
+    }
+
+    /// The same folder record carrying its PST identity (`None` leaves it as it was).
+    pub(crate) fn with_pst_identity(mut self, identity: Option<PstIdentity>) -> Self {
+        self.pst_identity = identity;
+        self
     }
 
     pub(crate) fn archive_root(root: RootRecord, children: Vec<ChildRecord>) -> Self {
@@ -304,6 +330,7 @@ impl FolderMetadata {
             schema_version: SCHEMA_VERSION,
             kind: KIND_ARCHIVE_ROOT,
             directory: None,
+            pst_identity: None,
             children,
             root: Some(root),
         }
@@ -894,6 +921,7 @@ pub(crate) fn message_metadata(
         schema_version: SCHEMA_VERSION,
         kind: "message",
         source_file: source_file.to_string(),
+        pst_identity: None,
         subject: content.subject.clone(),
         internet_message_id: content.internet_message_id.clone(),
         time_filetime: content.time_filetime,
@@ -1634,6 +1662,62 @@ mod tests {
         c.envelope.importance = Some(1);
         c.envelope.sensitivity = Some(0);
         assert_eq!(md(&c), "# S\n");
+    }
+
+    #[test]
+    fn a_msg_message_and_folder_record_no_pst_identity() {
+        let c = bare(Some("S"), None);
+        let json = to_json(&meta_for(&c, "S", 0)).unwrap();
+        assert!(!json.contains("pst_identity"));
+        let folder = FolderMetadata::folder(
+            NameRecord {
+                original: "F".to_string(),
+                adjustments: vec![],
+            },
+            vec![],
+        );
+        assert!(!to_json(&folder).unwrap().contains("pst_identity"));
+        // Setting `None` keeps it that way.
+        let same = folder.with_pst_identity(None);
+        assert!(!to_json(&same).unwrap().contains("pst_identity"));
+    }
+
+    #[test]
+    fn a_pst_identity_is_written_right_after_the_source_file_and_omits_an_absent_entry_id() {
+        let c = bare(Some("S"), None);
+        let mut meta = meta_for(&c, "S", 0);
+        meta.pst_identity = Some(PstIdentity {
+            node_id: 2097188,
+            provider_uid: "00112233445566778899aabbccddeeff".to_string(),
+            entry_id: None,
+        });
+        let json = to_json(&meta).unwrap();
+        let source = json.find("\"source_file\"").unwrap();
+        let identity = json.find("\"pst_identity\"").unwrap();
+        let subject = json.find("\"subject\"").unwrap();
+        assert!(source < identity && identity < subject);
+        assert!(json.contains("\"node_id\": 2097188"));
+        assert!(json.contains("\"provider_uid\": \"00112233445566778899aabbccddeeff\""));
+        assert!(!json.contains("entry_id"));
+    }
+
+    #[test]
+    fn a_folder_identity_carries_its_entry_id() {
+        let folder = FolderMetadata::folder(
+            NameRecord {
+                original: "F".to_string(),
+                adjustments: vec![],
+            },
+            vec![],
+        )
+        .with_pst_identity(Some(PstIdentity {
+            node_id: 8226,
+            provider_uid: "aa".repeat(16),
+            entry_id: Some("00".repeat(24)),
+        }));
+        let json = to_json(&folder).unwrap();
+        assert!(json.contains("\"node_id\": 8226"));
+        assert!(json.contains(&format!("\"entry_id\": \"{}\"", "00".repeat(24))));
     }
 
     #[test]

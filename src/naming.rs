@@ -21,6 +21,10 @@ pub(crate) enum NameFlag {
     InvisibleRemoved,
     Trimmed,
     DeviceNameMangled,
+    /// A tilde was replaced so the name cannot collide with a Windows 8.3 short name.
+    /// Attachment names like `Screen~1.jpg` (often inherited from short-name leakage) otherwise
+    /// collide with `Screen~1 (02).jpg` under the auto-generated short name `SCREEN~1.JPG`.
+    TildeReplaced,
     EmptyFallback,
     Truncated,
     Suffixed,
@@ -40,6 +44,7 @@ impl NameFlag {
             NameFlag::InvisibleRemoved => "invisible_removed",
             NameFlag::Trimmed => "trimmed",
             NameFlag::DeviceNameMangled => "device_name_mangled",
+            NameFlag::TildeReplaced => "tilde_replaced",
             NameFlag::EmptyFallback => "empty_fallback",
             NameFlag::Truncated => "truncated",
             NameFlag::Suffixed => "suffixed",
@@ -103,6 +108,14 @@ pub(crate) fn sanitize_component(raw: &str, fallback: &str) -> Sanitized {
             flags.insert(NameFlag::InvisibleRemoved);
         } else if c.is_control() {
             flags.insert(NameFlag::ControlRemoved);
+        } else if c == '~' {
+            // Legal on Windows, but names containing '~' participate in 8.3 short-name
+            // generation. A pair like `Screen~1.jpg` and `Screen~1 (02).jpg` can collapse to
+            // the same short name (`SCREEN~1.JPG`), so the later create overwrites the earlier
+            // one and read-back reports the first path as missing. Replace so collision-suffixed
+            // siblings remain distinct on disk.
+            flags.insert(NameFlag::TildeReplaced);
+            step.push('_');
         } else if is_reserved_char(c) {
             flags.insert(NameFlag::ReservedCharReplaced);
             step.push('_');
@@ -161,6 +174,9 @@ pub(crate) fn is_valid_component(name: &str) -> bool {
         return false;
     }
     if name.ends_with(' ') || name.ends_with('.') || name.contains("  ") {
+        return false;
+    }
+    if name.contains('~') {
         return false;
     }
     let bad = |c: char| {
@@ -421,6 +437,7 @@ mod tests {
             NameFlag::InvisibleRemoved,
             NameFlag::Trimmed,
             NameFlag::DeviceNameMangled,
+            NameFlag::TildeReplaced,
             NameFlag::EmptyFallback,
             NameFlag::Truncated,
             NameFlag::Suffixed,
@@ -512,6 +529,26 @@ mod tests {
         assert_eq!(san("CONSOLE"), "CONSOLE");
         let s = sanitize_component("NUL", "x");
         assert!(s.flags.contains(&NameFlag::DeviceNameMangled));
+    }
+
+    #[test]
+    fn tildes_are_replaced_so_short_name_collisions_cannot_erase_siblings() {
+        // The exact shape that lost files on Windows: a bare `~1` name and its (02) sibling
+        // were both staged, but the later create overwrote the earlier via the shared 8.3 name.
+        assert_eq!(san("Screen~1.jpg"), "Screen_1.jpg");
+        assert_eq!(san("202301~1.jpg"), "202301_1.jpg");
+        assert_eq!(san("202301~1 (02).jpg"), "202301_1 (02).jpg");
+        let s = sanitize_component("Screen~1.jpg", "x");
+        assert!(s.flags.contains(&NameFlag::TildeReplaced));
+        assert!(!is_valid_component("Screen~1.jpg"));
+        assert!(is_valid_component("Screen_1.jpg"));
+        // Collision assignment on the mangled forms stays distinct.
+        let items = [
+            item(1, "Screen_1", ".jpg", Some(1)),
+            item(2, "Screen_1", ".jpg", Some(2)),
+        ];
+        let r = assign_namespace(&items, &[]);
+        assert_eq!(names(&r), vec!["Screen_1.jpg", "Screen_1 (02).jpg"]);
     }
 
     #[test]
