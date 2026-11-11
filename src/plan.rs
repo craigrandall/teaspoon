@@ -148,6 +148,12 @@ fn message_natural(raw: Option<&str>) -> Sanitized {
 fn file_natural(raw: Option<&str>, position: usize) -> (Sanitized, String, String) {
     let fallback = format!("attachment-{position}");
     let mut s = sanitize_component(raw.unwrap_or(""), &fallback);
+    // The special-name test runs on the *sanitized* name. Since the tilde rule (2026-11-09)
+    // `sanitize_component` has already turned every `~` into `_`, so the `~$` case of
+    // `is_special_attachment_name` can no longer match here: `~$Budget.xlsx` becomes
+    // `_$Budget.xlsx` (flag `TildeReplaced`) instead of `_~$Budget.xlsx` (flag
+    // `SpecialNameProtected`). The protection is the same in effect; only the name and the flag
+    // differ. See ADRs/export-naming-collisions-and-path-budgets.md, amendment 2026-11-09.
     if is_special_attachment_name(&s.name) {
         s.name = format!("_{}", s.name);
         s.flags.insert(NameFlag::SpecialNameProtected);

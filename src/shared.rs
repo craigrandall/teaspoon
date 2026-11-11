@@ -38,11 +38,24 @@ thread_local! {
 /// failed join). This contains a panic; it does not contain a stack overflow, which aborts the
 /// process, so recursion on untrusted nesting has to be bounded before calling.
 ///
-/// Nesting is intentional and supported. Helpers such as [`decompress_rtf_bounded`] themselves
-/// call `run_contained`; an outer caller (for example the PST message open path) may also wrap
-/// a larger region. Only the outermost call on a thread acquires the mutex and replaces the
-/// global panic hook; inner calls simply run under the already-silent hook. Concurrent top-level
-/// callers on different threads still serialize via the mutex.
+/// Nesting on one thread is intentional and supported. Helpers such as
+/// [`decompress_rtf_bounded`] themselves call `run_contained`, and an outer caller may wrap a
+/// larger region around them: `PstSource::open_message` runs `read_message` inside
+/// `run_contained`, and `read_message` decompresses RTF through `decompress_rtf_bounded`. Only
+/// the outermost call on a thread acquires the mutex and replaces the global panic hook; inner
+/// calls run under the already-silent hook. Concurrent top-level callers on different threads
+/// still serialize via the mutex.
+///
+/// History (2026-11-09): this was a plain mutex, so that nesting waited for a lock its own
+/// thread already held. The first export of a PST with an RTF body hung for about 90 minutes.
+/// The depth counter is the fix; the nesting tests in `src/robustness_tests.rs` guard it, and
+/// they run under a watchdog because a regression would hang `cargo test` instead of failing it.
+///
+/// Limit: the depth is counted per thread, so nesting does not extend across threads. If `f`
+/// spawns a thread, that thread calls `run_contained`, and `f` waits for it, the new thread sees
+/// depth 0, waits for the mutex that `f`'s thread holds, and deadlocks. Today the one such spawn
+/// (`body::convert_html_isolated`) runs only `htmd::convert` on its worker, which never calls
+/// `run_contained`. Keep it that way, or contain the work on the calling thread instead.
 pub(crate) fn run_contained<T>(f: impl FnOnce() -> T) -> Option<T> {
     CONTAIN_DEPTH.with(|depth| {
         let current = depth.get();

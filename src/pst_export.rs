@@ -8,6 +8,12 @@
 //! `outlook-pst` for a message runs inside `run_contained` so a panic in the crate becomes an
 //! error instead of ending the run.
 //!
+//! Containment nests here: `read_message` runs inside `run_contained` and calls
+//! `decompress_rtf_bounded`, which uses `run_contained` too. That is safe only because
+//! `run_contained` is reentrant on one thread (`src/shared.rs`); with the earlier plain mutex the
+//! first export of a message with an RTF body deadlocked (2026-11-09). It does not extend across
+//! threads: never call `run_contained` from a thread that this code spawns and then waits for.
+//!
 //! What a message carries here (drop A): subject, Internet message ID, time, the body forms as
 //! the source stores them (plain text, native HTML as `PT_BINARY` only, decompressed RTF, the
 //! Internet code page), and a descriptor for each attachment. The envelope arrives in drop B
@@ -109,7 +115,9 @@ impl PstSource {
         })
     }
 
-    /// Opens the message whose node ID is `node_id`. The read runs inside `run_contained`.
+    /// Opens the message whose node ID is `node_id`. The read runs inside `run_contained`, and
+    /// the RTF decompression inside it nests another `run_contained` on the same thread (see the
+    /// module comment).
     pub(crate) fn open_message(
         &self,
         node_id: u64,

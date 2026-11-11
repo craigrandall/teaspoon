@@ -6,6 +6,10 @@
 //! These complement the unit tests next to each module; they are the cheap end of what a fuzzer
 //! would do (a fuzz target needs the crate split into a library and a binary).
 
+use std::io::Write as _;
+use std::sync::mpsc;
+use std::time::Duration;
+
 use proptest::prelude::*;
 
 use crate::body::{
@@ -60,6 +64,39 @@ fn markup_soup() -> impl Strategy<Value = String> {
 
 // ----- panic containment -----------------------------------------------------------------------
 
+/// How long a nesting test may run before the whole test process is ended (see [`must_finish`]).
+/// Generous: the tests take microseconds, but they can wait for the panic-hook mutex while other
+/// tests in the same process hold it.
+const NESTING_TEST_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Runs `body` and ends the test process, with a message on stderr, if it has not finished within
+/// [`NESTING_TEST_DEADLINE`].
+///
+/// Why the process and not only the test: a nested `run_contained` that deadlocks (the defect of
+/// 2026-11-09) leaves its thread holding `PANIC_HOOK_LOCK`, so every other test that calls
+/// `run_contained` blocks behind it and `cargo test` hangs without output, for hours on CI. A
+/// watchdog that failed only one test could not free the others. The message is written to the
+/// stderr handle directly because `eprintln!` output is captured per test and would be lost.
+fn must_finish<T>(name: &'static str, body: impl FnOnce() -> T) -> T {
+    let (done, finished) = mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        // A panic in `body` drops `done`, which wakes this receiver with `Disconnected`, so the
+        // watchdog ends quietly and the panic reaches the test harness as usual.
+        let outcome = finished.recv_timeout(NESTING_TEST_DEADLINE);
+        if outcome == Err(mpsc::RecvTimeoutError::Timeout) {
+            let seconds = NESTING_TEST_DEADLINE.as_secs();
+            let mut err = std::io::stderr();
+            let _ = writeln!(err, "test `{name}` did not finish in {seconds} s");
+            let _ = writeln!(err, "run_contained may not be reentrant");
+            std::process::exit(1);
+        }
+    });
+    let result = body();
+    let _ = done.send(());
+    let _ = watchdog.join();
+    result
+}
+
 #[test]
 fn a_contained_call_returns_its_value() {
     assert_eq!(run_contained(|| 41 + 1), Some(42));
@@ -75,6 +112,10 @@ fn a_panic_inside_a_contained_call_becomes_none() {
 
 #[test]
 fn nested_contained_calls_on_the_same_thread_succeed() {
+    must_finish("same-thread nesting", same_thread_nesting_body);
+}
+
+fn same_thread_nesting_body() {
     // The PST export path nests run_contained (open_message) around decompress_rtf_bounded,
     // which itself calls run_contained. Nesting must not deadlock.
     let outer = run_contained(|| {
@@ -91,6 +132,10 @@ fn nested_contained_calls_on_the_same_thread_succeed() {
 
 #[test]
 fn a_panic_in_an_inner_contained_call_is_contained_and_does_not_poison_the_outer() {
+    must_finish("inner panic", inner_panic_body);
+}
+
+fn inner_panic_body() {
     let outer = run_contained(|| {
         let inner = run_contained(|| -> i32 { panic!("expected: inner panic") });
         assert_eq!(inner, None);
@@ -104,6 +149,10 @@ fn a_panic_in_an_inner_contained_call_is_contained_and_does_not_poison_the_outer
 
 #[test]
 fn nested_decompress_rtf_bounded_under_outer_containment_does_not_deadlock() {
+    must_finish("nested decompression", nested_decompression_body);
+}
+
+fn nested_decompression_body() {
     // Exact shape of the PST export path: outer run_contained around a call that itself
     // enters run_contained via decompress_rtf_bounded. The crafted header is long enough
     // and declares a small output so the early rejects are skipped and the inner

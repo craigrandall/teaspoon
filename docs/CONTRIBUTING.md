@@ -43,10 +43,21 @@ file, a script, or a command line) and clearing it afterwards.
   off is counted. Code that can panic on corrupt input (a dependency that indexes without
   checking, say) is called through `shared::run_contained`, and compressed RTF only through
   `shared::decompress_rtf_bounded`. Recursion on untrusted nesting is bounded before it starts,
-  because a stack overflow cannot be caught.
-- **Deterministic output.** Two exports of the same input by the same build are byte-identical.
-  The root `folder.json` records the tool version, so a version change changes the archive's tree
-  hash: measure the hash after the version bump, not before.
+  because a stack overflow cannot be caught. `run_contained` is reentrant on one thread, so a
+  helper may call it inside a wider contained region (the PST message read does), but it does not
+  extend across threads: never call it from a thread that a contained call spawns and waits for,
+  because that thread would wait for a lock its parent holds, and the run would hang (the first PST
+  export did on 2026-11-09). A test that nests it runs under a watchdog (`must_finish` in
+  `src/robustness_tests.rs`), so a regression ends the test run instead of hanging it.
+- **Deterministic output.** Two exports of the same input by the same build, to output roots of
+  the same length, are byte-identical. The path budget is taken from the real root, so a root of a
+  different length can shorten a name differently and change the tree hash (naming ADR, root-length
+  note); compare exports at equal root lengths. The root `folder.json` records the tool version,
+  so a version change changes the archive's tree hash: measure the hash after the version bump,
+  not before.
+- **No `~` in an exported name.** Rule N3 replaces it, because Windows 8.3 short-name aliasing can
+  let one file replace another (naming ADR, amendment of 2026-11-09). A new path that builds a name
+  goes through `naming::sanitize_component`.
 - **Dependencies** must be licensed under permissive terms compatible with `MIT OR Apache-2.0`
   (no GPL, LGPL, or AGPL). A licence with an `AND` term, such as `(Apache-2.0 OR MIT) AND
   BSD-3-Clause`, must be met in full, so check every term and not only the first option. A new

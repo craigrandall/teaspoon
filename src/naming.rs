@@ -21,9 +21,13 @@ pub(crate) enum NameFlag {
     InvisibleRemoved,
     Trimmed,
     DeviceNameMangled,
-    /// A tilde was replaced so the name cannot collide with a Windows 8.3 short name.
-    /// Attachment names like `Screen~1.jpg` (often inherited from short-name leakage) otherwise
-    /// collide with `Screen~1 (02).jpg` under the auto-generated short name `SCREEN~1.JPG`.
+    /// A `~` was replaced by `_` (rule N3, amended 2026-11-09). Windows gives long names generated
+    /// 8.3 short names such as `SCREEN~1.JPG`, and a name that is itself a valid short name
+    /// (`Screen~1.jpg`) can be looked up through another file's generated one, so one file can
+    /// replace another. No name contains `~` after this rule, and every generated short name
+    /// does, so no name can equal one. The mechanism is inferred: it fits the observed loss and
+    /// the fix, and was not shown by an experiment. See
+    /// `ADRs/export-naming-collisions-and-path-budgets.md`.
     TildeReplaced,
     EmptyFallback,
     Truncated,
@@ -109,11 +113,15 @@ pub(crate) fn sanitize_component(raw: &str, fallback: &str) -> Sanitized {
         } else if c.is_control() {
             flags.insert(NameFlag::ControlRemoved);
         } else if c == '~' {
-            // Legal on Windows, but names containing '~' participate in 8.3 short-name
-            // generation. A pair like `Screen~1.jpg` and `Screen~1 (02).jpg` can collapse to
-            // the same short name (`SCREEN~1.JPG`), so the later create overwrites the earlier
-            // one and read-back reports the first path as missing. Replace so collision-suffixed
-            // siblings remain distinct on disk.
+            // Rule N3 (amended 2026-11-09). Legal on Windows, but a `~` can make a name equal to a
+            // generated 8.3 short name. Observed on the tester PST: `Screen~1.jpg` and
+            // `Screen~1 (02).jpg` (and a `202301~1` pair) were planned as distinct files, yet the
+            // (02) file was missing at read-back after the first export and appeared only on a
+            // second one. The likely cause is that the bare name resolves to the short name
+            // `SCREEN~1.JPG` that Windows gave the (02) file, so the rename replaces it. Replacing
+            // `~` in every name (folders, subjects, attachments, both inputs) closes the whole
+            // class without Windows' short-name rules, which vary by volume. The name changes, so
+            // the original stays in the metadata and the change is flagged `tilde_replaced`.
             flags.insert(NameFlag::TildeReplaced);
             step.push('_');
         } else if is_reserved_char(c) {
@@ -197,6 +205,11 @@ pub(crate) fn is_valid_component(name: &str) -> bool {
 }
 
 /// Rule N6: names that Explorer or other tools treat specially when found in a folder.
+///
+/// The planner calls this on a name that `sanitize_component` has already changed, and since the
+/// tilde rule (2026-11-09) that name has no `~`, so the `~$` test below can no longer match
+/// there: a lock-file name such as `~$x.docx` is exported as `_$x.docx`. The test stays as a
+/// guard for any caller that skips sanitizing.
 pub(crate) fn is_special_attachment_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(lower.as_str(), "desktop.ini" | "thumbs.db" | "autorun.inf") || lower.starts_with("~$")
@@ -552,6 +565,15 @@ mod tests {
     }
 
     #[test]
+    fn a_word_lock_file_name_loses_its_tilde_before_the_special_name_check() {
+        // `~$Budget.xlsx` carries the tool-special `~$` marker. The tilde rule runs first, so the
+        // planner sees `_$Budget.xlsx`, which is no longer special (owner-accepted, 2026-11-09).
+        assert_eq!(san("~$Budget.xlsx"), "_$Budget.xlsx");
+        assert!(!is_special_attachment_name("_$Budget.xlsx"));
+        assert!(is_special_attachment_name("~$Budget.xlsx"));
+    }
+
+    #[test]
     fn unicode_is_normalized_to_nfc() {
         let decomposed = "e\u{0301}";
         assert_eq!(san(decomposed), "\u{00E9}");
@@ -867,6 +889,8 @@ mod tests {
                 '|',
                 '?',
                 '*',
+                '~',
+                '$',
                 '/',
                 '\\',
                 '.',
