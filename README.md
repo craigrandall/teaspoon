@@ -274,7 +274,7 @@ Since v0.1.20 the code is split into modules (every item is `pub(crate)` and eac
 33. **`export_source.rs`** (v0.1.41) - the exporter's two source seams: `ExportSources` (the `.msg` file map or the open PST), `AttachmentReader` (an enum over the `.msg` reader and the PST reader), and `DataOpen`.
 34. **`spike_pst_attachments.rs`** (v0.1.41, temporary) - `--spike-attachments`: counts, and an optional per-attachment hash file for the tester (refused for a PST over 256 MiB).
 
-External crates: `outlook-pst` (PST), `cfb` (generic MS-CFB container), `compressed-rtf` (MS-OXRTFCP), `msg_parser` (oracle for `--verify` and `--verify-envelope` only), `htmd` (HTML to Markdown, pinned `=0.5.4`), `unicode-normalization` (naming), `serde` and `serde_json` (the archive's JSON), `sha2` (SHA-256 for the source, tree, and kept-file hashes), `clap`, `anyhow`; `proptest` for tests.
+External crates: `outlook-pst` (PST, pinned `=1.2.0`), `cfb` (generic MS-CFB container), `compressed-rtf` (MS-OXRTFCP), `msg_parser` (oracle for `--verify` and `--verify-envelope` only), `htmd` (HTML to Markdown, pinned `=0.5.4`), `unicode-normalization` (naming), `serde` and `serde_json` (the archive's JSON), `sha2` (SHA-256 for the source, tree, and kept-file hashes), `clap`, `anyhow`; `proptest` for tests.
 
 ## Privacy design rules
 
