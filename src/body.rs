@@ -86,8 +86,9 @@ pub(crate) struct Selection {
     pub(crate) rtf_kind: Option<RtfKind>,
     /// A non-empty RTF existed and could not be decompressed (recorded as loss).
     pub(crate) rtf_decompression_failed: bool,
-    /// Bytes replaced by U+FFFD while reading the selected HTML (a code page that is not
-    /// implemented, invalid UTF-8, or the de-encapsulation's own count).
+    /// Bytes replaced by U+FFFD while reading the selected HTML (bytes with no mapping under an
+    /// implemented code page, a code page that is not implemented, invalid UTF-8, or the
+    /// de-encapsulation's own count).
     pub(crate) undecodable_bytes: u64,
 }
 
@@ -96,10 +97,13 @@ fn nonblank(text: &str) -> bool {
 }
 
 /// Native HTML bytes as UTF-8 text and the number of bytes replaced by U+FFFD. The code page is
-/// `PidTagInternetCodepage`; absent, zero, or 65001 means UTF-8. A code page that
-/// `oxmsg_decode` does not implement gets its non-ASCII bytes replaced and counted, never
-/// guessed. A leading byte order mark is dropped. Not yet confirmed on real data: the corpus has
-/// no native HTML.
+/// `PidTagInternetCodepage`; absent, zero, or 65001 means UTF-8. Under a code page that
+/// `oxmsg_decode` implements, the bytes it leaves undefined (Windows-1252's five, every
+/// non-ASCII byte under US-ASCII) are replaced and counted as `decode_string8_with_codepage`
+/// reports them. A code page that `oxmsg_decode` does not implement gets its non-ASCII bytes
+/// replaced and counted, never guessed. A leading byte order mark is dropped. Exercised on real
+/// data by the `crkb.pst` export (6,312 native HTML bodies); the `.msg` corpus has no native
+/// HTML.
 pub(crate) fn decode_native_html(bytes: &[u8], code_page: Option<u32>) -> (String, u64) {
     let (text, replaced) = match code_page {
         None | Some(0) | Some(65001) => match std::str::from_utf8(bytes) {
@@ -111,8 +115,8 @@ pub(crate) fn decode_native_html(bytes: &[u8], code_page: Option<u32>) -> (Strin
             }
         },
         Some(code_page) => match decode_string8_with_codepage(bytes, code_page) {
-            String8Decoded::Decoded { text, .. }
-            | String8Decoded::AsciiUnderUnsupportedCodepage { text } => (text, 0),
+            String8Decoded::Decoded { text, replaced } => (text, u64::from(replaced)),
+            String8Decoded::AsciiUnderUnsupportedCodepage { text } => (text, 0),
             String8Decoded::UnsupportedCodepage => {
                 let mut text = String::with_capacity(bytes.len());
                 let mut replaced = 0u64;
@@ -993,6 +997,25 @@ mod tests {
         assert_eq!(
             decode_native_html(b"abc", Some(1251)),
             ("abc".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn undefined_bytes_under_an_implemented_code_page_are_replaced_and_counted() {
+        // Windows-1252 leaves 0x81 and 0x8D undefined; 0x80 is the euro sign, 0xE9 an e acute.
+        assert_eq!(
+            decode_native_html(b"a\x81b\x8dc \x80 \xe9", Some(1252)),
+            ("a\u{FFFD}b\u{FFFD}c \u{20AC} \u{e9}".to_string(), 2)
+        );
+        // US-ASCII has no upper half: every non-ASCII byte is replaced and counted.
+        assert_eq!(
+            decode_native_html(b"it\x92s", Some(20127)),
+            ("it\u{FFFD}s".to_string(), 1)
+        );
+        // ISO-8859-1 has no undefined bytes.
+        assert_eq!(
+            decode_native_html(b"a\x81b", Some(28591)),
+            ("a\u{81}b".to_string(), 0)
         );
     }
 
