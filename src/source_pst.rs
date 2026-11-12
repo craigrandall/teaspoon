@@ -32,7 +32,9 @@ use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
 use crate::pst::{column_index, read_i32_at};
 use crate::pst_password::{PasswordOutcome, enforce, supplied_from_env};
 use crate::pst_text::{TextReader, integer32, read_text_at};
-use crate::shared::{ATTACH_METHOD_EMBEDDED_MESSAGE, MAX_FOLDER_DEPTH, PROP_ATTACH_METHOD};
+use crate::shared::{
+    ATTACH_METHOD_EMBEDDED_MESSAGE, MAX_FOLDER_DEPTH, PROP_ATTACH_METHOD, contained, run_contained,
+};
 
 /// PidTagEntryId, injected into every folder's properties by the crate.
 const PROP_ENTRY_ID: u16 = 0x0FFF;
@@ -50,11 +52,14 @@ struct PstBuilder {
 
 /// Builds the source tree for the IPM subtree of a PST (either format, through the dyn API).
 pub(crate) fn build_pst_tree(path: &Path) -> Result<(SourceFolder, SourceCensus)> {
-    let store = outlook_pst::open_store(path).context("failed to open PST")?;
+    let opened = contained(|| outlook_pst::open_store(path), "opening the PST")?;
+    let store = opened.context("failed to open PST")?;
 
     // Refuse a password-protected PST unless the password in TSP_PST_PASSWORD verifies
     // (MS-PST 2.4.3.3). A refusal is an early `?` return.
-    let outcome = enforce(store.as_ref(), supplied_from_env()?)?;
+    let supplied = supplied_from_env()?;
+    let check = || enforce(store.as_ref(), supplied);
+    let outcome = contained(check, "checking the PST password")??;
     build_pst_tree_from(store.as_ref(), outcome)
 }
 
@@ -69,9 +74,9 @@ pub(crate) fn build_pst_tree_from(
         .properties()
         .ipm_sub_tree_entry_id()
         .context("PST has no IPM subtree entry ID")?;
-    let ipm = store
-        .open_folder(&ipm_id)
-        .context("failed to open IPM subtree")?;
+    let open_ipm = || store.open_folder(&ipm_id);
+    let ipm_result = contained(open_ipm, "opening the IPM subtree")?;
+    let ipm = ipm_result.context("failed to open IPM subtree")?;
 
     let mut builder = PstBuilder {
         census: SourceCensus {
@@ -82,7 +87,8 @@ pub(crate) fn build_pst_tree_from(
         next_attachment_id: 0,
         text: TextReader::new(),
     };
-    let root = builder.folder(store, ipm.as_ref(), 0);
+    let walk = || builder.folder(store, ipm.as_ref(), 0);
+    let root = contained(walk, "planning the folder tree")?;
     builder.census.string8 = builder.text.stats.clone();
     Ok((root, builder.census))
 }
@@ -135,11 +141,15 @@ impl PstBuilder {
                         continue;
                     }
                 };
-                match store.open_message(&entry_id, None) {
-                    Ok(message) => {
-                        messages.push(self.message(message.as_ref(), u64::from(message_nid)))
-                    }
-                    Err(_) => self.census.open_errors += 1,
+                // A panic in the crate while opening or reading the message is contained and
+                // counted like any other open error.
+                let planned = run_contained(|| {
+                    let message = store.open_message(&entry_id, None).ok()?;
+                    Some(self.message(message.as_ref(), u64::from(message_nid)))
+                });
+                match planned {
+                    Some(Some(message)) => messages.push(message),
+                    Some(None) | None => self.census.open_errors += 1,
                 }
             }
         }
@@ -165,9 +175,15 @@ impl PstBuilder {
                         continue;
                     }
                 };
-                match store.open_folder(&entry_id) {
-                    Ok(child) => folders.push(self.folder(store, child.as_ref(), depth + 1)),
-                    Err(_) => self.census.open_errors += 1,
+                // Likewise for a subfolder: one that cannot be opened, or whose reading panics,
+                // is counted and left out.
+                let planned = run_contained(|| {
+                    let child = store.open_folder(&entry_id).ok()?;
+                    Some(self.folder(store, child.as_ref(), depth + 1))
+                });
+                match planned {
+                    Some(Some(child)) => folders.push(child),
+                    Some(None) | None => self.census.open_errors += 1,
                 }
             }
         }

@@ -19,7 +19,7 @@ use crate::shared::{
     PROP_ATTACH_CONTENT_ID, PROP_ATTACH_METHOD, PROP_ATTACH_SIZE, PROP_BODY, PROP_BODY_HTML,
     PROP_RECIPIENT_TYPE, PROP_RTF_COMPRESSED, RECIPIENT_TYPE_BCC, RECIPIENT_TYPE_CC,
     RECIPIENT_TYPE_ORIG, RECIPIENT_TYPE_TO, RtfHtmlCheck, ZeroByteStats,
-    check_compressed_rtf_bytes,
+    check_compressed_rtf_bytes, contained, run_contained,
 };
 
 // =============================================================================
@@ -27,10 +27,12 @@ use crate::shared::{
 // =============================================================================
 
 pub(crate) fn run_pst_diagnostic(path: &Path) -> Result<()> {
-    let store = outlook_pst::open_store(path).context("failed to open PST")?;
+    let opened = contained(|| outlook_pst::open_store(path), "opening the PST")?;
+    let store = opened.context("failed to open PST")?;
 
-    let outcome =
-        crate::pst_password::enforce(store.as_ref(), crate::pst_password::supplied_from_env()?)?;
+    let supplied = crate::pst_password::supplied_from_env()?;
+    let check = || crate::pst_password::enforce(store.as_ref(), supplied);
+    let outcome = contained(check, "checking the PST password")??;
     println!("pst_password={}", outcome.key());
 
     // Deliberately do not print the input path or PST display name. Both can
@@ -41,14 +43,15 @@ pub(crate) fn run_pst_diagnostic(path: &Path) -> Result<()> {
         .ipm_sub_tree_entry_id()
         .context("PST has no IPM subtree entry ID")?;
 
-    let ipm = store
-        .open_folder(&ipm_id)
-        .context("failed to open IPM subtree")?;
+    let open_ipm = || store.open_folder(&ipm_id);
+    let ipm_result = contained(open_ipm, "opening the IPM subtree")?;
+    let ipm = ipm_result.context("failed to open IPM subtree")?;
 
     println!("ipm_subtree=ok");
 
     let mut totals = PstTotals::default();
-    walk_folder(store.as_ref(), ipm.as_ref(), &mut totals)?;
+    let walk = || walk_folder(store.as_ref(), ipm.as_ref(), &mut totals);
+    contained(walk, "walking the folder tree")??;
 
     print_pst_report(&totals);
 
@@ -241,9 +244,15 @@ fn walk_folder_at(
                 }
             };
 
-            match store.open_message(&entry_id, None) {
-                Ok(message) => inspect_message(message.as_ref(), totals),
-                Err(_) => totals.message_open_errors += 1,
+            // A panic in the crate while opening or reading the message is contained and
+            // counted like any other open error.
+            let inspected = run_contained(|| {
+                let message = store.open_message(&entry_id, None).ok()?;
+                inspect_message(message.as_ref(), totals);
+                Some(())
+            });
+            if inspected.flatten().is_none() {
+                totals.message_open_errors += 1;
             }
         }
         // Folder names, message subjects, entry IDs, and other property values
@@ -266,9 +275,14 @@ fn walk_folder_at(
                 }
             };
 
-            match store.open_folder(&entry_id) {
-                Ok(child) => walk_folder_at(store, child.as_ref(), totals, depth + 1)?,
-                Err(_) => totals.folder_open_errors += 1,
+            // Likewise for a subfolder.
+            let walked = run_contained(|| {
+                let child = store.open_folder(&entry_id).ok()?;
+                Some(walk_folder_at(store, child.as_ref(), totals, depth + 1))
+            });
+            match walked {
+                Some(Some(result)) => result?,
+                Some(None) | None => totals.folder_open_errors += 1,
             }
         }
     }

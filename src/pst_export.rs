@@ -5,8 +5,9 @@
 //! at a time for staging, and gives each message a [`PstAttachments`] that streams its
 //! by-value attachments from the crate's buffer. An ANSI PST is refused (no ANSI fixture), a
 //! password-protected PST is refused unless its password verifies, and every call into
-//! `outlook-pst` for a message runs inside `run_contained` so a panic in the crate becomes an
-//! error instead of ending the run.
+//! `outlook-pst` runs inside `run_contained` (a message or an attachment directly; the open, the
+//! store read, the password check, and the planner's walk through `contained`), so a panic in
+//! the crate becomes an error instead of ending the run.
 //!
 //! Containment nests here: `read_message` runs inside `run_contained` and calls
 //! `decompress_rtf_bounded`, which uses `run_contained` too. That is safe only because
@@ -52,7 +53,7 @@ use crate::pst_password::{PasswordOutcome, enforce, supplied_from_env};
 use crate::pst_text::{TextReader, TextStats, integer32};
 use crate::shared::{
     ATTACH_METHOD_BY_VALUE, PROP_ATTACH_CONTENT_ID, PROP_BODY, PROP_BODY_HTML, PROP_RTF_COMPRESSED,
-    decompress_rtf_bounded, run_contained,
+    contained, decompress_rtf_bounded, run_contained,
 };
 use crate::source_pst::{build_pst_tree_from, message_time};
 use crate::stage::hex;
@@ -86,8 +87,11 @@ impl PstSource {
     /// that ends the run with exit status 2 before anything is staged). An ANSI PST is refused.
     pub(crate) fn open(path: &Path) -> Result<(PstSource, PasswordOutcome)> {
         let pst = open_unicode_pst(path)?;
-        let store = UnicodeStore::read(Rc::new(pst)).context("failed to read the PST store")?;
-        let outcome = enforce(&*store, supplied_from_env()?)?;
+        let read = contained(|| UnicodeStore::read(Rc::new(pst)), "reading the store")?;
+        let store = read.context("failed to read the PST store")?;
+        let supplied = supplied_from_env()?;
+        let check = || enforce(&*store, supplied);
+        let outcome = contained(check, "checking the PST password")??;
         Ok((PstSource { store }, outcome))
     }
 

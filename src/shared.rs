@@ -81,6 +81,16 @@ pub(crate) fn run_contained<T>(f: impl FnOnce() -> T) -> Option<T> {
     })
 }
 
+/// [`run_contained`] for a single call whose caller can only fail as a whole (opening a PST,
+/// reading its store, checking its password, planning its folder tree): a panic inside
+/// `outlook-pst` becomes an error that names the step. The message is fixed text and never
+/// carries the input path or any content. Per-item reads (one message, one attachment, one
+/// folder) use `run_contained` directly and count a panic as a read error instead.
+pub(crate) fn contained<T>(f: impl FnOnce() -> T, what: &str) -> anyhow::Result<T> {
+    run_contained(f)
+        .ok_or_else(|| anyhow::anyhow!("a panic in the PST reader was contained while {what}"))
+}
+
 // =============================================================================
 // Shared: MS-OXRTFEX "RTF containing encapsulated HTML" detection
 // =============================================================================
@@ -325,5 +335,25 @@ impl ZeroByteStats {
         } else {
             self.other_method += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contained_passes_a_value_through() {
+        assert_eq!(contained(|| 7, "doing a thing").unwrap(), 7);
+    }
+
+    #[test]
+    fn contained_turns_a_panic_into_an_error_that_names_the_step() {
+        let failing = || -> u32 { panic!("expected: this panic is contained") };
+        let error = contained(failing, "doing a thing").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "a panic in the PST reader was contained while doing a thing"
+        );
     }
 }

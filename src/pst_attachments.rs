@@ -28,7 +28,7 @@ use crate::shared::{
     ATTACH_METHOD_BY_REFERENCE, ATTACH_METHOD_BY_REFERENCE_ONLY,
     ATTACH_METHOD_BY_REFERENCE_RESOLVE, ATTACH_METHOD_BY_VALUE, ATTACH_METHOD_EMBEDDED_MESSAGE,
     ATTACH_METHOD_NONE, ATTACH_METHOD_OLE, PROP_ATTACH_CONTENT_ID, PROP_ATTACH_METHOD,
-    PROP_ATTACH_SIZE,
+    PROP_ATTACH_SIZE, contained, run_contained,
 };
 
 /// One row of a message's attachment table, as far as it could be read.
@@ -114,10 +114,10 @@ pub(crate) fn open_attachment(
 /// Opens `path` as a Unicode PST. An ANSI-format PST is told apart from an unreadable file and
 /// refused with its own message (there is no ANSI fixture, so there is no ANSI path).
 pub(crate) fn open_unicode_pst(path: &Path) -> Result<UnicodePstFile> {
-    match UnicodePstFile::open(path) {
+    match contained(|| UnicodePstFile::open(path), "opening the PST")? {
         Ok(pst) => Ok(pst),
         Err(err) => {
-            if AnsiPstFile::open(path).is_ok() {
+            if run_contained(|| AnsiPstFile::open(path).is_ok()).unwrap_or(false) {
                 anyhow::bail!(
                     "ANSI-format PST: only Unicode PSTs are supported here (there is no ANSI fixture yet)"
                 );
