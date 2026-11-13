@@ -8,7 +8,7 @@ informed: none
 
 # Decode legacy code pages with `encoding_rs`
 
-Status history: proposed 2026-10-30; accepted 2026-10-31.
+Status history: proposed 2026-10-30; accepted 2026-10-31. Evidence update 2026-11-11 (no change to the decision; see the end of the Context).
 
 ## Context and Problem Statement
 
@@ -27,6 +27,8 @@ earlier position was to add a code page crate only if a second producer's fixtur
 than the one byte seen. On 2026-10-30 the owner decided to adopt `encoding_rs` as M4i groundwork.
 The need is therefore anticipated (ANSI PSTs), not yet demonstrated by a fixture: the demonstrated
 cost of not adopting is one byte. This ADR records how it is adopted.
+
+Update, 2026-11-11: the cost is now demonstrated on a second fixture, for RTF text and not for `PT_STRING8`. In the export of `crkb.pst`, 29 of 6,508 messages (0.45%) carry RTF text in another code page: 26 of their RTF files declare Windows-1256 (Arabic), so the de-encapsulation replaced 562 non-ASCII bytes with U+FFFD and counted them (`undecodable_bytes_replaced`). The received RTF is kept as `body.rtf`, so the archive loses nothing, but `message.md` and the recovered `body.html` are wrong where those bytes were non-ASCII. Three of the 29 declare 1252 and are not explained. `crkb.pst` holds no `PT_STRING8` value, so the need for ANSI PSTs is still anticipated. The decision stands; the plan treats the timing as an open decision (plan decision 16).
 
 ## Decision Drivers
 
@@ -136,6 +138,7 @@ the recommendation in item 6 for 28599 and similar pages.
 4. The property test of item 8, and release build times with and without the dependency.
 5. An ANSI PST fixture read by the owner, since no oracle exists for PST text. This is the check
    that shows whether the anticipated need was real.
+6. On `crkb.pst` (added 2026-11-11), the 29 messages: `export_body_loss_undecodable_bytes_replaced` falls from 562 to the bytes of code pages that are still unmapped, the 26 Windows-1256 files decode, and the export differs from the previous one in those messages' files and in the version string of the root `folder.json` only (per-file hashes compared); the 3 files that declare 1252 are looked at separately.
 
 ## Pros and Cons of the Options
 

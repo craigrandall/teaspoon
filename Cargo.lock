@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "teaspoon"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "anyhow",
  "cfb",

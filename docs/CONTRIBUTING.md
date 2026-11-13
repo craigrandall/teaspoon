@@ -41,7 +41,11 @@ file, a script, or a command line) and clearing it afterwards.
 - **Malformed input must not crash the tool.** No panic, and no recursion or allocation without a
   bound, on a hostile or corrupt file. Every such bound is a named constant, and what a bound cuts
   off is counted. Code that can panic on corrupt input (a dependency that indexes without
-  checking, say) is called through `shared::run_contained`, and compressed RTF only through
+  checking, say) is called through `shared::run_contained`, or through `shared::contained` for a
+  single call whose caller can only fail as a whole (a panic becomes an error that names the step,
+  never a path). Every call into `outlook-pst` goes through one of the two (the temporary spike
+  module is the exception), and a panic in one item (a message, a subfolder) is counted as an open
+  error while the walk continues. Compressed RTF goes only through
   `shared::decompress_rtf_bounded`. Recursion on untrusted nesting is bounded before it starts,
   because a stack overflow cannot be caught. `run_contained` is reentrant on one thread, so a
   helper may call it inside a wider contained region (the PST message read does), but it does not
@@ -63,8 +67,9 @@ file, a script, or a command line) and clearing it afterwards.
   BSD-3-Clause`, must be met in full, so check every term and not only the first option. A new
   dependency needs an ADR or a note in one, which records its version and licence, what it adds
   to `cargo tree`, and what it does on hostile input (read its source). A dependency whose output
-  becomes archive content (the HTML converter, a text decoder) is pinned with `=`, because a new
-  version can change the archive's bytes.
+  becomes archive content (the HTML converter, a text decoder, the PST reader) is pinned with `=`, because a new
+  version can change the archive's bytes. `compressed-rtf` (its output is written as `body.rtf`)
+  and `cfb` (attachment bytes) fall under the same rule and are not pinned yet (plan decision 18).
 - **One definition per fact.** A name, a limit, or a number that the code or the archive format
   depends on is defined once and derived everywhere else (see `src/layout.rs`).
 

@@ -8,7 +8,7 @@ informed: n/a — single-developer project
 
 # Export naming, collisions, and path budgets
 
-*Status history: proposed 2026-10-04 (drafted from the M4a rules, the M4b-2 implementation, and the M4b-3 / M4c results); accepted 2026-10-04 by the owner. Acceptance records the decision; the items listed under Confirmation as not yet confirmed remain open. Amended 2026-11-09 (release v0.1.41, accepted by the owner): `~` is replaced by `_` in every name, and the determinism claim is qualified by the output root's length (see the amendment below).*
+*Status history: proposed 2026-10-04 (drafted from the M4a rules, the M4b-2 implementation, and the M4b-3 / M4c results); accepted 2026-10-04 by the owner. Acceptance records the decision; the items listed under Confirmation as not yet confirmed remain open. Amended 2026-11-09 (release v0.1.41, accepted by the owner): `~` is replaced by `_` in every name, and the determinism claim is qualified by the output root's length (see the amendment below). Evidence updated 2026-11-11 from the export of `crkb.pst` (no change to the decision).*
 
 ## Context and Problem Statement
 
@@ -97,7 +97,11 @@ Rule N3 replaces `~` with `_` and flags the name `tilde_replaced`, in every name
 * Same fixture, same build apart from this change: the first export had 2 read-back mismatches and a repeat export wrote the 2 files; afterwards a fresh export of the same PST has 0 mismatches, a repeat export writes nothing, and the tree hash is stable (`53ab025c52dd5a9383ae0f08fe4494e1eee8baba73c7e0cd214beca3a4f386e5`).
 * The rule fired in 2 `metadata.json` files of the tester export (they contain `tilde_replaced`) and in none of the `.msg` corpus export (counts-only check, 2026-11-09), so the `.msg` archive differs from v0.1.40's only by the version string recorded in the root marker (consistent with identical counts; not shown by building the v0.1.40 sources at 0.1.41).
 * Tests: the names of the bug through `sanitize_component` and collision assignment, `is_valid_component`, idempotence with `~` in the property-test generator, and the `~$` consequence.
-* Not confirmed: the short-name mechanism itself; other file systems (FAT, exFAT, network shares); the large PST (`crkb.pst` is expected to hold many names like `image~1.png` and has not been exported).
+* Not confirmed: the short-name mechanism itself; other file systems (FAT, exFAT, network shares). The large PST has since been exported (see "Update, 2026-11-11" below).
+
+### Update, 2026-11-11: the large PST
+
+`crkb.pst` (6,508 messages, 7,016 attachments) was exported with the code of release v0.1.41 to `C:\o.crkb` and to `C:\p.crkb` (both 14 units). The rule fired in 663 of the 6,508 `metadata.json` files (`tilde_replaced`, a count of files), no name on disk contains `~`, and read-back found 0 mismatches in a fresh export, a repeat, and a fresh export at the second root. The tree hash is the same at both roots (`a34f1d6cb2e7703df16fa6f929fbb09e39f48ae6a85004763afa06e517c4ac93`, roots of the same length), across 791 collision groups (the tester has 2). This is evidence for the amendment on real data. It is not evidence for the mechanism: the code before the amendment was not run on this PST, so the failure the rule prevents was not reproduced, and the short-name experiment (`dir /x`, `fsutil 8dot3name query`) has not been run; the plan recommends skipping it unless a mismatch appears.
 
 ### Root length and reproducibility
 

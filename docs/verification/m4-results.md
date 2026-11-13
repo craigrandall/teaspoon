@@ -1082,4 +1082,93 @@ Corpus export (34 messages), run twice into the same directory: 217 files writte
 - Tilde rule: confirmed in `naming.rs` and `plan.rs`; the effect (2 mismatches to 0 on one fixture and build apart from this change) is measured and the mechanism is inferred. Side effect found: the planner sanitizes before the special-name test, so the `~$` case of rule N6 no longer matches (`~$x` exports as `_$x`).
 - Not verified: the 8.3 mechanism; the rule on other volumes; the large PST.
 
-**What the tester export shows and does not.** Shown: a complete, read-back-clean, idempotent export of a 60-message PST at one root, with by-value attachments streamed and the unreadable ones recorded; the longest path on disk equals the plan's; the two defects fixed by effect. Not shown: `crkb.pst` (6,508 messages, 7,016 attachments, peak memory; many names like `image~1.png` expected); the PST envelope (drop B); non-ASCII `String8` text (none in the tester); cross-directory determinism at equal root lengths (a fresh run is still to be made); whether the null by-value attachment is empty in Outlook; any independent reader of the exported tree.
+**What the tester export shows and does not.** Shown: a complete, read-back-clean, idempotent export of a 60-message PST at one root, with by-value attachments streamed and the unreadable ones recorded; the longest path on disk equals the plan's; the two defects fixed by effect. Not shown: `crkb.pst` (6,508 messages, 7,016 attachments, peak memory; many names like `image~1.png` expected); the PST envelope (drop B); non-ASCII `String8` text (none in the tester); cross-directory determinism at equal root lengths (a fresh run is still to be made); whether the null by-value attachment is empty in Outlook; any independent reader of the exported tree. (Update 2026-11-11: the `crkb.pst` export and the cross-directory determinism check at equal root lengths have since been run; see the next two sections.)
+
+## M4i drop A on `crkb.pst` (2026-11-11, code of release v0.1.41)
+
+**What was run.** The owner's run on the tagged commit `15773f3` (0 dirty files, `Cargo.toml` 0.1.41, release build, Windows) against the golden `crkb.pst` (6,504,743,936 bytes, protected; the password in `TSP_PST_PASSWORD`), into `C:\o.crkb` and `C:\p.crkb` (both 14 units). A PowerShell helper polled the process every 0.5 s for peak working set and peak paged memory (a spike shorter than that could be missed); standard output went to files. Everything below is a count, a size, or a status: no password, name, or subject appears.
+
+| Run | Exit | Elapsed | Peak working set / paged | Written / unchanged | `export_tree_sha256` |
+|---|---|---|---|---|---|
+| `--dry-run` (`--out C:\o.crkb`) | 0 | 6.3 s | 36 MB / 32 MB | not applicable | not applicable |
+| export 1, fresh `C:\o.crkb` | 0 | 337.5 s | 106 MB / 102 MB | 28,222 / 0 | `a34f1d6cb2e7703df16fa6f929fbb09e39f48ae6a85004763afa06e517c4ac93` |
+| export 2, repeat into `C:\o.crkb` | 0 | 919.2 s | 107 MB / 103 MB | 0 / 28,222 | identical |
+| export 3, fresh `C:\p.crkb` (equal-length root) | 0 | 225.2 s | 107 MB / 103 MB | 28,222 / 0 | identical |
+
+**The refreshed dry-run census (0.1.41).** 13,559 entries, 35 folders, 6,508 messages, 7,016 attachment files, 0 embedded messages; names sanitized 6,523, truncated 33, fallback 16; 791 collision groups (largest 33); 0 gate violations; longest path 253 of 259, longest relative path 239, longest component 193, depth 8, at most 1,606 entries in one directory. Source side: 0 open errors; subject markers stripped 6,508; attachments without a name 16; Internet message ID missing 3 and duplicated 696; associated items skipped 21; attachment tables with a long-name column 464; folder identity (node ID, entry ID, unavailable) 36 / 36 / 0; `source_string8_values=0`. The planned counts equal the export's, and the baseline's 13,559 entries and 791 collision groups were unchanged by the `~` rule.
+
+**The export's counts** (the same in all three exports except the target state, the preflight, and written/unchanged; `export_target_state` was `absent`, `owned`, `absent`):
+
+| Key | Value |
+|---|---|
+| `export_attachments_extracted` / `_not_extracted` / `_failed` | 7,016 / 0 / 0 (5,991,077,209 bytes, equal to the spike's total) |
+| `export_embedded_messages_extracted` / `_not_extracted` | 0 / 0 |
+| `export_body_source_native_html` / `_rtf_html` / `_plain_text` / `_none` | 6,312 / 191 / 5 / 0 |
+| `export_bodies_plain_present` / `_empty` / `_absent` | 1,458 / 0 / 5,050 |
+| `export_body_files_kept_html` / `_rtf` / `_txt` | 6,503 / 193 / 1,458 |
+| `export_body_loss_tables_flattened` | 36,318 |
+| `export_body_loss_rtf_not_converted` | 2 |
+| `export_body_loss_undecodable_bytes_replaced` | 562 |
+| `export_body_loss_invisible_padding_removed` | 157 |
+| `export_body_loss_html_conversion_failed` / `_rtf_decompression_failed` | 0 / 0 |
+| `export_body_cid_references_total` / `export_cid_rewritten` / unresolved (three reasons) | 2,973 / 2,973 / 0 / 0 / 0 |
+| `export_attachments_inline` | 2,630 |
+| `export_pst_string8_values` / `_non_ascii` / `_replaced_bytes` / `_unsupported` | 0 / 0 / 0 / 0 |
+| `export_pst_html_not_binary` / `_rtf_not_binary` | 0 / 0 |
+| `export_readback_mismatches` | 0 |
+
+**Reconciliation.** 28,222 files = 36 folder files + 2 x 6,508 message files + 7,016 attachments + 8,154 body files (6,503 + 193 + 1,458). The 13,559 planned entries = 35 folders + 6,508 messages + 7,016 attachment files. Body sources 6,312 + 191 + 5 = 6,508, and the 193 kept RTF files equal 191 + the 2 `rtf_not_converted`. On disk, after the fresh export: 28,222 files (equal to the files written), longest full path 253 units (equal to the plan's longest path; the limit is 259), 0 names containing `~`, 0 `.tsp-tmp` entries; the same method at `C:\o.tester` gave 269 files and 253. The password was searched for in the logs and in every `folder.json` and `metadata.json`: 0 hits.
+
+**Determinism.** The tree hash is the same for the first export, the repeat, and the sibling root of equal length, across 791 collision groups (the tester has 2). That is the cross-directory determinism check that the tester run could not make.
+
+### Follow-up checks (counts only, 2026-11-11)
+
+- **The `~` rule on this PST.** 663 of the 6,508 `metadata.json` files contain `tilde_replaced` (a count of files, not occurrences), so the rule applied to about a tenth of the messages. There are 0 names containing `~` on disk and 0 read-back mismatches in three exports. The code before the rule was not run on this PST, so this does not show the failure it prevents, and the 8.3 short-name mechanism remains an inference.
+- **`verify-cid-links.ps1 -Root C:\o.crkb`.** 6,508 `message.md` files; 0 `metadata.json` missing or unreadable; 2,973 links to `attachments/`, all resolving to a file that exists and is recorded as extracted (0 missing, 0 not recorded as extracted); 0 `cid:` links remaining; the metadata's rewritten total, 2,973, equals the links; 2,630 inline attachments, 0 inline without a content ID; 0 gate violations. It shows each link points at an existing recorded attachment, not that it is the attachment the sender meant.
+- **The 29 messages with `undecodable_bytes_replaced`.** The key's 562 counts replaced bytes, not messages: only 29 messages carry the reason (0.45% of 6,508). All 29 have a `body.rtf`. Across their 29 RTF files the control words were `\ansicpg1256` 26 and `\ansicpg1252` 3 (one declaration per file, so 26 files declare Windows-1256 and 3 declare 1252), `\fcharset178` 66, `\fcharset2` 34, `\fcharset0` 6, `\fcharset177` 2, and `\fcharset238` 1. The only decoders are for 1252, 28591, 20127, and 65001, so the de-encapsulation replaces and counts the non-ASCII bytes of any other code page, which is the documented limit (README, "Known limitations"). That fits 26 of the 29; it was not confirmed by decoding with 1256 (no such decoder exists yet), and the 3 files that declare 1252 are not explained. The one `message.md` examined shows a single `U+FFFD` where an apostrophe belongs, consistent with an apostrophe byte under Windows-1256. The original is kept: `body.rtf` is the received RTF. By `archive.rs`, the `body.html` of a message with no native HTML is the HTML recovered from the RTF, written as UTF-8 with the note `recovered_from_rtf_charset_declaration_stale`, so a `charset=` declaration inside it is stale by design: the declarations seen in the first 8 KB of the 29 files were `utf-8` in 26 and absent in 3.
+- **`U+FFFD` censuses.** Over the 6,508 `message.md` files: 0 are not valid UTF-8, 29 contain `U+FFFD` (the same 29), and 0 contain it without the loss flag. Over the 6,503 `body.html` files: 88 are not valid UTF-8, 29 contain `U+FFFD` (the same 29, 562 in all, equal to the export's count), and 0 contain it without the flag. So no message shows `U+FFFD` without a recorded loss. By `archive.rs`, a native `body.html` is the stored bytes (note `as_stored`) and a recovered one is UTF-8 text, so the 29 are HTML recovered from the RTF and the 88 non-UTF-8 files are native bodies stored in another code page (the 88 files themselves were not examined). `internet_codepage` is already recorded in the `body` object for native HTML; nothing records the code pages of an RTF-derived body.
+- **The repeat export took 919.2 s, against 337.5 s and 225.2 s for the fresh exports,** although it wrote nothing and found all 28,222 files identical in the preflight. The README documents that a repeat export stages every unchanged file before finding it identical (the skip-if-unchanged shortcut, option E, is not built), which is the likely reason; the time was not decomposed and the bytes the repeat wrote were not measured. Fresh exports also differ by 1.5 times between runs.
+
+### What the run shows, and what it does not
+
+Shows: a complete, read-back-clean, idempotent, deterministic export of a 6.5 GB, 6,508-message PST with 28,222 files and a flat peak memory of 107 MB (the spike read the same file at 91 MB); the first real-data run of native HTML (6,312 bodies), of HTML recovered from RTF (191), and of `cid:` rewriting at scale (2,973 links); the tilde rule applied to 663 messages with no read-back loss; the password flow end to end.
+
+Does not show:
+- An independent count of the messages or attachments: the census and the export share the crate, and the Outlook count failed (`AddStoreEx`).
+- Non-ASCII `PT_STRING8` text (0 values), embedded messages or OLE objects (none in this file: all 7,016 attachments are by value), an ANSI PST, the envelope (drop B), or another producer.
+- Any by-eye review of the exported messages (one `message.md` was opened, for the `U+FFFD` check).
+- The 8.3 mechanism, what a repeat export spends its time on, and why 3 of the 29 RTF files declare 1252.
+
+## v0.1.42: hardening after the `crkb.pst` run (2026-11-12)
+
+Four commits on `v0.1.41`, then the version bump. No archive file changes content on a good PST: the tree hashes differ only through the tool version in the root `folder.json`.
+
+1. **`decode_native_html` counts the bytes an implemented code page leaves undefined** (`src/body.rs`). `String8Decoded::Decoded { text, replaced }` carries the count, and the function returned 0, so native HTML decoded under Windows-1252 (five undefined bytes) or US-ASCII (every non-ASCII byte) could carry `U+FFFD` into `message.md` with no `undecodable_bytes_replaced` record. The count is now passed through; one test (Windows-1252, US-ASCII, ISO-8859-1). On `crkb.pst` the defect was latent: no message has `U+FFFD` without a recorded loss (above).
+2. **Every call into `outlook-pst` that can panic on a corrupt PST is contained** (review finding of 2026-11-09, closed). New `shared::contained(f, what)`, the form of `run_contained` for a single call whose caller can only fail as a whole: a panic becomes an error naming the step, with fixed text and never the input path or any content. It wraps the open (`UnicodePstFile::open` and the ANSI probe), the store read, the password check, opening the IPM subtree, and the root walk, in `pst.rs`, `source_pst.rs`, `pst_attachments.rs`, and `pst_export.rs`. Inside the planner and the diagnostic walk, each message and each subfolder is read under `run_contained`, and a panic is counted as an open error (`open_errors`; `message_open_errors` and `folder_open_errors` in the diagnostic) and the walk continues. The per-message and per-attachment reads of the export were already contained. Two tests (`contained_*`). `spike_pst_attachments.rs` was left as it is (temporary).
+3. **`outlook-pst` is pinned `=1.2.0`** (decision 11), as `CONTRIBUTING.md` requires for a dependency whose output becomes archive content. `Cargo.lock` is unchanged. `compressed-rtf` (its output is written as `body.rtf`) and `cfb` (attachment bytes) are not pinned and arguably fall under the same rule; not decided.
+4. **Test-count wording** in the README, `test-strategy.md`, and the plan.
+
+**Gate.** The owner reports that everything built with each commit, that 433 tests pass (430 at `v0.1.41`, +1 for the count fix, +2 for `contained`), and that CI passed each time. The version bump to 0.1.42 and its gate also passed, 433 tests.
+
+**Behavior checks at `c38aa26` (`Cargo.toml` still 0.1.41), counts only:**
+
+| Check | Result |
+|---|---|
+| tester export (`C:\o.tester`) | exit 0, 2.0 s, peak 24 MB; 269 files, 0 mismatches; `export_tree_sha256` `53ab025c52dd5a9383ae0f08fe4494e1eee8baba73c7e0cd214beca3a4f386e5`, unchanged; a repeat writes nothing with the same hash |
+| `verify-split.ps1` | default (850 bytes, 33 lines), `--verify` (2705, 82), PST (1110, 45, filtered): all IDENTICAL, standard error empty |
+| `crkb.pst` `--dry-run` | exit 0, 9 s, peak 36 MB; output identical to the saved earlier output |
+| `crkb.pst` fresh export (`C:\p.crkb`) | exit 0, standard error empty, 157.8 s, peak 107 MB; 28,222 written, 0 mismatches; `a34f1d6c…` unchanged; output file byte-identical to the earlier fresh export's |
+| password matrix on `crkb.pst` | no password, a wrong password, and a non-ASCII password: exit 2 with 0 bytes on standard output (standard error 75, 64, and 108 bytes) for the diagnostic and for `--dry-run`; the right password: exit 0 (diagnostic 1,149 bytes, `pst_password=verified`; dry-run identical to the saved output); the tester with a bogus password: exit 0, `pst_password=none` (1,110 bytes); a missing path: exit 1; no password string in any log |
+| `.msg` corpus export at 0.1.41 with the post-tag code | `export_tree_sha256` `b2902cb87c4628fa49fdf6f9fcf9b9999dfb5c0b6f67dbc3e6d2eaba986a9df6`, the tag's value |
+
+**Tree hashes at `Cargo.toml` 0.1.42** (each differs from its 0.1.41 value through the version string in the root `folder.json`; the trees were not compared file by file):
+
+| Input | Output root | `export_tree_sha256` |
+|---|---|---|
+| `tsp-tester.pst` | `C:\o.tester` (22 units) | `db73dfa9eac7f3fec1ad166ba2423eacefbd762b8a48a9e22b0cc161d5a6bba7` |
+| `crkb.pst` | `C:\o.crkb` (14 units) | `a79a42c0d0b2d3d1f091ac3efaa7b1cf5381f2a3a15239356930cd40846acf96` |
+| `.msg` corpus (34 messages) | a root of 17 units, as for `C:\o.41.pre1` | `f778439773a2f08f1f4ec3add62d9bc0398c9bc350ea79d58fe6583f014b1ae1` |
+
+**Not exercised on real data.** The "contained and counted" paths in the planner and the diagnostic (no fixture makes `outlook-pst` panic; the unit tests cover `contained` only), and the replaced-count path of `decode_native_html` (no real body reaches it). Both were checked only by the unchanged outputs above.
+
+**Open after this release.** Windows-1256 and the other code pages the de-encapsulation and the native HTML path do not decode (29 messages on `crkb.pst`; `encoding_rs`, ADR accepted 2026-10-31, not yet a dependency); recording the decode code page in `metadata.json` (owner's decision of 2026-11-11, not built); the accuracy of the lossy UTF-8 count (it counts `U+FFFD` characters in the result, which includes any already in the source); decisions 13 and 14; the independent counts, the ANSI refusal fixture, and non-ASCII `PT_STRING8` data; drop B; the repeat-export time; the temporary spike module.
