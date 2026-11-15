@@ -4,6 +4,7 @@ mod archive;
 mod bakeoff;
 mod body;
 mod cli;
+mod codepage;
 mod dry_run;
 mod export;
 mod export_source;

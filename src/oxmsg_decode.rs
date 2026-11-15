@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::codepage;
 use crate::oxmsg_classify::OxmsgEntryScope;
 use crate::shared::CompoundFile;
 
@@ -358,8 +359,8 @@ pub(crate) fn extract_string8_codepage(
 /// never silently decoded as something else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum String8Decoded {
-    /// Decoded under an implemented code page; `replaced` counts bytes
-    /// with no defined mapping (each became U+FFFD).
+    /// Decoded under an implemented code page; `replaced` counts the bytes of malformed or
+    /// unmapped sequences (the text has one U+FFFD for each such sequence).
     Decoded { text: String, replaced: u32 },
     /// Every byte is 7-bit ASCII and the code page is a known ASCII
     /// superset this decoder does not otherwise implement, so the text is
@@ -382,10 +383,11 @@ pub(crate) fn string8_codepage_is_ascii_superset(codepage: u32) -> bool {
     )
 }
 
-/// Decodes PT_STRING8 bytes under `codepage`. Implemented: 1252, 28591
-/// (ISO-8859-1), 20127 (US-ASCII), 65001 (UTF-8). Any other code page
-/// decodes only all-ASCII input, and only when it is a known ASCII
-/// superset; otherwise it is reported as unsupported.
+/// Decodes PT_STRING8 bytes under `codepage`. In-house: 1252, 28591 (ISO-8859-1), 20127
+/// (US-ASCII), 65001 (UTF-8). Every page `codepage::decode` maps (the Windows-125x pages, the
+/// ISO-8859 family, KOI8, the East Asian multibyte pages) goes through `encoding_rs`. Any other
+/// code page decodes only all-ASCII input, and only when it is a known ASCII superset;
+/// otherwise it is reported as unsupported.
 pub(crate) fn decode_string8_with_codepage(bytes: &[u8], codepage: u32) -> String8Decoded {
     match codepage {
         1252 => {
@@ -409,24 +411,53 @@ pub(crate) fn decode_string8_with_codepage(bytes: &[u8], codepage: u32) -> Strin
             }
             String8Decoded::Decoded { text, replaced }
         }
-        65001 => match std::str::from_utf8(bytes) {
-            Ok(text) => String8Decoded::Decoded {
-                text: text.to_string(),
-                replaced: 0,
-            },
-            Err(_) => {
-                let text = String::from_utf8_lossy(bytes).into_owned();
-                let replaced = text.matches('\u{FFFD}').count() as u32;
-                String8Decoded::Decoded { text, replaced }
-            }
-        },
-        other if bytes.is_ascii() && string8_codepage_is_ascii_superset(other) => {
-            String8Decoded::AsciiUnderUnsupportedCodepage {
-                text: bytes.iter().map(|&b| b as char).collect(),
+        65001 => {
+            let (text, replaced_bytes) = decode_utf8_counted(bytes);
+            String8Decoded::Decoded {
+                text,
+                replaced: clamp_replaced(replaced_bytes),
             }
         }
-        _ => String8Decoded::UnsupportedCodepage,
+        other => match codepage::decode(other, bytes) {
+            Some(decoded) => String8Decoded::Decoded {
+                text: decoded.text,
+                replaced: clamp_replaced(decoded.replaced_bytes),
+            },
+            None if bytes.is_ascii() && string8_codepage_is_ascii_superset(other) => {
+                String8Decoded::AsciiUnderUnsupportedCodepage {
+                    text: bytes.iter().map(|&b| b as char).collect(),
+                }
+            }
+            None => String8Decoded::UnsupportedCodepage,
+        },
     }
+}
+
+/// A replaced-byte count as the `u32` that [`String8Decoded::Decoded`] carries (saturating: a
+/// larger value would need a string of over 4 GiB).
+fn clamp_replaced(replaced_bytes: u64) -> u32 {
+    u32::try_from(replaced_bytes).unwrap_or(u32::MAX)
+}
+
+/// UTF-8 bytes as text, with the invalid bytes counted exactly (plan decision 16). Each maximal
+/// invalid sequence (`Utf8Chunks`) becomes one U+FFFD, as `String::from_utf8_lossy` writes it,
+/// and its length in bytes is added to the count. A U+FFFD that was in the input as valid UTF-8
+/// is not counted, and a multibyte invalid sequence counts all of its bytes.
+pub(crate) fn decode_utf8_counted(bytes: &[u8]) -> (String, u64) {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return (text.to_string(), 0);
+    }
+    let mut text = String::with_capacity(bytes.len());
+    let mut replaced = 0u64;
+    for chunk in bytes.utf8_chunks() {
+        text.push_str(chunk.valid());
+        let invalid = chunk.invalid();
+        if !invalid.is_empty() {
+            text.push('\u{FFFD}');
+            replaced += invalid.len() as u64;
+        }
+    }
+    (text, replaced)
 }
 
 /// Decodes one entry of the Named Property String Stream

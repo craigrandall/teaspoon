@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 
 use crate::body::{
     BodySource, ConversionFailed, Rendered, Selection, attachment_link, content_id_key,
-    convert_html_isolated, count_cid_references, find_cid_references, render_with, replace_ranges,
-    select_body,
+    convert_html_isolated, count_cid_references, failed_selection, find_cid_references,
+    render_with, replace_ranges, select_body,
 };
 use crate::layout;
 use crate::model::{Address, BodyForms, Envelope, MessageContent, RecipientKind};
@@ -25,7 +25,7 @@ use crate::naming::NameFlag;
 use crate::shared::{
     ATTACH_METHOD_BY_REFERENCE, ATTACH_METHOD_BY_REFERENCE_ONLY,
     ATTACH_METHOD_BY_REFERENCE_RESOLVE, ATTACH_METHOD_BY_VALUE, ATTACH_METHOD_EMBEDDED_MESSAGE,
-    ATTACH_METHOD_NONE, ATTACH_METHOD_OLE,
+    ATTACH_METHOD_NONE, ATTACH_METHOD_OLE, run_contained,
 };
 
 pub(crate) const SCHEMA_VERSION: &str = "0.1-draft";
@@ -110,6 +110,18 @@ pub(crate) struct LossRecord {
     pub(crate) count: u64,
 }
 
+/// The `decoding` object of the `body` object (plan decision 17): the Windows code pages the
+/// HTML behind `message.md` was decoded under, and those under which bytes were replaced. Both
+/// lists are ascending. `code_pages` holds a page when at least one byte sequence became a
+/// non-ASCII character (65001 for UTF-8, which is also what a native HTML body with no stored
+/// code page is read as); `replaced_code_pages` holds a page when at least one byte was replaced
+/// by U+FFFD, including a page with no decoder.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DecodingRecord {
+    pub(crate) code_pages: Vec<u32>,
+    pub(crate) replaced_code_pages: Vec<u32>,
+}
+
 /// The `body` object (draft schema; body ADR, decision 4). Field order is the serialization
 /// order.
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +134,9 @@ pub(crate) struct BodyRecord {
     pub(crate) preprocessing: Vec<&'static str>,
     /// `PidTagInternetCodepage` as stored, when the message has one.
     pub(crate) internet_codepage: Option<u32>,
+    /// The code pages the converted HTML was decoded under; `null` when no HTML was converted
+    /// (source `plain_text` or `none`).
+    pub(crate) decoding: Option<DecodingRecord>,
     /// Kept original files, in the order `body.html`, `body.rtf`, `body.txt`.
     pub(crate) originals: Vec<OriginalRecord>,
     /// `cid:` link destinations in the converted Markdown: how many, how many distinct, and what
@@ -584,7 +599,10 @@ pub(crate) fn body_outcome_with(
     forms: &BodyForms,
     convert: &dyn Fn(&str) -> Result<String, ConversionFailed>,
 ) -> BodyOutcome {
-    let selection = select_body(forms);
+    // Decoding is contained once per message, not once per string: a contained call at the
+    // outermost level swaps the global panic hook (ADR, decision 8). A panic is recorded as a
+    // failed conversion and the plain-text body, if any, is used.
+    let selection = run_contained(|| select_body(forms)).unwrap_or_else(|| failed_selection(forms));
     let rendered = render_with(&selection, convert);
     let originals = original_files(forms, &selection);
     let (cid_total, cid_distinct) = rendered
@@ -853,6 +871,14 @@ fn body_record(forms: &BodyForms, outcome: &BodyOutcome) -> BodyRecord {
         }),
         preprocessing: outcome.rendered.preprocessing.clone(),
         internet_codepage: forms.native_html_code_page,
+        decoding: outcome
+            .rendered
+            .decoding
+            .as_ref()
+            .map(|decoding| DecodingRecord {
+                code_pages: decoding.code_pages.iter().copied().collect(),
+                replaced_code_pages: decoding.replaced_code_pages.iter().copied().collect(),
+            }),
         originals: outcome
             .originals
             .iter()
@@ -1495,6 +1521,7 @@ mod tests {
             "\"converter\"",
             "\"preprocessing\"",
             "\"internet_codepage\"",
+            "\"decoding\"",
             "\"originals\"",
             "\"cid_references\"",
             "\"loss\"",
@@ -1504,6 +1531,85 @@ mod tests {
         .map(|key| json.find(key).unwrap_or_else(|| panic!("missing {key}")))
         .collect();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn the_decoding_object_records_the_pages_in_effect_and_the_pages_with_replaced_bytes() {
+        // Native HTML under Windows-1252: an e acute decodes, 0x81 has no mapping.
+        let mut c = content(Some("S"), None);
+        c.bodies.native_html = Some(b"<p>caf\xe9 \x81</p>".to_vec());
+        c.bodies.native_html_code_page = Some(1252);
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok("x".to_string()));
+        let value = serde_json::to_value(body_record(&c.bodies, &outcome)).unwrap();
+        assert_eq!(value["decoding"]["code_pages"], serde_json::json!([1252]));
+        assert_eq!(
+            value["decoding"]["replaced_code_pages"],
+            serde_json::json!([1252])
+        );
+        assert_eq!(value["loss"].as_array().unwrap().len(), 1);
+        assert!(
+            value["loss"][0]
+                .to_string()
+                .contains("undecodable_bytes_replaced")
+        );
+    }
+
+    #[test]
+    fn the_decoding_object_is_null_without_html_and_empty_lists_for_ascii_html() {
+        let c = content(Some("S"), Some("plain"));
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok("x".to_string()));
+        let value = serde_json::to_value(body_record(&c.bodies, &outcome)).unwrap();
+        assert!(value["decoding"].is_null());
+
+        let c = html_content(b"<p>x</p>");
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok("x".to_string()));
+        let value = serde_json::to_value(body_record(&c.bodies, &outcome)).unwrap();
+        assert_eq!(value["decoding"]["code_pages"], serde_json::json!([]));
+        assert_eq!(
+            value["decoding"]["replaced_code_pages"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn a_windows_1256_rtf_body_records_its_page() {
+        let mut c = content(Some("S"), None);
+        c.bodies.rtf = Some(
+            br"{\rtf1\ansi\ansicpg1256\fromhtml1 {\*\htmltag64}{\*\htmltag84 <p>\'c7</p>}}"
+                .to_vec(),
+        );
+        let outcome = body_outcome_with(&c.bodies, &|_| Ok("x".to_string()));
+        let value = serde_json::to_value(body_record(&c.bodies, &outcome)).unwrap();
+        assert_eq!(value["source"], "rtf_html");
+        assert_eq!(value["decoding"]["code_pages"], serde_json::json!([1256]));
+        assert_eq!(
+            value["decoding"]["replaced_code_pages"],
+            serde_json::json!([])
+        );
+        assert!(value["loss"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failed_conversion_records_no_decoding() {
+        let mut c = html_content(b"<p>x</p>");
+        c.bodies.plain_text = Some("fallback".to_string());
+        let outcome = body_outcome_with(&c.bodies, &|_| Err(ConversionFailed));
+        let value = serde_json::to_value(body_record(&c.bodies, &outcome)).unwrap();
+        assert_eq!(value["source"], "plain_text");
+        assert!(value["decoding"].is_null());
+    }
+
+    #[test]
+    fn a_contained_decoding_failure_is_a_failed_conversion_with_the_plain_text_kept() {
+        let mut c = html_content(b"<p>x</p>");
+        c.bodies.plain_text = Some("fallback".to_string());
+        let selection = failed_selection(&c.bodies);
+        assert!(selection.decode_failed);
+        let rendered = render_with(&selection, &|_| Ok("unused".to_string()));
+        assert_eq!(rendered.source, BodySource::PlainText);
+        assert_eq!(rendered.plain_text.as_deref(), Some("fallback"));
+        assert!(rendered.decoding.is_none());
+        assert_eq!(rendered.loss.len(), 1);
     }
 
     #[test]

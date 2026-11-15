@@ -21,9 +21,9 @@ use crate::oxmsg_decode::{
     PROP_MESSAGE_CODEPAGE, PSETID_COMMON, PropertyEntryShape, ResolvedCodepage, String8Decoded,
     classify_property_entry_shape, cp1252_to_char, decode_fixed_value, decode_named_property_entry,
     decode_named_property_string, decode_properties_stream, decode_string8_cp1252,
-    decode_string8_with_codepage, decode_unicode_value, expected_size_field_value,
-    expected_variable_stream_path, extract_string8_codepage, is_valid_boolean_encoding,
-    properties_stream_header_len, resolve_string8_codepage,
+    decode_string8_with_codepage, decode_unicode_value, decode_utf8_counted,
+    expected_size_field_value, expected_variable_stream_path, extract_string8_codepage,
+    is_valid_boolean_encoding, properties_stream_header_len, resolve_string8_codepage,
 };
 use crate::oxmsg_extract::extract_message_class;
 use crate::oxmsg_structure::{OxmsgTotals, print_structural_breakdown};
@@ -1039,16 +1039,16 @@ fn string8_decoding_covers_implemented_codepages() {
 
 #[test]
 fn string8_decoding_reports_unsupported_codepages_instead_of_guessing() {
-    // All-ASCII under a known ASCII superset: exact, flagged.
+    // All-ASCII under a known ASCII superset with no decoder (an OEM page): exact, flagged.
     assert_eq!(
-        decode_string8_with_codepage(b"IPM.Note", 932),
+        decode_string8_with_codepage(b"IPM.Note", 437),
         String8Decoded::AsciiUnderUnsupportedCodepage {
             text: "IPM.Note".to_string()
         }
     );
-    // Non-ASCII under an unimplemented code page: no text, reported.
+    // Non-ASCII under a code page with no decoder: no text, reported.
     assert_eq!(
-        decode_string8_with_codepage(&[0x82, 0xA0], 932),
+        decode_string8_with_codepage(&[0x82, 0xA0], 437),
         String8Decoded::UnsupportedCodepage
     );
     // All-ASCII under a code page NOT known to be an ASCII superset
@@ -1057,6 +1057,62 @@ fn string8_decoding_reports_unsupported_codepages_instead_of_guessing() {
         decode_string8_with_codepage(b"IPM.Note", 37),
         String8Decoded::UnsupportedCodepage
     );
+}
+
+#[test]
+fn string8_decoding_uses_encoding_rs_for_the_pages_it_maps() {
+    // Windows-1256 (Arabic), the page behind the 562 bytes `crkb.pst` lost before v0.1.43.
+    assert_eq!(
+        decode_string8_with_codepage(&[0xC7, b'a'], 1256),
+        String8Decoded::Decoded {
+            text: "\u{627}a".to_string(),
+            replaced: 0
+        }
+    );
+    // Shift_JIS, a double-byte page that used to be unsupported.
+    assert_eq!(
+        decode_string8_with_codepage(&[0x82, 0xA0], 932),
+        String8Decoded::Decoded {
+            text: "\u{3042}".to_string(),
+            replaced: 0
+        }
+    );
+    // A lone lead byte is one replaced byte and one replacement character.
+    assert_eq!(
+        decode_string8_with_codepage(&[b'a', 0x82], 932),
+        String8Decoded::Decoded {
+            text: "a\u{FFFD}".to_string(),
+            replaced: 1
+        }
+    );
+    // All-ASCII under a mapped page is an ordinary decode now.
+    assert_eq!(
+        decode_string8_with_codepage(b"IPM.Note", 932),
+        String8Decoded::Decoded {
+            text: "IPM.Note".to_string(),
+            replaced: 0
+        }
+    );
+}
+
+#[test]
+fn utf8_decoding_counts_bytes_and_ignores_a_replacement_character_that_was_valid_input() {
+    assert_eq!(
+        decode_utf8_counted("a\u{FFFD}".as_bytes()),
+        ("a\u{FFFD}".to_string(), 0)
+    );
+    assert_eq!(
+        decode_utf8_counted(&[b'a', 0xFF, 0xFE]),
+        ("a\u{FFFD}\u{FFFD}".to_string(), 2)
+    );
+    assert_eq!(
+        decode_utf8_counted(&[0xE2, 0x82]),
+        ("\u{FFFD}".to_string(), 2)
+    );
+    assert!(matches!(
+        decode_string8_with_codepage(&[0xE2, 0x82], 65001),
+        String8Decoded::Decoded { replaced: 2, .. }
+    ));
 }
 
 // --- Synthetic ANSI (.msg with PT_STRING8) fixtures ---------------------
@@ -1158,9 +1214,23 @@ fn synthetic_ansi_msg_class_reads_through_the_codepage_chain() {
 
 #[test]
 fn synthetic_ansi_msg_with_unsupported_codepage_and_high_bytes_reports_absent() {
-    let path = write_synthetic_ansi_msg("unsupported", Some(932), None, &[0x82, 0xA0]);
+    // 437 has no decoder, so the high bytes cannot be read and nothing is guessed.
+    let path = write_synthetic_ansi_msg("unsupported", Some(437), None, &[0x82, 0xA0]);
     let mut comp = cfb::open(&path).expect("open synthetic CFB");
     assert_eq!(extract_message_class(&mut comp), None);
+    drop(comp);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn synthetic_ansi_msg_with_a_mapped_double_byte_codepage_reads_its_text() {
+    // 932 is mapped through encoding_rs, so the same bytes read as one Shift_JIS character.
+    let path = write_synthetic_ansi_msg("mapped", Some(932), None, &[0x82, 0xA0]);
+    let mut comp = cfb::open(&path).expect("open synthetic CFB");
+    assert_eq!(
+        extract_message_class(&mut comp).as_deref(),
+        Some("\u{3042}")
+    );
     drop(comp);
     let _ = std::fs::remove_file(&path);
 }

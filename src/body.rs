@@ -25,8 +25,9 @@
 
 use std::collections::BTreeSet;
 
+use crate::codepage::Decoding;
 use crate::model::BodyForms;
-use crate::oxmsg_decode::{String8Decoded, decode_string8_with_codepage};
+use crate::oxmsg_decode::{String8Decoded, decode_string8_with_codepage, decode_utf8_counted};
 use crate::rtf_deencap::{Limits, RtfKind, deencapsulate_html, recognize};
 use crate::shared::run_contained;
 
@@ -90,6 +91,34 @@ pub(crate) struct Selection {
     /// implemented code page, a code page that is not implemented, invalid UTF-8, or the
     /// de-encapsulation's own count).
     pub(crate) undecodable_bytes: u64,
+    /// The code pages the HTML was decoded under and those with replaced bytes (the
+    /// `body.decoding` object of `metadata.json`); set for the two HTML sources only.
+    pub(crate) decoding: Option<Decoding>,
+    /// Decoding the body panicked and was contained (see [`failed_selection`]).
+    pub(crate) decode_failed: bool,
+}
+
+/// The selection when decoding the body panicked (contained once per message, see
+/// `archive::body_outcome_with`): no HTML, the plain-text body if there is one, and a flag that
+/// the rendering records as a failed conversion. Nothing is guessed from the bytes that were
+/// being decoded.
+pub(crate) fn failed_selection(forms: &BodyForms) -> Selection {
+    let plain_text = forms.plain_text.clone().filter(|text| nonblank(text));
+    Selection {
+        source: if plain_text.is_some() {
+            BodySource::PlainText
+        } else {
+            BodySource::None
+        },
+        html: None,
+        plain_text,
+        rtf_not_converted: false,
+        rtf_kind: None,
+        rtf_decompression_failed: forms.rtf_decompression_failed,
+        undecodable_bytes: 0,
+        decoding: None,
+        decode_failed: true,
+    }
 }
 
 fn nonblank(text: &str) -> bool {
@@ -106,14 +135,7 @@ fn nonblank(text: &str) -> bool {
 /// HTML.
 pub(crate) fn decode_native_html(bytes: &[u8], code_page: Option<u32>) -> (String, u64) {
     let (text, replaced) = match code_page {
-        None | Some(0) | Some(65001) => match std::str::from_utf8(bytes) {
-            Ok(text) => (text.to_string(), 0),
-            Err(_) => {
-                let lossy = String::from_utf8_lossy(bytes).into_owned();
-                let replaced = lossy.matches('\u{FFFD}').count() as u64;
-                (lossy, replaced)
-            }
-        },
+        None | Some(0) | Some(65001) => decode_utf8_counted(bytes),
         Some(code_page) => match decode_string8_with_codepage(bytes, code_page) {
             String8Decoded::Decoded { text, replaced } => (text, u64::from(replaced)),
             String8Decoded::AsciiUnderUnsupportedCodepage { text } => (text, 0),
@@ -138,6 +160,31 @@ pub(crate) fn decode_native_html(bytes: &[u8], code_page: Option<u32>) -> (Strin
     }
 }
 
+/// Native HTML decoded, with the record of the code page it was decoded under.
+pub(crate) struct NativeHtml {
+    pub(crate) text: String,
+    /// Bytes replaced by U+FFFD (the unit is bytes; see `oxmsg_decode::decode_utf8_counted`).
+    pub(crate) replaced_bytes: u64,
+    pub(crate) decoding: Decoding,
+}
+
+/// [`decode_native_html`] plus the `body.decoding` record: the page in effect is the stored
+/// Internet code page, or 65001 when none is stored (absent or zero).
+pub(crate) fn decode_native_html_detailed(bytes: &[u8], code_page: Option<u32>) -> NativeHtml {
+    let (text, replaced_bytes) = decode_native_html(bytes, code_page);
+    let page = match code_page {
+        None | Some(0) => 65001,
+        Some(page) => page,
+    };
+    let mut decoding = Decoding::default();
+    decoding.note(page, &text, replaced_bytes);
+    NativeHtml {
+        text,
+        replaced_bytes,
+        decoding,
+    }
+}
+
 /// Picks the body: native HTML if non-blank; else the HTML recovered from the RTF if there is
 /// some; else the plain-text body if non-blank; else none.
 pub(crate) fn select_body(forms: &BodyForms) -> Selection {
@@ -145,16 +192,18 @@ pub(crate) fn select_body(forms: &BodyForms) -> Selection {
     let rtf_kind = forms.rtf.as_deref().map(recognize);
 
     if let Some(bytes) = &forms.native_html {
-        let (html, undecodable) = decode_native_html(bytes, forms.native_html_code_page);
-        if nonblank(&html) {
+        let native = decode_native_html_detailed(bytes, forms.native_html_code_page);
+        if nonblank(&native.text) {
             return Selection {
                 source: BodySource::NativeHtml,
-                html: Some(html),
+                html: Some(native.text),
                 plain_text,
                 rtf_not_converted: false,
                 rtf_kind,
                 rtf_decompression_failed: forms.rtf_decompression_failed,
-                undecodable_bytes: undecodable,
+                undecodable_bytes: native.replaced_bytes,
+                decoding: Some(native.decoding),
+                decode_failed: false,
             };
         }
     }
@@ -171,6 +220,8 @@ pub(crate) fn select_body(forms: &BodyForms) -> Selection {
             rtf_kind,
             rtf_decompression_failed: forms.rtf_decompression_failed,
             undecodable_bytes: recovered.diagnostics.undecodable_bytes,
+            decoding: Some(recovered.diagnostics.decoding),
+            decode_failed: false,
         };
     }
 
@@ -186,6 +237,8 @@ pub(crate) fn select_body(forms: &BodyForms) -> Selection {
         rtf_kind,
         rtf_decompression_failed: forms.rtf_decompression_failed,
         undecodable_bytes: 0,
+        decoding: None,
+        decode_failed: false,
     }
 }
 
@@ -771,6 +824,9 @@ pub(crate) struct Rendered {
     pub(crate) preprocessing: Vec<&'static str>,
     /// Loss, in the vocabulary's order, only for reasons with a count above zero.
     pub(crate) loss: Vec<Loss>,
+    /// The code pages the converted HTML was decoded under; `None` when no HTML was converted
+    /// (a plain-text body, no body, or a failed conversion).
+    pub(crate) decoding: Option<Decoding>,
 }
 
 fn push_loss(loss: &mut Vec<Loss>, reason: LossReason, count: u64) {
@@ -802,6 +858,11 @@ pub(crate) fn render_with(
         );
         push_loss(
             &mut loss,
+            LossReason::HtmlConversionFailed,
+            u64::from(selection.decode_failed),
+        );
+        push_loss(
+            &mut loss,
             LossReason::RtfDecompressionFailed,
             rtf_decompression_failed,
         );
@@ -814,6 +875,7 @@ pub(crate) fn render_with(
             },
             preprocessing: Vec::new(),
             loss,
+            decoding: None,
         };
     };
 
@@ -838,6 +900,7 @@ pub(crate) fn render_with(
             plain_text,
             preprocessing: applied.labels(false),
             loss,
+            decoding: None,
         };
     };
 
@@ -863,6 +926,7 @@ pub(crate) fn render_with(
         plain_text: None,
         preprocessing: applied.labels(padding_runs > 0),
         loss,
+        decoding: selection.decoding.clone(),
     }
 }
 
@@ -988,16 +1052,76 @@ mod tests {
             decode_native_html(b"a\xffb", None),
             ("a\u{FFFD}b".to_string(), 1)
         );
-        // A code page that is not implemented: non-ASCII bytes only.
+        // A code page with no decoder (an OEM page): non-ASCII bytes only.
         assert_eq!(
-            decode_native_html(b"a\xefb\xef", Some(1251)),
+            decode_native_html(b"a\xefb\xef", Some(437)),
             ("a\u{FFFD}b\u{FFFD}".to_string(), 2)
         );
-        // ASCII under an unimplemented code page is fine.
+        // ASCII under such a code page is fine.
         assert_eq!(
-            decode_native_html(b"abc", Some(1251)),
+            decode_native_html(b"abc", Some(437)),
             ("abc".to_string(), 0)
         );
+        // A page `encoding_rs` maps decodes instead (1251: 0xEF is a Cyrillic letter).
+        assert_eq!(
+            decode_native_html(b"a\xefb", Some(1251)),
+            ("a\u{43F}b".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn the_utf8_count_is_in_bytes_and_ignores_a_valid_replacement_character() {
+        // A U+FFFD that was valid input is not a loss.
+        assert_eq!(
+            decode_native_html("a\u{FFFD}b".as_bytes(), None),
+            ("a\u{FFFD}b".to_string(), 0)
+        );
+        // One invalid byte beside a valid U+FFFD counts 1 (the old count said 2).
+        let mut bytes = "a\u{FFFD}b".as_bytes().to_vec();
+        bytes.push(0xFF);
+        assert_eq!(
+            decode_native_html(&bytes, None),
+            ("a\u{FFFD}b\u{FFFD}".to_string(), 1)
+        );
+        // A truncated three-byte sequence is one replacement character for two bytes.
+        assert_eq!(
+            decode_native_html(&[b'x', 0xE2, 0x82], Some(65001)),
+            ("x\u{FFFD}".to_string(), 2)
+        );
+    }
+
+    #[test]
+    fn native_html_records_the_pages_in_effect_and_the_pages_with_replaced_bytes() {
+        fn pages(set: &BTreeSet<u32>) -> Vec<u32> {
+            set.iter().copied().collect()
+        }
+
+        let utf8 = decode_native_html_detailed("caf\u{e9}".as_bytes(), None);
+        assert_eq!(pages(&utf8.decoding.code_pages), vec![65001]);
+        assert!(utf8.decoding.replaced_code_pages.is_empty());
+
+        let ascii = decode_native_html_detailed(b"plain", Some(1252));
+        assert!(ascii.decoding.code_pages.is_empty());
+        assert!(ascii.decoding.replaced_code_pages.is_empty());
+
+        let arabic = decode_native_html_detailed(&[0xC7, 0xE1], Some(1256));
+        assert_eq!(arabic.text, "\u{627}\u{644}");
+        assert_eq!(arabic.replaced_bytes, 0);
+        assert_eq!(pages(&arabic.decoding.code_pages), vec![1256]);
+
+        let lossy = decode_native_html_detailed(b"a\x81\xe9", Some(1252));
+        assert_eq!(lossy.replaced_bytes, 1);
+        assert_eq!(pages(&lossy.decoding.code_pages), vec![1252]);
+        assert_eq!(pages(&lossy.decoding.replaced_code_pages), vec![1252]);
+
+        let unmapped = decode_native_html_detailed(b"a\xef", Some(437));
+        assert!(unmapped.decoding.code_pages.is_empty());
+        assert_eq!(pages(&unmapped.decoding.replaced_code_pages), vec![437]);
+
+        // A byte order mark alone is not decoded text.
+        let bom = decode_native_html_detailed(b"\xef\xbb\xbfabc", None);
+        assert_eq!(bom.text, "abc");
+        assert!(bom.decoding.code_pages.is_empty());
     }
 
     #[test]

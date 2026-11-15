@@ -27,15 +27,20 @@
 //!   words and symbols that stand for a Unicode character converted.
 //! - **Output encoding.** The result is a Rust `String` (UTF-8). A `<meta ... charset=...>` in the
 //!   recovered HTML therefore describes the original bytes, not this text; the diagnostics say
-//!   whether one was seen so the body pipeline can decide. Code pages the project's decoders do
-//!   not implement (see `oxmsg_decode`) yield U+FFFD per byte and are counted, never guessed.
+//!   whether one was seen so the body pipeline can decide. Text is decoded through
+//!   `oxmsg_decode` (and, for the pages it maps, `codepage`, which wraps `encoding_rs`); bytes with
+//!   no mapping, and bytes under a page with no decoder, yield U+FFFD and are counted, never
+//!   guessed. The code pages in effect and the ones with replaced bytes are recorded in
+//!   [`Diagnostics::decoding`].
 //!
 //! Known limits, reported rather than hidden: standard destinations not in the fixed list are
-//! indistinguishable from formatting groups and are treated as visible; double-byte code pages
-//! are unsupported (their bytes become U+FFFD); `\objattph` placeholders are not mapped.
+//! indistinguishable from formatting groups and are treated as visible; a code page with no
+//! decoder (the OEM pages, Johab) loses its non-ASCII bytes; `\objattph` placeholders are not
+//! mapped.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::codepage::{self, Decoding};
 use crate::oxmsg_decode::{String8Decoded, decode_string8_with_codepage};
 
 /// Default bound on group nesting; deeper input stops the scan and sets
@@ -136,6 +141,9 @@ pub(crate) struct Diagnostics {
     /// Bytes that could not be decoded (unsupported code page), emitted as U+FFFD.
     pub(crate) undecodable_bytes: u64,
     pub(crate) unsupported_codepages: BTreeSet<u32>,
+    /// The code pages under which text was decoded, and those with replaced bytes (the
+    /// `body.decoding` object of `metadata.json`).
+    pub(crate) decoding: Decoding,
     pub(crate) fonts_defined: u64,
     pub(crate) unclosed_groups_at_end: u64,
     pub(crate) stray_group_ends: u64,
@@ -399,11 +407,20 @@ impl Emitter {
             self.run_codepage
         };
         match decode_string8_with_codepage(&bytes, codepage) {
-            String8Decoded::Decoded { text, .. }
-            | String8Decoded::AsciiUnderUnsupportedCodepage { text } => self.append(&text),
+            String8Decoded::Decoded { text, replaced } => {
+                // Bytes with no mapping under a page that has a decoder are counted too (before
+                // v0.1.43 only bytes under a page with no decoder were).
+                self.diag.undecodable_bytes += u64::from(replaced);
+                self.diag
+                    .decoding
+                    .note(codepage, &text, u64::from(replaced));
+                self.append(&text);
+            }
+            String8Decoded::AsciiUnderUnsupportedCodepage { text } => self.append(&text),
             String8Decoded::UnsupportedCodepage => {
                 self.diag.undecodable_bytes += bytes.len() as u64;
                 self.diag.unsupported_codepages.insert(codepage);
+                self.diag.decoding.note_replaced(codepage);
                 for _ in 0..bytes.len() {
                     self.append("\u{FFFD}");
                 }
@@ -435,9 +452,14 @@ impl Emitter {
     }
 
     /// One byte of text in `codepage`. ASCII is written directly; other bytes wait to be decoded
-    /// as a run.
+    /// as a run. Under a multibyte page an ASCII-range byte can be the second byte of a
+    /// character (the trail bytes of Shift_JIS, GBK and Big5 start at 0x40), so while a run of
+    /// that page is open every byte joins it, and the decoder, not this function, decides.
     fn push_byte(&mut self, byte: u8, codepage: u32) {
-        if byte < 0x80 {
+        let continues_multibyte_run = !self.run.is_empty()
+            && self.run_codepage == codepage
+            && codepage::is_multibyte(codepage);
+        if byte < 0x80 && !continues_multibyte_run {
             self.push_char(char::from(byte));
             return;
         }
@@ -1075,13 +1097,81 @@ mod tests {
         // Windows-1252 font: decoded.
         let rtf = br"{\rtf1\ansi\fromhtml1 {\fonttbl{\f1\fcharset0 Arial;}}{\*\htmltag64}\f1 \'e9}";
         assert_eq!(html(rtf), "\u{e9}");
-        // A code page the project's decoders do not implement: counted, never guessed.
+        // A page `encoding_rs` maps (1251 for charset 204) decodes.
         let rtf =
             br"{\rtf1\ansi\fromhtml1 {\fonttbl{\f1\fcharset204 Arial;}}{\*\htmltag64}\f1 \'ef}";
         let result = deencapsulate_html(rtf, Limits::default()).unwrap();
+        assert_eq!(result.html, "\u{43F}");
+        assert_eq!(result.diagnostics.undecodable_bytes, 0);
+        assert!(result.diagnostics.unsupported_codepages.is_empty());
+        // A code page nothing maps (437, by `\cpg`): counted, never guessed.
+        let rtf = br"{\rtf1\ansi\fromhtml1 {\fonttbl{\f1\cpg437 Arial;}}{\*\htmltag64}\f1 \'ef}";
+        let result = deencapsulate_html(rtf, Limits::default()).unwrap();
         assert_eq!(result.html, "\u{FFFD}");
         assert_eq!(result.diagnostics.undecodable_bytes, 1);
-        assert!(result.diagnostics.unsupported_codepages.contains(&1251));
+        assert!(result.diagnostics.unsupported_codepages.contains(&437));
+        assert!(
+            result
+                .diagnostics
+                .decoding
+                .replaced_code_pages
+                .contains(&437)
+        );
+    }
+
+    fn pages(set: &BTreeSet<u32>) -> Vec<u32> {
+        set.iter().copied().collect()
+    }
+
+    #[test]
+    fn windows_1256_text_decodes_and_the_page_is_recorded() {
+        // The case that cost `crkb.pst` 562 bytes: a document in Windows-1256 (Arabic).
+        let rtf =
+            br"{\rtf1\ansi\ansicpg1256\fromhtml1 {\*\htmltag64}{\*\htmltag84 <p>\'c7\'e1</p>}}";
+        let result = deencapsulate_html(rtf, Limits::default()).unwrap();
+        assert_eq!(result.html, "<p>\u{627}\u{644}</p>");
+        let diagnostics = result.diagnostics;
+        assert_eq!(diagnostics.undecodable_bytes, 0);
+        assert_eq!(pages(&diagnostics.decoding.code_pages), vec![1256]);
+        assert!(diagnostics.decoding.replaced_code_pages.is_empty());
+    }
+
+    #[test]
+    fn a_font_charset_selects_windows_1256_under_a_windows_1252_default() {
+        let rtf = br"{\rtf1\ansi\ansicpg1252\fromhtml1 {\fonttbl{\f0\fcharset178 Arial;}}{\*\htmltag64}\f0 \'c7}";
+        let result = deencapsulate_html(rtf, Limits::default()).unwrap();
+        assert_eq!(result.html, "\u{627}");
+        assert_eq!(result.diagnostics.undecodable_bytes, 0);
+        assert_eq!(pages(&result.diagnostics.decoding.code_pages), vec![1256]);
+        assert_eq!(result.diagnostics.default_codepage, 1252);
+    }
+
+    #[test]
+    fn double_byte_pages_decode_and_keep_an_ascii_range_trail_byte_with_its_lead() {
+        // Shift_JIS: two bytes, then plain ASCII text in the same run.
+        let rtf = br"{\rtf1\ansi\ansicpg932\fromhtml1 {\*\htmltag64}{\*\htmltag84 \'82\'a0abc}}";
+        let result = deencapsulate_html(rtf, Limits::default()).unwrap();
+        assert_eq!(result.html, "\u{3042}abc");
+        assert_eq!(pages(&result.diagnostics.decoding.code_pages), vec![932]);
+        // Big5: the second byte of U+4E00 is 0x40, an ASCII-range byte that arrives as `\'40`.
+        let rtf = br"{\rtf1\ansi\ansicpg950\fromhtml1 {\*\htmltag64}{\*\htmltag84 \'a4\'40}}";
+        let result = deencapsulate_html(rtf, Limits::default()).unwrap();
+        assert_eq!(result.html, "\u{4E00}");
+        assert_eq!(result.diagnostics.undecodable_bytes, 0);
+        assert_eq!(pages(&result.diagnostics.decoding.code_pages), vec![950]);
+    }
+
+    #[test]
+    fn a_byte_with_no_mapping_under_windows_1252_is_replaced_and_counted() {
+        let rtf = br"{\rtf1\ansi\ansicpg1252\fromhtml1 {\*\htmltag64}{\*\htmltag84 a\'81b}}";
+        let result = deencapsulate_html(rtf, Limits::default()).unwrap();
+        assert_eq!(result.html, "a\u{FFFD}b");
+        assert_eq!(result.diagnostics.undecodable_bytes, 1);
+        assert!(result.diagnostics.decoding.code_pages.is_empty());
+        assert_eq!(
+            pages(&result.diagnostics.decoding.replaced_code_pages),
+            vec![1252]
+        );
     }
 
     #[test]

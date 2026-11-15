@@ -237,8 +237,8 @@ proptest! {
     fn arbitrary_bytes_never_panic_the_string_decoders(
         bytes in prop::collection::vec(any::<u8>(), 0..200),
         code_page in prop_oneof![
-            Just(1252u32), Just(28591u32), Just(20127u32), Just(65001u32), Just(1251u32),
-            Just(932u32), any::<u32>(),
+            Just(1252u32), Just(28591u32), Just(20127u32), Just(65001u32), Just(437u32),
+            prop::sample::select(crate::codepage::MAPPED_CODEPAGES), any::<u32>(),
         ],
     ) {
         let _ = decode_string8_with_codepage(&bytes, code_page);

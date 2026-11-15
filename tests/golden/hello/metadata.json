@@ -14,6 +14,7 @@
     "converter": null,
     "preprocessing": [],
     "internet_codepage": null,
+    "decoding": null,
     "originals": [
       {
         "file": "body.txt",
