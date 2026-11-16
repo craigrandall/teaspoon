@@ -46,7 +46,7 @@ file, a script, or a command line) and clearing it afterwards.
   never a path). Every call into `outlook-pst` goes through one of the two (the temporary spike
   module is the exception), and a panic in one item (a message, a subfolder) is counted as an open
   error while the walk continues. Compressed RTF goes only through
-  `shared::decompress_rtf_bounded`. Recursion on untrusted nesting is bounded before it starts,
+  `shared::decompress_rtf_bounded`. Text is decoded through `codepage::decode` (the one module that names an `encoding_rs` type) or the in-house decoders of `oxmsg_decode`, and the decoding of one message's body runs inside a single `run_contained` (`archive::body_outcome_with`), not one per string, because each outermost contained call swaps the global panic hook. Recursion on untrusted nesting is bounded before it starts,
   because a stack overflow cannot be caught. `run_contained` is reentrant on one thread, so a
   helper may call it inside a wider contained region (the PST message read does), but it does not
   extend across threads: never call it from a thread that a contained call spawns and waits for,

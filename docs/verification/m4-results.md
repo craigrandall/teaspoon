@@ -1172,3 +1172,63 @@ Four commits on `v0.1.41`, then the version bump. No archive file changes conten
 **Not exercised on real data.** The "contained and counted" paths in the planner and the diagnostic (no fixture makes `outlook-pst` panic; the unit tests cover `contained` only), and the replaced-count path of `decode_native_html` (no real body reaches it). Both were checked only by the unchanged outputs above.
 
 **Open after this release.** Windows-1256 and the other code pages the de-encapsulation and the native HTML path do not decode (29 messages on `crkb.pst`; `encoding_rs`, ADR accepted 2026-10-31, not yet a dependency); recording the decode code page in `metadata.json` (owner's decision of 2026-11-11, not built); the accuracy of the lossy UTF-8 count (it counts `U+FFFD` characters in the result, which includes any already in the source); decisions 13 and 14; the independent counts, the ANSI refusal fixture, and non-ASCII `PT_STRING8` data; drop B; the repeat-export time; the temporary spike module.
+
+## v0.1.43: code pages through `encoding_rs`, and `body.decoding` (2026-11-15)
+
+Plan decisions 16 and 17. Code commit `245fdc8` on `main` (11 files, 848 insertions and 64 deletions; `src/codepage.rs` is new): `encoding_rs` pinned `=0.8.35`, `src/codepage.rs`, the wiring into `oxmsg_decode.rs`, `rtf_deencap.rs`, `body.rs`, and `archive.rs`, the `body.decoding` object in `metadata.json`, and an exact byte count for UTF-8. CI succeeded on the push (2m10s). The design is in the code-page ADR ("Implementation and results") and body ADR decision 10. `Cargo.toml` is 0.1.43; the root `folder.json` records it.
+
+### Quality gate and regression (owner's runs, 2026-11-14 and 2026-11-15)
+
+| Check | Result |
+|---|---|
+| Build and tests | everything built; 459 tests pass (433 at v0.1.42 plus 26 new) |
+| `verify-split.ps1 -Pst` on `tsp-tester.pst` (baseline `v0.1.19.1`) | default IDENTICAL (850 bytes, 33 lines); `--verify` IDENTICAL (2705 bytes, 82 lines; `files_scanned=29`, `rtf_decompressed_bytes_mismatch=1`, `embedded_message_class_readable_total=1`, `structural_gate_violations=0`); PST IDENTICAL after ignoring the `pst_password=` line (1110 bytes, 45 lines, 1 line ignored); standard error 0 bytes in all three |
+| `.msg` corpus export (`C:\o.43.pre1`, a root of 17 units, `Cargo.toml` at 0.1.43, before the tag) | exit 0; 217 files written, `export_readback_mismatches=0`; plan 74 entries (3 folders, 34 messages, 34 attachment files, 3 embedded messages), 0 gate violations; 32 attachments extracted (6,282,892 bytes), 2 not extracted, 0 failed; 3 of 3 embedded messages written; body sources 31 `rtf_html` and 3 `plain_text`; kept body files 31 `html`, 34 `rtf`, 34 `txt`; loss: 237 tables flattened, 3 `rtf_not_converted`, **0** `undecodable_bytes_replaced` (it was 1, in code page 1255), 1 invisible padding run, 0 conversion or decompression failures; 26 `cid:` references, all rewritten, 26 attachments inline; every other counter as recorded for v0.1.36 and later |
+
+`export_tree_sha256` of that corpus export: `c719940059b2e2024bc189d2a4752a21b8ed1b08fd0290b0ddbefae6eb004b44` (v0.1.42, same root length: `f778439773a2f08f1f4ec3add62d9bc0398c9bc350ea79d58fe6583f014b1ae1`). The hash differs because every HTML-bodied message gains `body.decoding`, the one Windows-1255 byte decodes, and the version string changed; the two trees were not compared file by file.
+
+### `crkb.pst`: two builds, equal-length output roots
+
+The owner exported `crkb.pst` (the golden, protected copy, with `TSP_PST_PASSWORD` set for the run) with a `v0.1.42` build to `C:\o.crkb.42` and with the `v0.1.43` build to `C:\o.crkb.43`, in two windows at the same time (so the times are not comparable). Both roots are 17 units with the `crkb` directory, and an earlier solo export with the new build took 185.6 s at a 106 MB peak.
+
+| | v0.1.42 | v0.1.43 |
+|---|---|---|
+| exit, standard error | 0, 0 bytes | 0, 0 bytes |
+| `export_result`, read-back mismatches | completed, 0 | completed, 0 |
+| `tool_version` in the root `folder.json` | 0.1.42 | 0.1.43 |
+| `export_body_loss_undecodable_bytes_replaced` | 562 | 0 |
+| time, peak working set | 566.1 s, 110 MB | 657.2 s, 109 MB |
+| `export_tree_sha256` | `2d5ac43742871311c7f42c5bf81f5c73f832eeb15ea3130dc62cbeea0d24088e` | `844ba460f48401204446999949cf7e1899160934f48eca5ca9381b7bb5412894` |
+
+### The comparison (`check_codepage_export.py`, counts only, outside the crate)
+
+The script (run with `uv run`) compares two exports and checks: the same files; content files changed only for the messages that had `undecodable_bytes_replaced` loss in the baseline (the set S); `metadata.json` unchanged apart from `body.decoding`, and from `body.loss` and `body.originals` in S; the root `folder.json` different only in `tool_version`; and `body.decoding` present exactly where the body source is HTML, with replaced pages exactly where there is loss. Clean run (`--fast`: attachments compared by size, everything else by SHA-256), 523.8 s:
+
+| Result | Value |
+|---|---|
+| files in both trees | 28,222 and 28,222, none in only one |
+| messages with a body object | 6,508 |
+| set S (baseline loss) | 29 messages, 562 bytes; all 29 changed (`body.html` 29, `message.md` 29, `metadata.json` 29); no other file changed, no `folder.json` changed |
+| replaced bytes now; messages listing a replaced page | 0; 0 |
+| `body.decoding` | non-null 6,503 (6,312 native HTML, 191 recovered from the RTF); null 5 |
+| code pages in effect (messages) | 65001: 4,538; 1252: 130; 1256: 26; 28591: 3; 1255: 2; 1250: 1 |
+| verdict | all checks hold |
+
+**The first comparison, and a lesson.** The first run compared the new export with an older baseline (`C:\o.crkb.42`, taken, as far as the record shows, from the 14-unit root `C:\o.crkb` of the v0.1.42 table above and renamed afterwards; not confirmed). It failed, and the failures were all explained. 103 files existed in only one tree (19 message directories, 62 files, and 41 attachment files); 10 `folder.json` and 5 `metadata.json` files differed because they name those entries; and `planned_longest_relative_path_units` was 239 against 236. The names in the older export were 1 to 4 units longer (mostly 3), which is a root 3 units shorter: the path budget is taken from the real root (naming ADR, rule L2a). At matching paths the only changes were the `body.html` and `message.md` of the 29 messages (that run hashed every file: 1,100.9 s). The script had two defects of its own, both fixed: it did not allow `body.originals` to change (a message whose HTML is recovered from its RTF keeps that HTML as `body.html`, so its size and SHA-256 change) and it counted every `folder.json` change twice. The clean run above used a fresh `v0.1.42` export at the same root length.
+
+### What this shows, and what it does not
+
+- **Shown:** the 29 messages decode (562 replaced bytes become 0); the 26 Windows-1256 messages record page 1256 as in effect; nothing else in a 28,222-file archive changes apart from the added `body.decoding`, the tool version, and, in those 29 messages, the loss and original-body records; the field is present exactly where an HTML body was converted; the root-length rule holds again on a second, much larger PST.
+- **Not shown:** that the decoded text is right (no oracle, and no one has read an Arabic message by eye); which pages the 3 messages that declare 1252 used (the counts for 1255 and 1250 fit, but they cover the whole export); any multibyte page, any `PT_STRING8` value, or any replaced page on real data; the contained decoding failure on real data (a unit test covers the fallback); attachments in the clean run (compared by size only; the earlier full-hash run found none changed at matching paths, but did not hash the 41 renamed ones); the tester export, and the password matrix with a refusal, at 0.1.43 (the exports ran with the right password only); build time and binary size with the new dependency; the `cargo tree` and licence lines of the ADR's Confirmation.
+
+**Tree hashes at `Cargo.toml` 0.1.43** (each from the owner's run):
+
+| Input | Output root | `export_tree_sha256` |
+|---|---|---|
+| `.msg` corpus (34 messages) | `C:\o.43.pre1` (17 units) | `c719940059b2e2024bc189d2a4752a21b8ed1b08fd0290b0ddbefae6eb004b44` |
+| `crkb.pst` | `C:\o.crkb.43` (17 units with `crkb`) | `844ba460f48401204446999949cf7e1899160934f48eca5ca9381b7bb5412894` |
+| `crkb.pst`, v0.1.42, for comparison | `C:\o.crkb.42` (same length) | `2d5ac43742871311c7f42c5bf81f5c73f832eeb15ea3130dc62cbeea0d24088e` |
+
+The v0.1.42 value recorded earlier for `crkb.pst` (`a79a42c0…cf96`) is for a root of 14 units and is not comparable with these.
+
+**Open after this release.** Drop B (the envelope) and a second `crkb.pst` run as its gate, which can now be compared with the `844ba460…` baseline at an equal-length root; M4g and Q11; pinning `compressed-rtf` and `cfb` (decision 18); the checks of decision 19 (an independent count of `crkb.pst`, an ANSI refusal fixture, non-ASCII `PT_STRING8` data); decisions 12, 13, 14, and 15; an owner review of a decoded Arabic message; the pages of a plain-text `PT_STRING8` body (with the ANSI work); the BSD-3-Clause notice for a distributed binary; the temporary spike module.

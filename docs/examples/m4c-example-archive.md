@@ -1,8 +1,8 @@
-# Example archive (M4c draft format, with the M4d envelope, the M4e-2b body, the M4f-1 attachment records, and the M4f-2b `cid:` records)
+# Example archive (M4c draft format, with the M4d envelope, the M4e-2b body, the M4f-1 attachment records, the M4f-2b `cid:` records, and the v0.1.43 decode record)
 
 This is a small, hand-built illustration of what `tsp <dir> --out <out>` writes, following the accepted ADRs ([naming](../../ADRs/export-naming-collisions-and-path-budgets.md), [identity](../../ADRs/message-and-folder-identity-and-provenance.md), [output posture](../../ADRs/export-output-posture-consent-and-ownership.md), [file contract](../../ADRs/archive-file-contract-and-schema-evolution.md), [body selection and loss](../../ADRs/body-selection-original-bodies-and-formatting-loss.md)). It is synthetic: no real message content appears.
 
-- `Hello World/message.md` and `Hello World/metadata.json` are exactly the committed golden files in `tests/golden/hello/` as of `v0.1.36` (the byte-for-byte output of the code for a synthetic message). `metadata.json` changed in M4e-2b: the `body` object now records the source, the converter, the preprocessing, the kept original files, and the loss, and `message.md` is unchanged for a plain-text message. In M4f-1 `metadata.json` gained an `attachments` array (empty here, because this message has no attachments). In M4f-2b the `body` object's `cid_references` gained the rewrite counts (all zero here, because this message has no `cid:` links), and every attachment record gained `inline`.
+- `Hello World/message.md` and `Hello World/metadata.json` are exactly the committed golden files in `tests/golden/hello/` as of `v0.1.43` (the byte-for-byte output of the code for a synthetic message). `metadata.json` changed in M4e-2b: the `body` object now records the source, the converter, the preprocessing, the kept original files, and the loss, and `message.md` is unchanged for a plain-text message. In M4f-1 `metadata.json` gained an `attachments` array (empty here, because this message has no attachments). In M4f-2b the `body` object's `cid_references` gained the rewrite counts (all zero here, because this message has no `cid:` links), and every attachment record gained `inline`. In v0.1.43 the `body` object gained `decoding` (`null` here, because the body is plain text; for an HTML body it lists the code pages the HTML was decoded under, see below).
 - `Hello World/body.txt` is the plain-text body as the message stored it (`Line one`, CRLF, `Line two`, CRLF: 20 bytes). The kept body files are byte copies of source content and are exempt from the file contract's UTF-8-without-BOM and LF rules, which is why `body.txt` keeps its CRLF line endings while every generated file uses LF.
 - The two `folder.json` files below were assembled by hand from the draft schema in `src/archive.rs`. Numbers, the tool version, and the hash are **illustrative placeholders**, not output of a run.
 - Everything is the `0.1-draft` format: it may change without notice until the metadata stage freezes it.
@@ -69,6 +69,7 @@ Line two
     "converter": null,
     "preprocessing": [],
     "internet_codepage": null,
+    "decoding": null,
     "originals": [
       {
         "file": "body.txt",
@@ -121,6 +122,7 @@ For an HTML message the `body` object differs like this (illustrative, not a com
     "converter": { "name": "htmd", "version": "0.5.4" },
     "preprocessing": ["style", "title"],
     "internet_codepage": 1252,
+    "decoding": { "code_pages": [1252], "replaced_code_pages": [] },
     "originals": [
       { "file": "body.html", "bytes": 98, "sha256": "<64 hex digits>", "note": "as_stored" },
       { "file": "body.txt", "bytes": 11, "sha256": "<64 hex digits>", "note": null }
@@ -130,6 +132,8 @@ For an HTML message the `body` object differs like this (illustrative, not a com
     "kept_files_exempt_from_file_rules": true
   },
 ```
+
+`decoding` is `null` when no HTML was converted (the source is `plain_text` or `none`). For an HTML body it holds two ascending lists of Windows code page numbers: `code_pages`, the pages under which at least one byte sequence became a non-ASCII character (65001 for UTF-8, which is also what a native HTML body with no stored `internet_codepage` is read as; an ASCII-only body lists none), and `replaced_code_pages`, the pages under which at least one byte was replaced by U+FFFD (it is non-empty exactly when `undecodable_bytes_replaced` is in `loss`). In the example above the stored code page is 1252 and the body had a non-ASCII character, so `code_pages` is `[1252]`; a message whose RTF carried Arabic text under Windows-1256 would list `[1256]`.
 
 ## With attachments (illustrative, not a committed file)
 

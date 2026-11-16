@@ -216,7 +216,7 @@ PidTagRtfCompressed (bytes)
                              whole-document \fromhtml1 search
 ```
 
-- `rtf_deencap` imports only the `PT_STRING8` decoders from `oxmsg_decode`; it reads no file and knows no adapter type. At M4e-1 nothing in the export called it; since M4e-2 `body.rs` does.
+- `rtf_deencap` imports the `PT_STRING8` decoders from `oxmsg_decode` (and, since v0.1.43, the `Decoding` record and the multibyte-page test from `codepage`); it reads no file and knows no adapter type. At M4e-1 nothing in the export called it; since M4e-2 `body.rs` does.
 - The recovered text is UTF-8, so a `charset=` declaration inside it is stale; the diagnostics flag one.
 
 ## M4f-1 boundary: by-value attachments, streamed in chunks (built in v0.1.34)
@@ -396,7 +396,35 @@ tsp <pst> --out <dir>
 - A `~` in any source name becomes `_` before planning (naming rule N3, amended 2026-11-09, flag `tilde_replaced`; `naming::sanitize_component`, checked by `is_valid_component`). Without it, a bare `Screen~1.jpg` next to `Screen~1 (02).jpg` can resolve to the 8.3 short name Windows gave the other file, and one file replaces the other. A side effect: the planner sanitizes before it tests for tool-special names, so the `~$` case of rule N6 can no longer match (`~$x.docx` is exported as `_$x.docx`).
 - The names, and so the tree hash, depend on the length of the output root, because the path budget is taken from it (naming ADR, root-length note; export rules L2a). Two exports of one PST are byte-identical at roots of the same length: at `C:\o.tester` a repeat export wrote 0 files and printed the same hash, while `C:\o.tester2`, one unit longer, printed another.
 - Not in drop A: the PST envelope (drop B), class-specific handling of non-mail items, skipping or counting associated items and search folders, and ANSI.
-- Run on `crkb.pst` (6,508 messages, 7,016 attachments; 2026-11-11): 28,222 files, 0 read-back mismatches, a peak working set of 107 MB (the spike's was 91 MB, so memory does not grow with the mailbox), and one tree hash for a fresh export, a repeat, and a fresh export at an equal-length root. A native `body.html` is the stored bytes and a recovered one is UTF-8 text (`archive.rs`: the notes `as_stored` and `recovered_from_rtf_charset_declaration_stale`); 29 messages carry RTF text in a code page with no decoder (26 files declare Windows-1256), whose non-ASCII bytes the de-encapsulation replaces and counts, with the received RTF kept as `body.rtf`. A repeat export stages every file before finding it identical, so it costs more than a fresh one (919 s against 225 to 337 s).
+- Run on `crkb.pst` (6,508 messages, 7,016 attachments; 2026-11-11): 28,222 files, 0 read-back mismatches, a peak working set of 107 MB (the spike's was 91 MB, so memory does not grow with the mailbox), and one tree hash for a fresh export, a repeat, and a fresh export at an equal-length root. A native `body.html` is the stored bytes and a recovered one is UTF-8 text (`archive.rs`: the notes `as_stored` and `recovered_from_rtf_charset_declaration_stale`); 29 messages carry RTF text in a code page with no decoder (26 files declare Windows-1256), whose non-ASCII bytes the de-encapsulation replaces and counts, with the received RTF kept as `body.rtf` (fixed in v0.1.43; see the M4i-3 section). A repeat export stages every file before finding it identical, so it costs more than a fresh one (919 s against 225 to 337 s).
+
+## M4i-3 boundary: decoding code pages (release v0.1.43)
+
+Text stored in a Windows code page (a `PT_STRING8` value, an RTF `\'hh` run, a native HTML body with an Internet code page) is decoded in one place per kind of page, and what happened is recorded.
+
+```text
+bytes + a Microsoft code page number
+ |
+ +-- oxmsg_decode::decode_string8_with_codepage
+ |     1252, 28591, 20127   in-house (1252 keeps its five undefined bytes as counted losses)
+ |     65001                decode_utf8_counted (Utf8Chunks: the exact count, in bytes)
+ |     any other number     codepage::decode -> encoding_rs      (31 pages; None = no decoder)
+ |                            None: all-ASCII under an ASCII superset is exact; anything else is
+ |                                  UnsupportedCodepage (counted, never guessed)
+ |
+ +-- callers record what happened (codepage::Decoding)
+       body.rs        decode_native_html_detailed: the stored Internet code page, or 65001 if none
+       rtf_deencap    each run of `\'hh` bytes: the font's page, or the default page
+       |
+       +-- Selection -> Rendered -> archive.rs `DecodingRecord` -> metadata.json `body.decoding`
+```
+
+- `codepage.rs` is the only module that names an `encoding_rs` type. The table is written from Microsoft's code page numbers; the standard's decoders differ from Microsoft's in recorded places (28599 decodes as windows-1254; the multibyte pages are the standard's variants). No byte order mark is looked at: the declared page decides.
+- Malformed input never stops a decode. Each malformed sequence becomes one U+FFFD and its length in bytes is added to the count, so `undecodable_bytes_replaced` means bytes for every decoder; a page with no decoder loses its non-ASCII bytes the same way.
+- Under a multibyte page an ASCII-range byte can be the second byte of a character, so while a run of that page is open `rtf_deencap` keeps every byte in the run and lets the decoder decide.
+- Decoding one message's body runs inside a single `run_contained` (`archive::body_outcome_with`), not once per string. A panic falls back to the plain-text body and is recorded as `html_conversion_failed`.
+- The 1252 and UTF-8 decoders stay in-house: the standard's windows-1252 differs at five bytes, and `Utf8Chunks` gives the exact count.
+- Verified: unit tests (a known sequence for every mapped page, malformed input, the multibyte trail byte, a property test over arbitrary bytes), and the `crkb.pst` export compared with the `v0.1.42` export at an equal-length root (29 messages decode, 562 replaced bytes become 0, no other file changes, `body.decoding` in 6,503 messages). No multibyte page and no `PT_STRING8` value has met real data. Evidence: `docs/verification/m4-results.md`.
 
 ## Verification structure
 
@@ -451,6 +479,7 @@ The code lives in `src/`, one module per seam:
 - `oxmsg_classify`, `oxmsg_decode`, `oxmsg_structure`, `oxmsg_extract` — the custom MS-OXMSG parser, from naming conventions through extraction; `oxmsg_envelope` — the envelope extraction (M4d).
 - `verify` — the `--verify` comparison and structural gates; `verify_envelope` — the `--verify-envelope` comparison (M4d); `verify_deencap` — the `--verify-deencap` comparison (M4e-1).
 - `rtf_deencap` — the pure MS-OXRTFEX de-encapsulation (M4e-1).
+- `codepage` — code page numbers to `encoding_rs` decoders, with exact byte counts of what could not be decoded, and the `Decoding` record of the pages a body was decoded under (v0.1.43). The only module that names an `encoding_rs` type.
 - `naming`, `plan` — the pure naming rules and export planner (M4b); since v0.1.41 a `~` in a name becomes `_`, and the planner's special-name test runs after that.
 - `source_msg`, `source_pst`, `dry_run` — readers that build the planner's source tree, and the `--dry-run` report (M4b); `source_msg` also opens message content for export (the body forms, the envelope, and a descriptor for each attachment) together with a handle that streams one attachment's data at a time and opens an embedded attachment as a nested message through that handle (M4f-2a).
 - `model`, `archive`, `export` — the model so far (message content and envelope), the pure renderers, and the writer with its preflight and consent rules (M4c, extended by M4d).
@@ -470,4 +499,4 @@ The code lives in `src/`, one module per seam:
 
 The README lists the contents of each module.
 
-Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. The envelope modules follow the same pattern: `oxmsg_envelope` is an adapter module that depends on `oxmsg_classify`, `oxmsg_decode`, `oxmsg_extract`, and `shared` and produces `model` types (it also takes the submit and delivery time property IDs from `dry_run`, where they were first defined, which is a small layering oddity: an adapter importing from the reporting module), and `verify_envelope` depends on `model`, `source_msg`, `dry_run` (for the subject-marker stripping), and `verify` (for the shared comparison tallies). Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. The blanket `#![allow(dead_code)]` that `naming.rs` and `plan.rs` carried is gone, so dead code is reported there like everywhere else. `layout` holds only constants and is imported by `plan`, `archive`, and `body`. `pst_password` depends only on `outlook_pst`; `pst` and `source_pst` call it, `main` imports its `PasswordRefusal` to choose the exit status, and `dry_run` imports its `PasswordOutcome` for the census, which puts one adapter-side type in the reporting module. The full normalized model (M4b-4) has not been written: bodies with raw bytes, the raw property bag, named properties, embedded messages, and diagnostics are not modelled yet (attachments are modelled as descriptors since M4f-1).
+Dependency direction today: `shared` depends on nothing in the crate; the PST diagnostic and the `oxmsg_*` modules depend on `shared`; `verify` depends on the extraction and structure modules; `naming` and `plan` depend on no adapter module; `source_msg` and `source_pst` depend on their adapters and on `plan`; `model` depends on nothing; `archive` depends on `model` and `naming`; `export` depends on `archive`, `model`, `plan`, `naming`, `dry_run`, and `source_msg`. The envelope modules follow the same pattern: `oxmsg_envelope` is an adapter module that depends on `oxmsg_classify`, `oxmsg_decode`, `oxmsg_extract`, and `shared` and produces `model` types (it also takes the submit and delivery time property IDs from `dry_run`, where they were first defined, which is a small layering oddity: an adapter importing from the reporting module), and `verify_envelope` depends on `model`, `source_msg`, `dry_run` (for the subject-marker stripping), and `verify` (for the shared comparison tallies). Every item is `pub(crate)`, so the module boundaries are organizational, not yet a designed API. The blanket `#![allow(dead_code)]` that `naming.rs` and `plan.rs` carried is gone, so dead code is reported there like everywhere else. `layout` holds only constants and is imported by `plan`, `archive`, and `body`. `pst_password` depends only on `outlook_pst`; `pst` and `source_pst` call it, `main` imports its `PasswordRefusal` to choose the exit status, and `dry_run` imports its `PasswordOutcome` for the census, which puts one adapter-side type in the reporting module. `codepage` depends on `encoding_rs` only and names no crate module; `oxmsg_decode` calls it for the pages it maps, `rtf_deencap` calls it for the multibyte test and keeps its `Decoding` record, and `body` and `archive` carry that record into `metadata.json`. The full normalized model (M4b-4) has not been written: bodies with raw bytes, the raw property bag, named properties, embedded messages, and diagnostics are not modelled yet (attachments are modelled as descriptors since M4f-1).
