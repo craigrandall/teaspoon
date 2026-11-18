@@ -431,6 +431,9 @@ fn print_export_report(r: &ExportReport) {
         );
         println!("export_pst_html_not_binary={}", r.pst_notes.html_not_binary);
         println!("export_pst_rtf_not_binary={}", r.pst_notes.rtf_not_binary);
+        for (key, value) in r.pst_notes.envelope.report_lines() {
+            println!("export_pst_envelope_{key}={value}");
+        }
         for (key, count) in &r.pst_attachment_errors {
             println!("export_pst_attachment_read_error {key} count={count}");
         }

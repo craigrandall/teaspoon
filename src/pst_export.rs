@@ -15,11 +15,12 @@
 //! first export of a message with an RTF body deadlocked (2026-11-09). It does not extend across
 //! threads: never call `run_contained` from a thread that this code spawns and then waits for.
 //!
-//! What a message carries here (drop A): subject, Internet message ID, time, the body forms as
-//! the source stores them (plain text, native HTML as `PT_BINARY` only, decompressed RTF, the
-//! Internet code page), and a descriptor for each attachment. The envelope arrives in drop B
-//! and is empty until then. Attachment bytes are never read to build a descriptor, except to
-//! read the content ID of a by-value attachment from a table that has no content-ID column
+//! What a message carries here (drops A and B): subject, Internet message ID, time, the body
+//! forms as the source stores them (plain text, native HTML as `PT_BINARY` only, decompressed
+//! RTF, the Internet code page), the envelope (`pst_envelope.rs`: sender, sent-representing,
+//! recipients, times, importance, sensitivity, transport headers, conversation fields), and a
+//! descriptor for each attachment. Attachment bytes are never read to build a descriptor, except
+//! to read the content ID of a by-value attachment from a table that has no content-ID column
 //! (the attachment is opened, its content ID taken, and its bytes dropped at once).
 //!
 //! Embedded-message and OLE attachments cannot be read through the crate (the read fails with
@@ -42,13 +43,14 @@ use outlook_pst::ndb::node_id::NodeId;
 use crate::archive::PstIdentity;
 use crate::dry_run::{PROP_INTERNET_MESSAGE_ID, PROP_SUBJECT, SourceCensus, strip_subject_marker};
 use crate::export_source::DataOpen;
-use crate::model::{AttachmentInfo, BodyForms, Envelope, MessageContent};
+use crate::model::{AttachmentInfo, BodyForms, MessageContent};
 use crate::oxmsg_decode::{PROP_INTERNET_CODEPAGE, PROP_MESSAGE_CODEPAGE};
 use crate::plan::SourceFolder;
 use crate::pst_attachments::{
     AttachmentRow, attachment_rows, error_label, is_missing_data_label, open_attachment,
     open_unicode_pst,
 };
+use crate::pst_envelope::{EnvelopeNotes, read_envelope};
 use crate::pst_password::{PasswordOutcome, enforce, supplied_from_env};
 use crate::pst_text::{TextReader, TextStats, integer32};
 use crate::shared::{
@@ -67,6 +69,10 @@ pub(crate) struct PstNotes {
     pub(crate) html_not_binary: u64,
     /// Messages whose `PidTagRtfCompressed` was present but not `PT_BINARY` (not read).
     pub(crate) rtf_not_binary: u64,
+    /// What reading the envelopes found (drop B): which fields the messages carry, how the
+    /// recipient rows were accounted for, and how the recipient order compares with the row
+    /// numbers.
+    pub(crate) envelope: EnvelopeNotes,
 }
 
 /// An open message: the content the export writes, a reader for its attachments, and its
@@ -199,6 +205,10 @@ impl PstSource {
             plain_text,
         };
 
+        // The envelope (drop B), read through the same text reader so its code page chain and
+        // its loss counts are the message's own.
+        let envelope = read_envelope(&*message, &mut text, &mut notes.envelope);
+
         // One descriptor per attachment row, in table order: the order of the planner's source
         // attachments.
         let rows = attachment_rows(&*message, &mut text).unwrap_or_default();
@@ -229,7 +239,7 @@ impl PstSource {
                 internet_message_id,
                 time_filetime,
                 bodies,
-                envelope: Envelope::default(),
+                envelope,
                 attachments,
             },
             attachments: PstAttachments {
@@ -337,5 +347,6 @@ mod tests {
         assert_eq!(notes.html_not_binary, 0);
         assert_eq!(notes.rtf_not_binary, 0);
         assert_eq!(notes.text, TextStats::default());
+        assert_eq!(notes.envelope, EnvelopeNotes::default());
     }
 }

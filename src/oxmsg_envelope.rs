@@ -3,13 +3,20 @@
 //! the conversation fields. Reads real content into memory and returns it as model types; prints
 //! nothing.
 //!
-//! Property identifiers and their confirmation status are listed in
+//! The property identifiers, the grouping of an address's four properties, and the rule that
+//! turns a stored recipient type into To, Cc, or Bcc are shared with the PST reader and live in
+//! `envelope_props.rs` (since drop B). Their confirmation status is listed in
 //! `docs/plans/m4d-envelope-properties.md`.
 
 use std::path::{Path, PathBuf};
 
 use crate::dry_run::{PROP_DELIVERY_TIME, PROP_SUBMIT_TIME};
-use crate::model::{Address, Envelope, Recipient, RecipientKind};
+use crate::envelope_props::{
+    AddressProps, PROP_CONVERSATION_INDEX, PROP_CONVERSATION_TOPIC, PROP_IMPORTANCE,
+    PROP_SENSITIVITY, PROP_TRANSPORT_HEADERS, RECIPIENT_PROPS, SENDER_PROPS,
+    SENT_REPRESENTING_PROPS, recipient_kind,
+};
+use crate::model::{Address, Envelope, Recipient};
 use crate::oxmsg_classify::{
     OxmsgEntryKind, OxmsgEntryScope, cfb_entry_name, classify_oxmsg_entry, top_level_storage_paths,
 };
@@ -20,79 +27,9 @@ use crate::oxmsg_decode::{
 use crate::oxmsg_extract::read_string_property;
 use crate::shared::{CompoundFile, PROP_RECIPIENT_TYPE};
 
-// Message-level properties (MS-OXPROPS; confirmation status in the M4d properties document).
-pub(crate) const PROP_IMPORTANCE: u16 = 0x0017;
-pub(crate) const PROP_SENSITIVITY: u16 = 0x0036;
-pub(crate) const PROP_TRANSPORT_HEADERS: u16 = 0x007D;
-pub(crate) const PROP_CONVERSATION_TOPIC: u16 = 0x0070;
-pub(crate) const PROP_CONVERSATION_INDEX: u16 = 0x0071;
-
-// The sender, as the transport recorded it.
-pub(crate) const PROP_SENDER_NAME: u16 = 0x0C1A;
-pub(crate) const PROP_SENDER_ADDRESS_TYPE: u16 = 0x0C1E;
-pub(crate) const PROP_SENDER_EMAIL_ADDRESS: u16 = 0x0C1F;
-pub(crate) const PROP_SENDER_SMTP_ADDRESS: u16 = 0x5D01;
-
-// The mailbox the message was sent on behalf of.
-pub(crate) const PROP_SENT_REPRESENTING_NAME: u16 = 0x0042;
-pub(crate) const PROP_SENT_REPRESENTING_ADDRESS_TYPE: u16 = 0x0064;
-pub(crate) const PROP_SENT_REPRESENTING_EMAIL_ADDRESS: u16 = 0x0065;
-pub(crate) const PROP_SENT_REPRESENTING_SMTP_ADDRESS: u16 = 0x5D02;
-
-// A recipient row.
-pub(crate) const PROP_RECIPIENT_DISPLAY_NAME: u16 = 0x3001;
-pub(crate) const PROP_RECIPIENT_ADDRESS_TYPE: u16 = 0x3002;
-pub(crate) const PROP_RECIPIENT_EMAIL_ADDRESS: u16 = 0x3003;
-pub(crate) const PROP_RECIPIENT_SMTP_ADDRESS: u16 = 0x39FE;
-
 const PT_BINARY: u16 = 0x0102;
 const PT_LONG: u16 = 0x0003;
 const PT_SYSTIME: u16 = 0x0040;
-
-const RECIPIENT_TYPE_TO: i32 = 1;
-const RECIPIENT_TYPE_CC: i32 = 2;
-const RECIPIENT_TYPE_BCC: i32 = 3;
-
-/// Flags that Microsoft's `PidTagRecipientType` page says may be combined with the recipient type:
-/// MAPI_P1 (a resend, 0x10000000) and MAPI_SUBMITTED (already received, 0x80000000). The type
-/// itself is the value without them. The two numeric values are from a third-party library's
-/// documentation, not from Microsoft text seen in this work; a value with any other high bit set
-/// is still not listed (it is counted in `recipients_unlisted`).
-const RECIPIENT_TYPE_FLAGS: i32 = 0x1000_0000 | i32::MIN;
-
-/// The recipient type with the optional flags removed.
-fn recipient_type_without_flags(value: i32) -> i32 {
-    value & !RECIPIENT_TYPE_FLAGS
-}
-
-/// The identifiers of one address's four properties.
-struct AddressProps {
-    name: u16,
-    address_type: u16,
-    email_address: u16,
-    smtp_address: u16,
-}
-
-const SENDER_PROPS: AddressProps = AddressProps {
-    name: PROP_SENDER_NAME,
-    address_type: PROP_SENDER_ADDRESS_TYPE,
-    email_address: PROP_SENDER_EMAIL_ADDRESS,
-    smtp_address: PROP_SENDER_SMTP_ADDRESS,
-};
-
-const SENT_REPRESENTING_PROPS: AddressProps = AddressProps {
-    name: PROP_SENT_REPRESENTING_NAME,
-    address_type: PROP_SENT_REPRESENTING_ADDRESS_TYPE,
-    email_address: PROP_SENT_REPRESENTING_EMAIL_ADDRESS,
-    smtp_address: PROP_SENT_REPRESENTING_SMTP_ADDRESS,
-};
-
-const RECIPIENT_PROPS: AddressProps = AddressProps {
-    name: PROP_RECIPIENT_DISPLAY_NAME,
-    address_type: PROP_RECIPIENT_ADDRESS_TYPE,
-    email_address: PROP_RECIPIENT_EMAIL_ADDRESS,
-    smtp_address: PROP_RECIPIENT_SMTP_ADDRESS,
-};
 
 /// A string property, or `None` when absent or empty.
 fn read_text(comp: &mut CompoundFile, base: &Path, id: u16, codepage: u32) -> Option<String> {
@@ -192,7 +129,7 @@ fn read_recipient_type(comp: &mut CompoundFile, recipient_path: &Path) -> Option
 
 /// To, Cc, and Bcc recipients in storage order, plus the number of storages that are none of
 /// those (the originator row, an unknown type, or an unreadable type). The optional MAPI_P1 and
-/// MAPI_SUBMITTED flags are ignored when classifying.
+/// MAPI_SUBMITTED flags are ignored when classifying (`envelope_props::recipient_kind`).
 fn read_recipients(comp: &mut CompoundFile, base: &Path, codepage: u32) -> (Vec<Recipient>, usize) {
     let mut paths: Vec<PathBuf> = if base == Path::new("/") {
         top_level_storage_paths(&*comp, OxmsgEntryKind::RecipientStorage)
@@ -206,14 +143,9 @@ fn read_recipients(comp: &mut CompoundFile, base: &Path, codepage: u32) -> (Vec<
     let mut recipients = Vec::new();
     let mut unlisted = 0usize;
     for path in paths {
-        let kind = match read_recipient_type(comp, &path).map(recipient_type_without_flags) {
-            Some(RECIPIENT_TYPE_TO) => RecipientKind::To,
-            Some(RECIPIENT_TYPE_CC) => RecipientKind::Cc,
-            Some(RECIPIENT_TYPE_BCC) => RecipientKind::Bcc,
-            _ => {
-                unlisted += 1;
-                continue;
-            }
+        let Some(kind) = read_recipient_type(comp, &path).and_then(recipient_kind) else {
+            unlisted += 1;
+            continue;
         };
         let address = read_address(comp, &path, codepage, &RECIPIENT_PROPS).unwrap_or_default();
         recipients.push(Recipient { kind, address });
@@ -280,6 +212,12 @@ pub(crate) fn extract_envelope_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::envelope_props::{
+        PROP_RECIPIENT_ADDRESS_TYPE, PROP_RECIPIENT_DISPLAY_NAME, PROP_RECIPIENT_EMAIL_ADDRESS,
+        PROP_RECIPIENT_SMTP_ADDRESS, PROP_SENDER_ADDRESS_TYPE, PROP_SENDER_EMAIL_ADDRESS,
+        PROP_SENDER_NAME, PROP_SENDER_SMTP_ADDRESS, PROP_SENT_REPRESENTING_NAME,
+    };
+    use crate::model::RecipientKind;
     use std::io::Write;
 
     fn entry(ty: u16, id: u16, value: [u8; 8]) -> Vec<u8> {
@@ -499,19 +437,6 @@ mod tests {
             Some("Second To")
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[test]
-    fn the_optional_recipient_type_flags_are_ignored_when_classifying() {
-        assert_eq!(recipient_type_without_flags(1), 1);
-        assert_eq!(recipient_type_without_flags(1 | 0x1000_0000), 1);
-        assert_eq!(recipient_type_without_flags(2 | i32::MIN), 2);
-        assert_eq!(recipient_type_without_flags(3 | 0x1000_0000 | i32::MIN), 3);
-        // A bit that is not one of the two flags is kept, so the value is not a known type.
-        assert_eq!(
-            recipient_type_without_flags(1 | 0x2000_0000),
-            1 | 0x2000_0000
-        );
     }
 
     #[test]

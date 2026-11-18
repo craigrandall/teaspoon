@@ -22,6 +22,7 @@ use anyhow::Result;
 use msg_parser::Outlook;
 
 use crate::dry_run::strip_subject_marker;
+use crate::envelope_props::is_exchange_without_smtp;
 use crate::model::{Address, Envelope, RecipientKind};
 use crate::source_msg::read_message_content;
 use crate::verify::{CountComparison, CountTally, compare_count, print_count_tally};
@@ -190,14 +191,6 @@ fn recipients_of(envelope: &Envelope, kind: RecipientKind) -> Vec<&Address> {
         .filter(|r| r.kind == kind)
         .map(|r| &r.address)
         .collect()
-}
-
-fn is_exchange_without_smtp(address: &Address) -> bool {
-    address
-        .address_type
-        .as_deref()
-        .is_some_and(|t| t.eq_ignore_ascii_case("EX"))
-        && address.smtp_address.is_none()
 }
 
 pub(crate) fn collect_envelope_verify_totals(files: &[PathBuf]) -> EnvelopeVerifyTotals {
