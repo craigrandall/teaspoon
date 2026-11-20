@@ -64,7 +64,8 @@ considered independent verification.
 ### Confirmation
 
 **This ADR records the decision to do differential verification, and the
-evidence that it has been performed for the MSG side only.** The PST side
+evidence that it has been performed for the MSG side and, since 2026-11-17,
+for the PST envelope (against Classic Outlook).** The rest of the PST side
 is still outstanding.
 
 MSG side (performed): `tsp --verify` runs the custom MS-OXMSG extraction
@@ -104,13 +105,12 @@ Two structural limits on this evidence should be stated plainly:
 
 Later differential modes (MSG side, performed; all counts only, all against `msg_parser`, and so subject to the same two limits): `--verify-envelope` compares the subject, sender, and recipients (34 files, 0 mismatches on every comparable field; the fields `msg_parser` does not expose have no oracle); `--verify-deencap` compares the HTML the in-house RTF de-encapsulation recovers with `msg_parser`'s `html_from_rtf()` (recognition and presence agree on all 29 files; the recovered HTML differed in all 27 pairs, and every difference was traced to `msg_parser`, with one in-house limitation, a single Windows-1255 byte); and `--verify-attachments` (M4f-2c, 2026-10-20) compares the SHA-256 and length of every top-level by-value attachment, read through the export's own reader, with `msg_parser`'s payload (34 files: 30 of 30 match, 0 mismatches, gate 0). The last does not cover the attachments inside embedded messages, which `msg_parser` does not open, so those have no independent check. `--verify-bodies` is a content-preservation check of the converter, not a comparison with another implementation.
 
-PST side (outstanding): no comparison against `libpff` or `libpst` has been
-run. See [docs/verification/test-strategy.md](../docs/verification/test-strategy.md)
+PST side (the envelope performed on 2026-11-17, v0.1.44; the rest outstanding): the PST envelope (M4i drop B) was compared with Classic Outlook's own reading of the same stores, the first PST-side comparison against an independent implementation. A PowerShell script reads the raw MAPI properties of each mail item through Outlook's `PropertyAccessor` and writes them to a local file; a comparer joins them to the exported `metadata.json` files on the node ID (the last four bytes of Outlook's 24-byte entry ID, with the 16-byte store identifier checked) and prints counts only. Over the 60 messages of `tsp-tester.pst` and the 44 messages of `crkb.pst` that Outlook reports with two or more recipients, 104 of 104 joined and every compared field agreed (the sender and sent-representing addresses, importance, sensitivity, conversation topic and index, transport headers, submit and delivery times to the second, and the To/Cc/Bcc lists with their order), `field_mismatches_total=0`. Two kinds of difference were classified as Outlook supplying what the PST does not store, and are counted separately rather than as agreement or as mismatch: a default sensitivity of 0 for a message that has none (36 and 11 messages), and the email address reported as the SMTP address of a recipient whose table has no SMTP column (48 and 24 recipients); `tsp` writes neither. The first run reported 120 time mismatches that were the comparison script's own local-time conversion and not the reader, the case of a defect in the oracle side that the "each discrepancy needs triage" consequence anticipated; the script now records both readings and the comparer says which one matched (the raw value is UTC). The limits: Outlook is a closed-source oracle and a second reader of the same file; the comparison read the copies mounted in Outlook, not the exported files; it covers the envelope only (no body, attachment, folder, or identity comparison); the `crkb.pst` run covered 44 messages, because the mounted copy holds 7,041 mail items against 6,508 exported and the full comparison was not run; and no comparison against `libpff` or `libpst` has been run, so the PST side outside the envelope remains outstanding. See [docs/verification/test-strategy.md](../docs/verification/test-strategy.md)
 for where it sits in the overall evidence ladder.
 
 ## More Information
 
-Candidate PST oracles: libpff, libpst (not yet integrated). MSG oracle in
+Candidate PST oracles: libpff, libpst (not yet integrated). Classic Outlook, driven through COM, has served as a PST oracle for the envelope since 2026-11-17 (the scripts are not part of the crate). MSG oracle in
 use: the Rust `msg_parser` crate, through `--verify` only. It is a normal
 Cargo dependency rather than a dev-dependency, because the verification
 harness ships in the `tsp` binary; its oracle-only role is enforced by

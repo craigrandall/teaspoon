@@ -71,7 +71,7 @@ file, a script, or a command line) and clearing it afterwards.
   version can change the archive's bytes. `compressed-rtf` (its output is written as `body.rtf`)
   and `cfb` (attachment bytes) fall under the same rule and are not pinned yet (plan decision 18).
 - **One definition per fact.** A name, a limit, or a number that the code or the archive format
-  depends on is defined once and derived everywhere else (see `src/layout.rs`).
+  depends on is defined once and derived everywhere else (see `src/layout.rs`; the envelope's property identifiers, address sets, and To/Cc/Bcc rule are in `src/envelope_props.rs`, which the `.msg` and PST readers both use).
 
 ## Documentation
 

@@ -29,6 +29,30 @@ This is agreement with an independent implementation on one corpus, not confirma
 
 Not covered by any oracle, present in the corpus only as counts (of 29 messages): sent-representing 29, submit time 29, delivery time 29, importance 29, sensitivity 11, conversation topic 29, conversation index 29, transport headers 24. Their values were not checked against anything independent. The sent-representing properties (0x0042, 0x0064, 0x0065, 0x5D02) and the recipient address type (0x3002) are untested by the differential check; 0x0064 and 0x0065 are now tier A.
 
+## The PST side (v0.1.44, run 2026-11-17)
+
+Since `v0.1.44` the PST export reads the same properties (`src/pst_envelope.rs`; the identifiers, the address sets, and the To/Cc/Bcc rule are in `src/envelope_props.rs`, shared with the `.msg` reader). The message-level properties come from the message's property context; the recipient-row properties come from the recipient table's columns, by property ID.
+
+What was shown, against Classic Outlook's own reading of the same stores (the raw MAPI properties through COM, joined on node ID; the 60 `tsp-tester.pst` messages and the 44 `crkb.pst` messages that Outlook reports with two or more recipients, 104 in all):
+
+| Property | ID | PST evidence |
+|---|---|---|
+| sender: name, address type, email, SMTP | 0x0C1A, 0x0C1E, 0x0C1F, 0x5D01 | equal to Outlook's raw property on 104 of 104 |
+| sent-representing: name, address type, email, SMTP | 0x0042, 0x0064, 0x0065, 0x5D02 | equal on 104 of 104 |
+| submit time, delivery time | 0x0039, 0x0E06 | equal to the second on 104 of 104 (the raw value Outlook returns is UTC) |
+| importance | 0x0017 | equal on 104 of 104 |
+| sensitivity | 0x0036 | equal where the PST stores it (57); absent in the PST for 36 and 11 of the messages, where Outlook reports 0 |
+| conversation topic, index | 0x0070, 0x0071 | equal on 104 of 104 |
+| transport headers | 0x007D | equal on 104 of 104 |
+| recipient: display name, address type, email address | 0x3001, 0x3002, 0x3003 | equal for every recipient of every list, in the same order (31 lists of two or more) |
+| recipient SMTP address | 0x39FE | equal where the table stores it; the column is missing from 52 of the 60 tester tables and 4,567 of the 6,506 `crkb.pst` tables, and for 48 and 24 recipients of the compared messages Outlook reports the email address as the SMTP address (`tsp` leaves it empty) |
+| recipient type | 0x0C15 | read in every row of both PSTs (0 unreadable): To 60 and 6,588, Cc 11 and 25, Bcc 1 and 6, none unlisted |
+
+- The type, display-name, address-type, and email-address columns are present in every recipient table of both PSTs. No table has a `PidTagRowid` (0x3000) column, which the reader's order counters looked for, so they report every message with two or more recipients as unverifiable (4 in the tester, 45 in `crkb.pst`); recipient order is the table's row order, and it was checked against Outlook's order instead. `PidTagRowid` is tier C (the author's knowledge of the MAPI headers; not looked up) and is used only by those counters.
+- Two `crkb.pst` messages have no recipient table.
+- This is agreement with an independent implementation on two files, not confirmation against Microsoft's text; the tiers above stand. That the sensitivity and SMTP differences are Outlook supplying a default or a derived value, and not a difference in what the PST stores, rests on the reader finding no such value in the property context or in the table.
+- Not shown: Outlook's reading of the `EX`-type addresses with no SMTP address (44 in `crkb.pst`) beyond those among the 44 messages compared (the tester has none); any `PT_STRING8` envelope text (neither PST has a `PT_STRING8` value); ANSI; another producer; and Outlook's reading of the exported files themselves (it read the copies mounted in its profile, whose store identifiers and node IDs matched).
+
 ## Message-level properties
 
 | Property | ID | Type | Tier | Used for |
@@ -62,7 +86,7 @@ Not covered by any oracle, present in the corpus only as counts (of 29 messages)
 ## Rules
 
 1. **Nothing is derived or repaired.** An address keeps its display name, address type, address, and SMTP address as separate optional fields. An `EX` address with no SMTP address stays that way (the `exchange_without_smtp_total` count says how often; it is 0 on the corpus).
-2. **Recipients** are the storages whose recipient type is 1, 2, or 3, in storage order. (Microsoft's PidTagRecipientType page says the value is one required type plus one optional flag, MAPI_P1 for a resend and MAPI_SUBMITTED; as written, a recipient carrying a flag is counted in `recipients_unlisted`, not listed. See Open.) The originator row (type 0), an unknown type, and a row whose type cannot be read are counted in `recipients_unlisted`, not listed (0 on the corpus).
+2. **Recipients** are the storages whose recipient type is 1, 2, or 3, in storage order (for a PST, the recipient-table rows of those types, in table order; v0.1.44). (Microsoft's PidTagRecipientType page says the value is one required type plus one optional flag, MAPI_P1 for a resend and MAPI_SUBMITTED; as written, a recipient carrying a flag is counted in `recipients_unlisted`, not listed. See Open.) The originator row (type 0), an unknown type, and a row whose type cannot be read are counted in `recipients_unlisted`, not listed (0 on the corpus).
 3. **Sender and sent-representing** are each `None` when none of their four properties is present.
 4. **Times** are kept as the stored FILETIME ticks; `message.md` and `metadata.json` also show one UTC string, from the submit time, else the delivery time, and omit it for a negative value or a year beyond 9999.
 5. **Importance and sensitivity** are kept as the stored integers. `message.md` shows a label only for the standard values (importance 0 low, 1 normal, 2 high; sensitivity 0 none, 1 personal, 2 private, 3 company confidential) and shows nothing for the defaults (normal, none). Any other value is shown as `unknown (N)`. The sensitivity values 0 to 3 (none, personal, private, company confidential) were seen on Microsoft pages on 2026-10-07 (the PidTagRecipientReassignmentProhibited page lists all four, and MS-OXODLGT says private is 0x00000002); the importance names (low, normal, high) were seen on Microsoft's PidTagImportance page, and an Outlook VBA example on Microsoft's site uses 2 for high. The numbers 0 for low and 1 for normal were not seen in Microsoft text; they come from the MAPI headers.
@@ -93,3 +117,4 @@ So in all 5 cases where the two properties are both present and differ, `msg_par
 - The `EX`-without-SMTP path, unlisted recipients, and flagged recipient types have no real instance in the corpus; they are covered by unit tests only.
 - Sent-representing, times, importance, sensitivity, conversation fields, and transport headers have no oracle: the corpus shows them present (34 of 34, except sensitivity 11 and transport headers 29) but their values were not checked against anything independent.
 - The corpus is one producer.
+- PST (v0.1.44): recipient order is the recipient table's row order; no table has a `PidTagRowid` column, and the order matches Outlook's on 31 lists of two or more only. Outlook's reading of `EX` addresses with no SMTP address (44 in `crkb.pst`) is shown only for those among the 44 messages compared. No other PST producer has been tried.

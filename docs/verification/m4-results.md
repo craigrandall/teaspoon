@@ -1232,3 +1232,93 @@ The script (run with `uv run`) compares two exports and checks: the same files; 
 The v0.1.42 value recorded earlier for `crkb.pst` (`a79a42c0…cf96`) is for a root of 14 units and is not comparable with these.
 
 **Open after this release.** Drop B (the envelope) and a second `crkb.pst` run as its gate, which can now be compared with the `844ba460…` baseline at an equal-length root; M4g and Q11; pinning `compressed-rtf` and `cfb` (decision 18); the checks of decision 19 (an independent count of `crkb.pst`, an ANSI refusal fixture, non-ASCII `PT_STRING8` data); decisions 12, 13, 14, and 15; an owner review of a decoded Arabic message; the pages of a plain-text `PT_STRING8` body (with the ANSI work); the BSD-3-Clause notice for a distributed binary; the temporary spike module.
+
+## v0.1.44: the PST envelope, drop B (2026-11-16 to 2026-11-18)
+
+Plan decision 20. Code commit `2c1edc6` on `main`: new `src/envelope_props.rs` (the envelope's property identifiers, the three four-property address sets, the To/Cc/Bcc rule, `is_originator_row`, `is_exchange_without_smtp`) and `src/pst_envelope.rs` (the PST reader and its counts); changed `oxmsg_envelope.rs` (imports the shared definitions), `verify_envelope.rs`, `pst_export.rs`, `export.rs`, and `main.rs`. CI succeeded on the push. `Cargo.toml` is 0.1.44; the root `folder.json` records it. The archive format does not change. The design is in the plan ("What changed from v4.32") and `ARCHITECTURE.md` (M4i-4).
+
+### Quality gate and regression (owner's runs, 2026-11-16 to 2026-11-18)
+
+| Check | Result |
+|---|---|
+| Build and tests | everything built; 470 tests pass (459 at v0.1.43 plus 11: 5 in `envelope_props.rs`, 7 in `pst_envelope.rs`, less the one test moved out of `oxmsg_envelope.rs`) |
+| `verify-split.ps1 -Pst` on `tsp-tester.pst` (baseline `v0.1.19.1`), before the bump and at 0.1.44 | default IDENTICAL (850 bytes, 33 lines); `--verify` IDENTICAL (2705 bytes, 82 lines; `files_scanned=29`, `rtf_decompressed_bytes_mismatch=1`, `embedded_message_class_readable_total=1`, `structural_gate_violations=0`); PST IDENTICAL after ignoring the `pst_password=` line (1110 bytes, 45 lines, 1 line ignored); standard error 0 bytes in all three |
+| `.msg` corpus export with `Cargo.toml` held at 0.1.43 (`C:\o.44.pre1`, a root of 17 units) | 217 files written, `export_readback_mismatches=0`; plan 74 entries (3 folders, 34 messages, 34 attachment files, 3 embedded messages), 0 gate violations; 32 attachments extracted (6,282,892 bytes), 2 not extracted, 0 failed; 3 of 3 embedded messages; 26 `cid:` references, all rewritten; every other counter as at v0.1.43; `export_tree_sha256` `c719940059b2e2024bc189d2a4752a21b8ed1b08fd0290b0ddbefae6eb004b44`, **equal to the v0.1.43 hash** |
+| `.msg` corpus export at `Cargo.toml` 0.1.44 (a root of 12 units) | the same counters; `export_tree_sha256` `da4949fb414075a7483c14d07ddf892c9aa14d677e5335e361ee6f12d8fbbd72`. The root is 5 units shorter than the 17 of the 0.1.43 run (the path budget is taken from the real root), so this hash is not compared with the 0.1.43 one; the proof that `.msg` output did not move is the pre-bump row above |
+
+### The two PSTs: exports before and after, and the envelope counts
+
+Before: the `v0.1.43` exports (`C:\o.tester.43`, `C:\o.crkb.43`). After: the drop B build with `Cargo.toml` still 0.1.43 (`C:\q.tester.43`, `C:\q.crkb.43`), at output roots of the same length. Then the release build at 0.1.44.
+
+| | tester | `crkb.pst` |
+|---|---|---|
+| exit, standard error, `export_result`, read-back mismatches | 0, 0 bytes, completed, 0 | 0, 0 bytes, completed, 0 |
+| drop B at 0.1.43: time, peak working set, `export_tree_sha256` | 1.1 s, 23 MB, `289e8ffb7ac475d31544ebaa82c136ff7ee85d0a5c0e018995bfa142b823a186` | 725.7 s, 107 MB, `c034c0a4625789ffa038fa35dfac25be35b4729fa282c29f9d9a18dab21bd1a4` |
+| release at 0.1.44: time, peak working set | 1.1 s, 24 MB | 200.3 s, 107 MB (an earlier solo 0.1.43 export took 185.6 s at 106 MB) |
+| release at 0.1.44: `export_tree_sha256` | `7f0ab0eca7514610c4a9a7d16e96df72fb9130c4a10bf216e9b0b105744e6bd0` | `99cd2e584ebad15c7c2fe8b2303cf6c7ae4e6f06052a9b0f61f284c4a11f7ef2` |
+| baseline before drop B at 0.1.43 | not recorded (the figures sent for `C:\o.tester.43` were the `crkb.pst` ones) | `844ba460f48401204446999949cf7e1899160934f48eca5ca9381b7bb5412894` |
+
+The `export_pst_envelope_*` counts (the same at 0.1.43 with drop B and at 0.1.44):
+
+| Count | tester | `crkb.pst` |
+|---|---|---|
+| messages; sender present; sent-representing present | 60; 60; 60 | 6,508; 6,508; 6,508 |
+| submit time; delivery time; importance present | 60; 60; 60 | 6,508; 6,508; 6,508 |
+| sensitivity present (all value 0) | 24 | 2,244 |
+| importance values | 0: 7, 1: 53 | 1: 6,496, 2: 12 |
+| conversation topic; conversation index; transport headers present | 60; 60; 50 | 6,508; 6,507; 6,296 |
+| addresses of type `EX` with no SMTP address | 0 | 44 |
+| messages with no recipient table | 0 | 2 |
+| tables lacking the type, display-name, address-type, or email-address column | 0 | 0 |
+| tables lacking the SMTP-address column; lacking a `PidTagRowid` column | 52; 60 | 4,567; 6,506 |
+| recipient rows; unreadable | 72; 0 | 6,619; 0 |
+| To; Cc; Bcc recipients | 60; 11; 1 | 6,588; 25; 6 |
+| unlisted (originator, other type, unreadable type) | 0 (0, 0, 0) | 0 (0, 0, 0) |
+| table order in row-number order; differs; unverifiable | 0; 0; 4 | 0; 0; 45 |
+| `recipient_rows_unaccounted` (must be 0) | 0 | 0 |
+
+### The before/after check (`check_envelope_export.py`, counts only, outside the crate)
+
+| Result | tester | `crkb.pst` (`--fast`) |
+|---|---|---|
+| files in both trees; in only one | 269 and 269; 0 | 28,222 and 28,222; 0 |
+| files identical; files differing other than `message.md` and `metadata.json` | 149; 0 | 15,206; 0 |
+| root `folder.json` differing in `tool_version` only | 0 (both at 0.1.43) | 0 (both at 0.1.43) |
+| `message.md` with envelope header lines; `metadata.json` with the envelope filled | 60; 60 | 6,508; 6,508 |
+| the export's counts against the counts derived from the written files (`--report`) | 15 compared, all equal | 15 compared, all equal |
+| checks failed | 0 | 0 |
+
+### The Outlook comparison (2026-11-17, counts only; the dump and the details stay in local files)
+
+Classic Outlook's own reading, as a COM dump of the raw MAPI properties of each mail item, joined to the export on node ID (the last four bytes of Outlook's 24-byte entry ID; 48 hex characters on every item), with the store identifier checked. The stores were already mounted in the owner's profile (`tsp-tester-outlook.pst`, and `crkb.pst` under `Documents\PSTs`), so the dump read the mounted files, not the exported ones.
+
+| | tester (all 60 messages) | `crkb.pst` (`-MinRecipients 2`) |
+|---|---|---|
+| mail items Outlook visited; dumped | 60; 60 | 7,041; 44 |
+| joined on node ID; store identifier matches; only in the export; only in Outlook | 60; 60; 0; 0 | 44; 44; 6,464 (expected: a partial dump); 0 |
+| sender, sent-representing (name, address type, email address, SMTP address) | all equal | all equal |
+| importance; conversation topic; conversation index; transport headers | all equal | all equal |
+| submit and delivery times (taken as UTC; converted from local time) | 60 and 60 equal (0 equal when converted) | 44 and 44 equal (0 when converted) |
+| sensitivity | 24 equal; 36 absent in the PST, Outlook reports 0 | 33 equal; 11 absent in the PST, Outlook reports 0 |
+| recipient lists: counts of To, Cc, Bcc | all equal | all equal |
+| recipient lists in the same order (name, address type, email address) | To 60, Cc 60, Bcc 60 of 60 | To 44, Cc 44, Bcc 44 of 44 |
+| lists of two or more recipients | Cc: 2 (no To list) | To: 26, Cc: 3 |
+| recipient SMTP address | 24 equal; 48 absent in the PST, Outlook reports the email address | 124 equal; 24 absent in the PST, Outlook reports the email address; none another address |
+| `field_mismatches_total`; result | 0; pass | 0; pass |
+
+**The first run, and what it showed about the comparison itself.** The first tester run (a strict four-field comparison, and a time conversion from local time) reported `field_mismatches_total=196`: 60 submit and 60 delivery time mismatches, 36 sensitivity mismatches, and 40 recipient-list mismatches (To 36, Cc 3, Bcc 1), none a reordering. The times were the dump script's own error (the raw value Outlook returns is UTC and was converted again); the sensitivity and recipient lists were Outlook supplying a default and an SMTP address that the PST does not store, which the comparer now counts as information. Before that: `AddStoreEx` on a copy of an already-mounted PST failed ("failed to load for this session", a copy carries the same store identifier), and a dump file could not be created in the root of `C:\` by a standard account. Each was an error of the method, not of the reader.
+
+### What this shows, and what it does not
+
+- **Shown:** the PST envelope is read for all 60 and 6,508 messages with no recipient row unreadable or unaccounted for; the export's counts equal the counts re-derived from the written files; only the header lines of `message.md` and the `envelope` object of `metadata.json` changed in two archives of 269 and 28,222 files; `.msg` output did not move (the corpus hash with `Cargo.toml` at 0.1.43 equals the v0.1.43 hash); and an independent implementation, Classic Outlook, agrees on every field compared for 104 messages, including the recipient order on 31 lists of two or more. Peak working set stayed at 107 MB (106 MB for the earlier solo 0.1.43 export) and `crkb.pst` took 200.3 s (185.6 s for that export; the two were not measured under identical conditions).
+- **Not shown:** Outlook's reading of all 6,508 `crkb.pst` messages (the mounted store holds 7,041 mail items, and Outlook found 44 messages with two or more recipients where the export counts 45; the mounted file is probably not the exported one, but the cause is not established; plan decision 21); Outlook's reading of the 44 `EX`-type addresses unless they were among the 44 messages (the tester has none); that table order is a stable order for other PSTs (no table has a `PidTagRowid` column, and the order was checked on 31 lists); non-ASCII `PT_STRING8` envelope text (neither PST has a `PT_STRING8` value), ANSI, and another producer; a message with more than one recipient table; the exported files themselves in Outlook; a `v0.1.43` tester baseline hash; tests of the Outlook scripts and of the export check (they are outside the crate).
+
+**Tree hashes at `Cargo.toml` 0.1.44** (each from the owner's run):
+
+| Input | Output root | `export_tree_sha256` |
+|---|---|---|
+| `.msg` corpus (34 messages) | a root of 12 units | `da4949fb414075a7483c14d07ddf892c9aa14d677e5335e361ee6f12d8fbbd72` |
+| `tsp-tester.pst` | a root of 25 units with `tsp-tester` | `7f0ab0eca7514610c4a9a7d16e96df72fb9130c4a10bf216e9b0b105744e6bd0` |
+| `crkb.pst` | a root of 17 units with `crkb` | `99cd2e584ebad15c7c2fe8b2303cf6c7ae4e6f06052a9b0f61f284c4a11f7ef2` |
+
+**Open after this release.** Pinning `compressed-rtf` and `cfb` (decision 18), which is next; M4g and Q11; decision 19 and decision 21 (an independent count of `crkb.pst` and Outlook's reading of all of it, by mounting the exact exported file); an ANSI refusal fixture; non-ASCII `PT_STRING8` data; decisions 12, 13, 14, and 15; an owner review of a decoded Arabic message; the pages of a plain-text `PT_STRING8` body (with the ANSI work); the BSD-3-Clause notice for a distributed binary; the temporary spike module.
