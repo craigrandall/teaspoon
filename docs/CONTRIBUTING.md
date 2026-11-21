@@ -68,8 +68,8 @@ file, a script, or a command line) and clearing it afterwards.
   dependency needs an ADR or a note in one, which records its version and licence, what it adds
   to `cargo tree`, and what it does on hostile input (read its source). A dependency whose output
   becomes archive content (the HTML converter, a text decoder, the PST reader) is pinned with `=`, because a new
-  version can change the archive's bytes. `compressed-rtf` (its output is written as `body.rtf`)
-  and `cfb` (attachment bytes) fall under the same rule and are not pinned yet (plan decision 18).
+  version can change the archive's bytes. The same goes for `compressed-rtf` (its output is written as `body.rtf`),
+  `cfb` (attachment bytes), `serde_json` (the bytes of every `metadata.json` and `folder.json`), and `unicode-normalization` (every exported name), all pinned since v0.1.45 (plan decision 18). `msg_parser` is not pinned: it is the oracle of the `--verify` modes and no default code path calls it.
 - **One definition per fact.** A name, a limit, or a number that the code or the archive format
   depends on is defined once and derived everywhere else (see `src/layout.rs`; the envelope's property identifiers, address sets, and To/Cc/Bcc rule are in `src/envelope_props.rs`, which the `.msg` and PST readers both use).
 

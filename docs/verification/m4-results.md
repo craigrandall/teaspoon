@@ -1322,3 +1322,43 @@ Classic Outlook's own reading, as a COM dump of the raw MAPI properties of each 
 | `crkb.pst` | a root of 17 units with `crkb` | `99cd2e584ebad15c7c2fe8b2303cf6c7ae4e6f06052a9b0f61f284c4a11f7ef2` |
 
 **Open after this release.** Pinning `compressed-rtf` and `cfb` (decision 18), which is next; M4g and Q11; decision 19 and decision 21 (an independent count of `crkb.pst` and Outlook's reading of all of it, by mounting the exact exported file); an ANSI refusal fixture; non-ASCII `PT_STRING8` data; decisions 12, 13, 14, and 15; an owner review of a decoded Arabic message; the pages of a plain-text `PT_STRING8` body (with the ANSI work); the BSD-3-Clause notice for a distributed binary; the temporary spike module.
+
+## v0.1.45: dependency pins (plan decision 18, 2026-11-20)
+
+Plan decision 18, widened from `compressed-rtf` and `cfb` to the four crates whose output becomes archive content. Code commit `chore(deps): pin cfb, compressed-rtf, serde_json, unicode-normalization with `=`; bump to 0.1.45` on `main`; CI succeeded on the push (3m22s). Changed: `Cargo.toml` (four requirements and the package version) and `Cargo.lock` (the package's own version). No source file changed; the archive format, the report keys, and the output are unchanged apart from the tool version in the root `folder.json`.
+
+| Crate | Requirement before | Requirement now (= the version in `Cargo.lock` at `v0.1.44`) | What it produces |
+|---|---|---|---|
+| `cfb` | `"0.15"` | `"=0.15.0"` | the container reading of `.msg` input, attachment bytes included |
+| `compressed-rtf` | `"1.0"` | `"=1.0.1"` | the RTF written as `body.rtf` |
+| `serde_json` | `"1.0.151"` | `"=1.0.154"` | the bytes of every `metadata.json` and `folder.json` |
+| `unicode-normalization` | `"0.1.25"` | `"=0.1.26"` | the Unicode normalization of every exported name |
+
+### Quality gate and regression (owner's runs, 2026-11-20)
+
+| Check | Result |
+|---|---|
+| Locked resolution | `cargo check --locked` passed with the pins (the lock needed no change); `cargo tree --locked --depth 1` before and after the pins: identical (`Compare-Object` printed nothing) |
+| Working-tree diff after the bump to 0.1.45 | `git diff --stat`: `Cargo.toml` 5 insertions and 5 deletions (the four pins and the version), `Cargo.lock` 1 and 1 (the package's own version); Git warned that LF would be replaced by CRLF in both files, which concerns the working copy's line endings (the patch script and Cargo write LF), not content: the stat shows only the changed lines |
+| Quality gate | passed (`cargo fmt --check`, `cargo check --locked`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`, `cargo build --release --locked`); 470 tests pass, the same as at v0.1.44 |
+| `.msg` corpus export with the pins and `Cargo.toml` held at 0.1.44 (a root of 12 units) | exit 0; 217 files written, `export_readback_mismatches=0`; `export_tree_sha256` `da4949fb414075a7483c14d07ddf892c9aa14d677e5335e361ee6f12d8fbbd72`, **equal to the v0.1.44 hash** |
+| `tsp-tester.pst` export with the pins and `Cargo.toml` held at 0.1.44 (a root of 25 units) | exit 0; 269 files written, `export_readback_mismatches=0`; `export_tree_sha256` `7f0ab0eca7514610c4a9a7d16e96df72fb9130c4a10bf216e9b0b105744e6bd0`, **equal to the v0.1.44 hash** |
+| `.msg` corpus export at `Cargo.toml` 0.1.45 (a root of 12 units) | exit 0; 217 files, 0 mismatches; `export_tree_sha256` `00b1b2f51c8781c6693a2d133e1216d8cbcc536dd5d1e05a9321fabe403f7ae8` |
+| `tsp-tester.pst` export at `Cargo.toml` 0.1.45 (a root of 25 units) | exit 0; 269 files, 0 mismatches; `export_tree_sha256` `d740b9ba467d55aeefba8a24c20dad246eb1525a8d410a5657bf1e6a40c9e7f5` |
+| `verify-split.ps1 -Pst` on `tsp-tester.pst` (baseline `v0.1.19.1`) | default IDENTICAL (850 bytes, 33 lines); `--verify` IDENTICAL (2705 bytes, 82 lines; `files_scanned=29`, `rtf_decompressed_bytes_mismatch=1`, `embedded_message_class_readable_total=1`, `structural_gate_violations=0`); PST IDENTICAL after ignoring the `pst_password=` line (1110 bytes, 45 lines, 1 line ignored; `pst_password=none`); standard error 0 bytes in all three |
+| CI | succeeded on the push (3m22s) |
+
+### What this shows, and what it does not
+
+- **Shown:** the four requirements equal what `Cargo.lock` already held, so no resolved version changed (the lock was accepted under `--locked`, and the dependency tree was identical before and after); and the pinned build, with `Cargo.toml` held at 0.1.44, reproduced the `v0.1.44` tree hashes of the `.msg` corpus and the tester exports, which is the evidence that the pins moved no archive byte. The hashes at 0.1.45 differ from those only by the tool version in the root `folder.json`, as far as these runs show.
+- **Not shown:** the `crkb.pst` export at 0.1.45 (not run; `99cd2e584ebad15c7c2fe8b2303cf6c7ae4e6f06052a9b0f61f284c4a11f7ef2` stands as its 0.1.44 baseline, and the pins change no resolved code); that the `=` requirements hold against a `cargo update` (not run); that `serde_json` and `unicode-normalization` have the roles given above (taken from the README's description of the dependencies, not traced through the writer and the naming code in this review); a test that fails when a pin is removed (none exists).
+
+**Tree hashes at `Cargo.toml` 0.1.45** (each from the owner's run):
+
+| Input | Output root | `export_tree_sha256` |
+|---|---|---|
+| `.msg` corpus (34 messages) | a root of 12 units | `00b1b2f51c8781c6693a2d133e1216d8cbcc536dd5d1e05a9321fabe403f7ae8` |
+| `tsp-tester.pst` | a root of 25 units with `tsp-tester` | `d740b9ba467d55aeefba8a24c20dad246eb1525a8d410a5657bf1e6a40c9e7f5` |
+| `crkb.pst` | not run | (the 0.1.44 hash is `99cd2e584ebad15c7c2fe8b2303cf6c7ae4e6f06052a9b0f61f284c4a11f7ef2`) |
+
+**Open after this release.** M4g and Q11, which is next; decision 19 and decision 21 (an independent count of `crkb.pst` and Outlook's reading of all of it, by mounting the exact exported file); an ANSI refusal fixture; non-ASCII `PT_STRING8` data; decisions 12, 13, 14, and 15; an owner review of a decoded Arabic message; the pages of a plain-text `PT_STRING8` body (with the ANSI work); the BSD-3-Clause notice for a distributed binary; the temporary spike module.
