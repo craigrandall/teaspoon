@@ -132,7 +132,11 @@ fn run() -> Result<()> {
                 anyhow::bail!("--verify-attachments applies only to .msg input");
             }
             if args.spike_attachments {
-                return run_spike_attachments(&args.input, args.spike_hash_file.as_deref());
+                return run_spike_attachments(
+                    &args.input,
+                    args.spike_hash_file.as_deref(),
+                    args.spike_names_file.as_deref(),
+                );
             }
             run_pst_diagnostic(&args.input)
         }

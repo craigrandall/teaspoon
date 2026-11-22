@@ -89,7 +89,9 @@ pub(crate) struct Args {
     /// Unicode `.pst` through the concrete `outlook-pst` route, hash it in memory, and print only
     /// counts (attachments by method and data kind, read errors by method and error variant,
     /// payload bytes total, largest, and smallest non-empty). Reads real content internally and
-    /// writes nothing to any archive. Read-only. An ANSI PST is refused.
+    /// writes nothing to any archive. Read-only. An ANSI PST is refused. The run also reports,
+    /// as counts, how each attachment's name in the attachment table compares with the names
+    /// stored on the attachment object (the attachment-name study).
     #[arg(
         long,
         conflicts_with_all = ["verify", "verify_envelope", "verify_deencap", "dump_deencap", "verify_bodies", "dump_bodies", "verify_attachments", "bakeoff_md", "bakeoff_dump", "recursive", "out", "dry_run", "overwrite", "no_source_hash"]
@@ -102,6 +104,15 @@ pub(crate) struct Args {
     /// must be 256 MiB or smaller: this is for the small tester PST only.
     #[arg(long, value_name = "FILE", requires = "spike_attachments")]
     pub(crate) spike_hash_file: Option<PathBuf>,
+
+    /// With `--spike-attachments`, write one line per attachment row (ordinals, method, the name
+    /// the planner takes from the attachment table, the table's long and short names, and the
+    /// attachment object's long, short, and display names) to FILE, so the names can be compared
+    /// locally with Outlook's. FILE must not exist, and the PST must be 256 MiB or smaller: this
+    /// is for the small tester PST only. Unlike every other output of the spike, this file holds
+    /// names.
+    #[arg(long, value_name = "FILE", requires = "spike_attachments")]
+    pub(crate) spike_names_file: Option<PathBuf>,
 
     /// Run the HTML-to-Markdown bake-off (M4e-0) over the `NNN.custom.html` files in the input
     /// directory (the directory `--dump-deencap` wrote) and a built-in set of synthetic and
@@ -327,6 +338,8 @@ mod tests {
         assert!(parse(&["--spike-attachments"]).is_ok());
         assert!(parse(&["--spike-attachments", "--spike-hash-file", "h.tsv"]).is_ok());
         assert!(parse(&["--spike-hash-file", "h.tsv"]).is_err());
+        assert!(parse(&["--spike-attachments", "--spike-names-file", "n.tsv"]).is_ok());
+        assert!(parse(&["--spike-names-file", "n.tsv"]).is_err());
         assert!(parse(&["--spike-attachments", "--out", "o"]).is_err());
         assert!(parse(&["--spike-attachments", "--verify"]).is_err());
         assert!(parse(&["--spike-attachments", "--recursive"]).is_err());
