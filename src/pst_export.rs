@@ -51,6 +51,7 @@ use crate::pst_attachments::{
     open_unicode_pst,
 };
 use crate::pst_envelope::{EnvelopeNotes, read_envelope};
+use crate::pst_names::ObjectNames;
 use crate::pst_password::{PasswordOutcome, enforce, supplied_from_env};
 use crate::pst_text::{TextReader, TextStats, integer32};
 use crate::shared::{
@@ -106,7 +107,10 @@ impl PstSource {
         &self,
         outcome: PasswordOutcome,
     ) -> Result<(SourceFolder, SourceCensus)> {
-        build_pst_tree_from(&*self.store, outcome)
+        // The planner reads an attachment's long name from the attachment object when the table
+        // has none (0.1.46), through this same store.
+        let names = ObjectNames::new(Rc::clone(&self.store));
+        build_pst_tree_from(&*self.store, outcome, Some(Box::new(names)))
     }
 
     /// The identity of the folder whose node ID is `node_id`: the node ID, the store's provider

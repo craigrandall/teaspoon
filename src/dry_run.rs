@@ -39,6 +39,13 @@ pub(crate) struct SourceCensus {
     pub(crate) attachment_row_read_errors: usize,
     pub(crate) embedded_attachments_not_opened: usize,
     pub(crate) attachment_tables_with_long_name_column: usize,
+    /// By-value PST attachments whose table had no long name and whose name was taken from the
+    /// attachment object (0.1.46).
+    pub(crate) attachment_names_from_object: usize,
+    /// Rows where the object was read but has no long name (the table's name was kept).
+    pub(crate) attachment_names_object_without_long_name: usize,
+    /// Rows where the object could not be read (the table's name was kept).
+    pub(crate) attachment_names_object_unreadable: usize,
     pub(crate) folder_identity_nid: usize,
     pub(crate) folder_identity_entry_id: usize,
     pub(crate) folder_identity_unavailable: usize,
@@ -257,6 +264,18 @@ pub(crate) fn print_dry_run_report(
     println!(
         "source_attachment_tables_with_long_name_column={}",
         census.attachment_tables_with_long_name_column
+    );
+    println!(
+        "source_attachment_names_from_object={}",
+        census.attachment_names_from_object
+    );
+    println!(
+        "source_attachment_names_object_without_long_name={}",
+        census.attachment_names_object_without_long_name
+    );
+    println!(
+        "source_attachment_names_object_unreadable={}",
+        census.attachment_names_object_unreadable
     );
     println!(
         "folder_identity_nid_available={}",

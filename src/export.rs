@@ -209,6 +209,12 @@ pub(crate) struct ExportReport {
     pst_notes: PstNotes,
     /// Attachment reads that failed or found no data, by reason and the crate's error label.
     pst_attachment_errors: BTreeMap<String, u64>,
+    /// PST attachment names taken from the attachment objects because the table had no long
+    /// name (0.1.46), and the by-value rows where the object had none or could not be read (the
+    /// table's name was kept).
+    pst_names_from_object: usize,
+    pst_names_object_without_long_name: usize,
+    pst_names_object_unreadable: usize,
     root_units: usize,
     /// Source files or directory entries that could not be opened or read and are therefore not
     /// in the export (directory input; a single unopenable file is an error instead).
@@ -431,6 +437,18 @@ fn print_export_report(r: &ExportReport) {
         );
         println!("export_pst_html_not_binary={}", r.pst_notes.html_not_binary);
         println!("export_pst_rtf_not_binary={}", r.pst_notes.rtf_not_binary);
+        println!(
+            "export_pst_attachment_names_from_object={}",
+            r.pst_names_from_object
+        );
+        println!(
+            "export_pst_attachment_names_object_without_long_name={}",
+            r.pst_names_object_without_long_name
+        );
+        println!(
+            "export_pst_attachment_names_object_unreadable={}",
+            r.pst_names_object_unreadable
+        );
         for (key, value) in r.pst_notes.envelope.report_lines() {
             println!("export_pst_envelope_{key}={value}");
         }
@@ -1096,6 +1114,9 @@ pub(crate) fn run_export(
         root_units: policy.root_units,
         source_open_errors: census.open_errors,
         source_directories_beyond_depth_cap: census.directories_beyond_depth_cap,
+        pst_names_from_object: census.attachment_names_from_object,
+        pst_names_object_without_long_name: census.attachment_names_object_without_long_name,
+        pst_names_object_unreadable: census.attachment_names_object_unreadable,
         plan_entries_total: plan.counters.entries_total,
         plan_folders: plan.counters.folders,
         plan_messages: plan.counters.messages,

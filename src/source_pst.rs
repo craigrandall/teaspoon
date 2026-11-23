@@ -4,7 +4,9 @@
 //!
 //! Limits of `outlook-pst` v1.2.0, reported rather than hidden. The planner reads only the
 //! attachment table (the dyn `Store` and `Message` API reaches no attachment), and that table
-//! may carry only the short (8.3) file name. The concrete route reads by-value attachment
+//! may carry only the short (8.3) file name (on `crkb.pst` that left 60% of the planned names
+//! wrong). Since 0.1.46 the long name is read from the attachment object when the table has
+//! none (`pst_names.rs`). The concrete route reads by-value attachment
 //! bytes (`pst_attachments.rs`), but an embedded-message or OLE attachment fails to read
 //! (`AttachmentMethodNotFound` on the tester), so those are planned as ordinary files, counted
 //! as not opened, and recorded as not extracted by the export.
@@ -30,10 +32,12 @@ use crate::dry_run::{
 use crate::oxmsg_decode::{PROP_INTERNET_CODEPAGE, PROP_MESSAGE_CODEPAGE};
 use crate::plan::{SourceAttachment, SourceFolder, SourceMessage};
 use crate::pst::{column_index, read_i32_at};
+use crate::pst_names::{AttachmentNames, NameFromObject, names_from_objects, pick_name};
 use crate::pst_password::{PasswordOutcome, enforce, supplied_from_env};
 use crate::pst_text::{TextReader, integer32, read_text_at};
 use crate::shared::{
-    ATTACH_METHOD_EMBEDDED_MESSAGE, MAX_FOLDER_DEPTH, PROP_ATTACH_METHOD, contained, run_contained,
+    ATTACH_METHOD_BY_VALUE, ATTACH_METHOD_EMBEDDED_MESSAGE, MAX_FOLDER_DEPTH, PROP_ATTACH_METHOD,
+    contained, run_contained,
 };
 
 /// PidTagEntryId, injected into every folder's properties by the crate.
@@ -48,6 +52,9 @@ struct PstBuilder {
     next_attachment_id: u64,
     /// Reads every string; its counts go into the census when the tree is done.
     text: TextReader,
+    /// Reads an attachment's long name from the attachment object when the table has none
+    /// (0.1.46); `None` plans the table's names only (a dry run of an ANSI PST).
+    names: Option<Box<dyn AttachmentNames>>,
 }
 
 /// Builds the source tree for the IPM subtree of a PST (either format, through the dyn API).
@@ -60,15 +67,19 @@ pub(crate) fn build_pst_tree(path: &Path) -> Result<(SourceFolder, SourceCensus)
     let supplied = supplied_from_env()?;
     let check = || enforce(store.as_ref(), supplied);
     let outcome = contained(check, "checking the PST password")??;
-    build_pst_tree_from(store.as_ref(), outcome)
+    // A Unicode PST also gets the attachment-name reader the export uses, so a dry run plans the
+    // names the export will write; an ANSI PST keeps the names in its attachment tables.
+    build_pst_tree_from(store.as_ref(), outcome, names_from_objects(path))
 }
 
 /// Builds the source tree from an open store whose password has already been checked. The
 /// export calls this with its own concrete Unicode store, so the plan and the export read one
-/// store.
+/// store. `names` reads an attachment's long name from the attachment object when the table has
+/// none (`None` plans the table's names only).
 pub(crate) fn build_pst_tree_from(
     store: &dyn Store,
     outcome: PasswordOutcome,
+    names: Option<Box<dyn AttachmentNames>>,
 ) -> Result<(SourceFolder, SourceCensus)> {
     let ipm_id = store
         .properties()
@@ -86,10 +97,14 @@ pub(crate) fn build_pst_tree_from(
         ids: InternetIdTracker::default(),
         next_attachment_id: 0,
         text: TextReader::new(),
+        names,
     };
     let walk = || builder.folder(store, ipm.as_ref(), 0);
     let root = contained(walk, "planning the folder tree")?;
     builder.census.string8 = builder.text.stats.clone();
+    if let Some(names) = &builder.names {
+        builder.census.string8.add(&names.text_stats());
+    }
     Ok((root, builder.census))
 }
 
@@ -230,11 +245,20 @@ impl PstBuilder {
             id: nid,
             subject,
             time: message_time(message),
-            attachments: self.attachments(message),
+            attachments: self.attachments(message, u32::try_from(nid).unwrap_or_default()),
         }
     }
 
-    fn attachments(&mut self, message: &dyn PstMessage) -> Vec<SourceAttachment> {
+    /// Asks the attachment object for its long name, when there is a reader and the row is a
+    /// by-value attachment (the only kind the crate can read).
+    fn ask_object(&mut self, nid: u32, node: NodeId, method: Option<i32>) -> NameFromObject {
+        match (self.names.as_mut(), method) {
+            (Some(names), Some(ATTACH_METHOD_BY_VALUE)) => names.long_name(nid, node),
+            _ => NameFromObject::NotAsked,
+        }
+    }
+
+    fn attachments(&mut self, message: &dyn PstMessage, nid: u32) -> Vec<SourceAttachment> {
         let Some(table_rc) = message.attachment_table() else {
             return Vec::new();
         };
@@ -260,17 +284,28 @@ impl PstBuilder {
                 });
                 continue;
             };
-            let name = long_idx
-                .and_then(|idx| read_text_at(table, context, &values, idx, &mut self.text))
-                .or_else(|| {
-                    short_idx
-                        .and_then(|idx| read_text_at(table, context, &values, idx, &mut self.text))
-                })
-                .filter(|n| !n.trim().is_empty());
+            let method = method_idx.and_then(|idx| read_i32_at(table, context, &values, idx));
+            let table_long =
+                long_idx.and_then(|idx| read_text_at(table, context, &values, idx, &mut self.text));
+            let table_short = short_idx
+                .and_then(|idx| read_text_at(table, context, &values, idx, &mut self.text));
+            let node = NodeId::from(u32::from(row.id()));
+            let (name, said) = pick_name(table_long, table_short, || {
+                self.ask_object(nid, node, method)
+            });
+            match said {
+                NameFromObject::Found(_) => self.census.attachment_names_from_object += 1,
+                NameFromObject::NoLongName => {
+                    self.census.attachment_names_object_without_long_name += 1;
+                }
+                NameFromObject::Unreadable => {
+                    self.census.attachment_names_object_unreadable += 1;
+                }
+                NameFromObject::NotAsked => {}
+            }
             if name.is_none() {
                 self.census.attachments_without_name += 1;
             }
-            let method = method_idx.and_then(|idx| read_i32_at(table, context, &values, idx));
             if method == Some(ATTACH_METHOD_EMBEDDED_MESSAGE) {
                 self.census.embedded_attachments_not_opened += 1;
             }

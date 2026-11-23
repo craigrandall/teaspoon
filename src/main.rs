@@ -23,6 +23,7 @@ mod pst;
 mod pst_attachments;
 mod pst_envelope;
 mod pst_export;
+mod pst_names;
 mod pst_password;
 mod pst_text;
 #[cfg(test)]
